@@ -214,7 +214,25 @@ struct run_options {
     std::function<void(std::uint64_t)> on_seed;
 };
 
-template <Program P, class H> int run(H& host, run_options opt);
+/// Durability for run<P>(): a model to resume from, and a journal hook.
+///
+///   jaal::durable<App> d;
+///   d.resume = jaal::replay<App>(load_journal());     // empty journal = fresh start
+///   d.journal = [&](const App::Msg& m) { append(m); };
+///   return jaal::run<App>(host, opt, std::move(d));
+///
+/// `journal` sees every message update() folds, in fold order, BEFORE it's
+/// folded: write it durably there and replay<App>() of what you wrote
+/// rebuilds the model exactly (update is pure). `resume` skips init();
+/// `resume_cmd` is one-shot work a restarted program must redo.
+template <Program P>
+struct durable {
+    std::optional<typename P::Model>                resume;
+    cmd_of<P>                                       resume_cmd = cmd_of<P>::none();
+    std::function<void(const typename P::Msg&)>     journal;
+};
+
+template <Program P, class H> int run(H& host, run_options opt, durable<P> d);
 
 /// What a host gets from run(): the reactor to watch its handles with, and
 /// a way to hand events to the program.
@@ -242,7 +260,7 @@ public:
     [[nodiscard]] reactor& native_reactor() noexcept { return r_; }
 
 private:
-    template <Program, class H2> friend int run(H2&, run_options);
+    template <Program P2, class H2> friend int run(H2&, run_options, durable<P2>);
     host_context(reactor& r, std::function<void(const event&)> e, std::function<void(int)> s)
         : r_(r), emit_(std::move(e)), stop_(std::move(s)) {}
     reactor&                           r_;
@@ -252,7 +270,7 @@ private:
 
 /// Run P on the native platform with host H. Returns the exit code.
 template <Program P, class H>
-int run(H& host, run_options opt) {
+int run(H& host, run_options opt, durable<P> d) {
     using KE = kernel_event_t<H>;
     using K  = kernel::kernel<P, KE, platform::steady_clock>;
     namespace pf = platform;
@@ -276,7 +294,11 @@ int run(H& host, run_options opt) {
 
     detail::run::forward_host<H, KE> fwd{host};
 
-    K k = K::start(fwd, platform::steady_clock{}, opt.kernel, [waker] { waker.wake(); });
+    auto wake = [waker] { waker.wake(); };
+    K k = d.resume
+        ? K::start_from(fwd, std::move(*d.resume), std::move(d.resume_cmd),
+                        platform::steady_clock{}, opt.kernel, wake, std::move(d.journal))
+        : K::start(fwd, platform::steady_clock{}, opt.kernel, wake, std::move(d.journal));
 
     // Before any of the program's messages are folded: a crash in the first
     // step should still have the seed in the log.
@@ -331,7 +353,10 @@ int run(H& host, run_options opt) {
 }
 
 template <Program P, class H>
-int run(H& host) { return run<P>(host, run_options{}); }
+int run(H& host, run_options opt) { return run<P>(host, std::move(opt), durable<P>{}); }
+
+template <Program P, class H>
+int run(H& host) { return run<P>(host, run_options{}, durable<P>{}); }
 
 /// Run P with no host of its own (signals, timers, tasks, streams).
 template <Program P>

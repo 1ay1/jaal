@@ -31,6 +31,10 @@
 
 namespace jaal {
 
+/// Tag: construct a test host from a recovered model instead of init().
+struct resume_from_t { explicit resume_from_t() = default; };
+inline constexpr resume_from_t resume_from{};
+
 /// Records effects; the part the kernel talks to.
 class recorder {
 public:
@@ -95,6 +99,15 @@ public:
     explicit headless(kernel::options opt = {},
                       std::function<void(const msg_type&)> record = {})
         : k_(kernel_type::start(rec_, C{}, with_seed(opt), {}, std::move(record))) {}
+
+    /// Resume from a recovered model (kernel::start_from): init() doesn't
+    /// run, subscribe(model) does. For testing crash recovery:
+    ///   headless<App> h2(jaal::resume_from, jaal::replay<App>(journal));
+    headless(resume_from_t, typename P::Model model,
+             cmd_of<P> resume_cmd = cmd_of<P>::none(), kernel::options opt = {},
+             std::function<void(const msg_type&)> record = {})
+        : k_(kernel_type::start_from(rec_, std::move(model), std::move(resume_cmd), C{},
+                                     with_seed(opt), {}, std::move(record))) {}
 
     headless(const headless&)            = delete;
     headless& operator=(const headless&) = delete;

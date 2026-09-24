@@ -84,7 +84,7 @@ public:
     template <std::invocable<T&> F>
         requires detail::guard::escapable<std::invoke_result_t<F, T&>>
     auto with(F&& f) -> std::invoke_result_t<F, T&> {
-        detail::guard::hold h;          // before the lock: throws with nothing held
+        [[maybe_unused]] detail::guard::hold h;          // before the lock: throws with nothing held
         std::unique_lock lk(m_);
         return std::invoke(std::forward<F>(f), value_);
     }
@@ -94,7 +94,7 @@ public:
     template <std::invocable<const T&> F>
         requires detail::guard::escapable<std::invoke_result_t<F, const T&>>
     auto read(F&& f) const -> std::invoke_result_t<F, const T&> {
-        detail::guard::hold h;
+        [[maybe_unused]] detail::guard::hold h;
         std::shared_lock lk(m_);
         return std::invoke(std::forward<F>(f), std::as_const(value_));
     }

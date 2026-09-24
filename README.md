@@ -184,6 +184,22 @@ return {m, Cmd::send(Msg{Refresh{}})};       // folded in this step
 Not `after(0ms, ...)`: that goes through the timer heap and arrives a step
 late, which costs a frame and makes tests wait on a clock.
 
+**Surviving a crash.** `update` is pure, so the messages it folded ARE the
+state. Journal them, and on restart rebuild the model and resume from it:
+
+```cpp
+jaal::durable<Ledger> d;
+auto log = load_journal();                            // yours: file, WAL, db
+if (!log.empty()) d.resume = jaal::replay<Ledger>(log);   // or replay_from(snapshot, tail)
+d.journal = [&](const Ledger::Msg& m) { append_and_fsync(m); };
+return jaal::run<Ledger>(host, {}, std::move(d));
+```
+
+Resuming skips `init()` and its effects (they already happened) but runs
+`subscribe(model)`, so timers and streams the model wants come back live.
+Put one-shot restart work (reconnect, re-announce) in `d.resume_cmd`.
+Test it without a disk: `headless<Ledger> h(jaal::resume_from, model)`.
+
 ## Building
 
 Needs a C++26 compiler with structured binding packs: GCC 16, clang 22, or

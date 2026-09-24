@@ -131,6 +131,11 @@ covered by static assertions.
   timings. One branch per event when off.
 - **Record and replay**: record the messages a run folds; replay them
   through `update` with no effects, and get the same model.
+- **Resume** (`kernel::start_from`, `durable<P>` for `run`, `resume_from`
+  for `headless`): start from a recovered model instead of `init()`.
+  With a journal hook and `replay` / `replay_from(snapshot, tail)`, that's
+  crash recovery for a queue or a ledger. jaal doesn't write the journal:
+  where and how durably to store it is the app's call.
 
 ### Platform
 

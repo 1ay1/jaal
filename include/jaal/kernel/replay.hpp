@@ -58,12 +58,25 @@ private:
     guarded<std::vector<Msg>> log_;
 };
 
+template <Program P>
+[[nodiscard]] typename P::Model replay_from(typename P::Model model,
+                                            const std::vector<typename P::Msg>& msgs);
+
 /// Replay recorded messages through P::update from P's initial model, with
 /// no effects run. Returns the final model.
 template <Program P>
 [[nodiscard]] typename P::Model replay(const std::vector<typename P::Msg>& msgs) {
     auto [model, init_cmd] = run_init<P>();
     (void)init_cmd;                          // effects are outputs: not re-run
+    return replay_from<P>(std::move(model), msgs);
+}
+
+/// Replay `msgs` on top of a model you already have: a snapshot plus the
+/// journal written since it. With a snapshot every N messages, recovery
+/// folds at most N instead of the whole history.
+template <Program P>
+[[nodiscard]] typename P::Model replay_from(typename P::Model model,
+                                            const std::vector<typename P::Msg>& msgs) {
     for (const auto& m : msgs) {
         auto [next, cmd] = detail::prog::split(P::update(std::move(model), m));
         model = std::move(next);

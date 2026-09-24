@@ -410,3 +410,26 @@ The reconciler keys streams by string, so unprefixed they reconcile to ONE
 subscription: one child's feed silently drives the other, and closing either
 stops both. `children<>` prefixes each child's keys with its id, so they
 stay distinct and stop independently (`tests/core/children_test.cpp`).
+
+## D30. Resume from a model; the journal is the app's
+
+**Decision.** `kernel::start_from(host, model, resume_cmd)` starts a kernel
+from a model the caller already has, instead of `init()`. `run<P>` takes it
+through `durable<P>{resume, resume_cmd, journal}`; `headless` through the
+`resume_from` tag. `replay_from(model, msgs)` folds a journal tail onto a
+snapshot.
+
+**Why it's core (D25).** Everything else a durable program needs can be
+written outside jaal: the journal hook already existed (`record`), and
+storage is the app's. Starting a live kernel from a given model could not:
+`start()` always ran `init()`. So this is the only piece jaal adds.
+
+**The rules.** `init()` and its Cmd are not re-run: they are outputs of the
+run that produced the model, and effects are never re-run (the replay
+rule). `subscribe(model)` does run, so timers, streams and routers the
+model asks for are live again: subscriptions are a function of the model,
+not history. Work a restart must redo is explicit, in `resume_cmd`.
+
+**Not done.** No journal format, no serializer, no fsync policy. Those
+depend on the app's storage and its Msg, and a generic codec would have to
+guess at both. (`tests/kernel/resume_test.cpp`)

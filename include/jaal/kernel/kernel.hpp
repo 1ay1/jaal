@@ -264,6 +264,27 @@ public:
                       std::move(wake), std::move(record));
     }
 
+    /// Start from a model you already have, instead of init(): the restart
+    /// half of durability. Rebuild the model with replay<P>(journal) (or
+    /// load a snapshot), then resume here.
+    ///
+    /// init() and its Cmd do NOT run: those effects already happened in the
+    /// run that produced the model, and effects are outputs, never re-run
+    /// (the same rule as replay). What must be live again comes back on its
+    /// own: subscribe(model) runs before the first fold, so timers, streams
+    /// and routers the model asks for restart. For one-shot work a resumed
+    /// program must redo (reconnect, re-announce), pass `resume_cmd`.
+    template <class H>
+    [[nodiscard]] static kernel start_from(H& host, model_type model,
+                                           cmd_type resume_cmd = cmd_type::none(),
+                                           C clock = {}, options opt = {},
+                                           std::function<void()> wake = {},
+                                           std::function<void(const msg_type&)> record = {}) {
+        require_host_for<H, P>();
+        return kernel(host, std::move(model), std::move(resume_cmd), std::move(clock), opt,
+                      std::move(wake), std::move(record));
+    }
+
     // ── input ───────────────────────────────────────────────────────────
     /// Route ONE host event through the current subscriptions, then fold
     /// the result and re-subscribe before the next event is routed. That
