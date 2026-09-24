@@ -113,6 +113,20 @@ void f() {
 // forging the key: its constructor is private, so a caller can't make one
 // to get at finish().
 void f() { (void)jaal::kernel::teardown_key{}; }
+#elif JAAL_CASE == 8
+// a missing leaf two levels down: the error must name the LEAF and the PATH
+// it was reached by, not just "Msg".
+struct CEnter {}; struct CBack {}; struct CSubmit {};
+using ComposerMsg = std::variant<CEnter, CBack, CSubmit>;
+struct Nested {
+    struct Model { int n = 0; };
+    using Msg = std::variant<ComposerMsg>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, CEnter) { return {}; }
+    static Cmd update(Model&, CBack)  { return {}; }
+    // CSubmit: no handler, and ComposerMsg didn't opt into group handling
+};
+jaal::headless<Nested> h;
 #else
 #  error "unknown JAAL_CASE"
 #endif

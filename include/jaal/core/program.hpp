@@ -23,6 +23,11 @@
 //     line to add. Overload resolution does the matching, so one generic
 //     overload (`template <class M> static Cmd update(Model&, M)`) can
 //     handle a family of cases.
+//   * Msg may be a variant OF VARIANTS, which is how a big app is organised
+//     (agentty: 232 message types in 20 domains, one reducer TU each). jaal
+//     routes down the tree to the leaves, so each leaf still gets its own
+//     checked update. A domain that would rather be handled in one place
+//     opts in by name — see handled_as_group below.
 //   * update takes the Model BY REFERENCE and returns only the Cmd. The
 //     model is changed in place; there is no pair to build and nothing to
 //     forget to return. `return {};` means "no effects".
@@ -69,33 +74,183 @@ concept updates_case = requires(typename P::Model& m, C&& c) {
     { P::update(m, std::move(c)) } -> std::convertible_to<typename P::Cmd>;
 };
 
-// Checked one case at a time so a failure names the case (and, on C++26,
-// the line to add). Returns true so it can sit in a fold expression.
+// ── the routing plan ────────────────────────────────────────────────
+//
+// A big app doesn't have one flat Msg. agentty has 232 message types in 20
+// groups (`using ComposerMsg = std::variant<ComposerEnter, ...>`, and
+// `using Msg = std::variant<ComposerMsg, StreamMsg, ...>`), so that each
+// group's reducer lives in its own translation unit and touching one leaf
+// doesn't rebuild the world.
+//
+// So routing is a TREE, and the rule at each node is the one C++ already
+// taught everyone — the most specific handler wins:
+//
+//   update(Model&, ComposerEnter)   a LEAF handler: jaal calls it
+//   update(Model&, ComposerMsg)     a GROUP handler: jaal calls it and does
+//                                   NOT descend (that domain is handled whole)
+//   neither, and it's a variant      descend and ask the same question of
+//                                   each alternative
+//   neither, and it isn't            the program is incomplete: a compile
+//                                   error naming the case AND the path to it
+//
+// A program picks per domain: leaf handlers where exhaustiveness is worth
+// having, one group handler where a domain is better handled in one place.
+// Both compose, in the same Msg.
+//
+// The plan is computed ONCE, as a type, and read TWICE: the Program concept
+// checks it, and prog::update walks it. Neither reimplements the other, so
+// "it compiled" and "it dispatches there" cannot drift apart — which is the
+// property that makes a 232-case program safe to refactor.
+
+}  // namespace detail::prog
+
+// Handling a GROUP whole is opted into BY NAME. Two reasons, and the second
+// is the one that matters:
+//
+//   * A catch-all `template <class M> update(Model&, M)` matches a group type
+//     just as happily as a leaf. If that counted as "handles this group", the
+//     group would route there and the program's own leaf handlers for that
+//     domain would silently never run — and every exhaustiveness check below
+//     it would be switched off. The code compiles, the dispatch is wrong, and
+//     the check that should have caught it is the thing that got disabled.
+//     (Measured while building this: a Catchall program sent Enter and the
+//     generic handler took it. There is no way to ask C++ "is this overload a
+//     template?" — taking the address of the exact signature succeeds either
+//     way — so inference can't be made safe here.)
+//
+//   * "This whole domain is handled in one place" is a DESIGN decision about
+//     an app's structure. It deserves a line that says so, not a property
+//     that appears because of how an overload happened to be written.
+//
+// So: specialise handled_as_group for the variant type.
+//
+//     template <> inline constexpr bool jaal::handled_as_group<StreamMsg> = true;
+//     static Cmd update(Model&, StreamMsg s);     // now reached
+//
+// Without it, jaal descends to the leaves and each one needs its own update
+// — which is the default worth having, because it's the one that's checked.
+
+/// Opt a Msg group into being handled by one update(Model&, Group) instead
+/// of per leaf. See the note above.
+template <class Group>
+inline constexpr bool handled_as_group = false;
+
+namespace detail::prog {
+
+struct at_leaf {};                       // P::update(Model&, C) exists: call it
+template <class... Ls> struct into {};    // C is a group: route each of Ls
+struct nowhere {};                       // no handler, and nothing to descend into
+
+template <class C> struct group_of            { using type = nowhere; };
+template <class... Ls> struct group_of<std::variant<Ls...>> { using type = into<Ls...>; };
+
+/// What jaal will do with a message of type C in program P.
 template <class P, class C>
-consteval bool check_case() {
-    if constexpr (!updates_case<P, C>) {
+using plan_of = std::conditional_t<
+    is_variant_v<C>,
+    std::conditional_t<::jaal::handled_as_group<C> && updates_case<P, C>,
+                       at_leaf, typename group_of<C>::type>,
+    std::conditional_t<updates_case<P, C>, at_leaf, nowhere>>;
+
+// Is every leaf under C reachable? (A variable template, not a concept:
+// concepts can't recurse.)
+template <class P, class C, class Plan> inline constexpr bool routable_with = false;
+template <class P, class C> inline constexpr bool routable_with<P, C, at_leaf> = true;
+template <class P, class C> inline constexpr bool routable_with<P, C, nowhere> = false;
+
+template <class P, class C>
+inline constexpr bool routable = routable_with<P, C, plan_of<P, C>>;
+
+template <class P, class C, class... Ls>
+inline constexpr bool routable_with<P, C, into<Ls...>> = (routable<P, Ls> && ...);
+
+// ── diagnostics ────────────────────────────────────────────────────────
+// A missing case two levels down is useless if the error just says "Msg".
+// The check carries the path it took, so the message reads
+//   Msg -> ComposerMsg -> ComposerEnter
+// which is the group whose file you need to open.
+
+template <class... Path>
+consteval auto path_text() {
+    meta::message<768> m;
+    bool first = true;
+    const auto step = [&](std::string_view n) {
+        if (!first) m += " -> ";
+        first = false;
+        m.append_short(n, 96);
+    };
+    (step(meta::type_name<Path>()), ...);
+    return m;
+}
+
+// Checked one case at a time so a failure names THAT case (and, on C++26,
+// the path and the line to add). Returns true so it can sit in a fold.
+//
+// The recursion is expressed by passing the plan AS AN ARGUMENT: overload
+// resolution picks the step, so the three cases are three overloads rather
+// than one function that has to be declared before itself.
+template <class P, class C, class... Path>
+consteval bool check_route();
+
+template <class P, class C, class... Path>
+consteval bool check_step(at_leaf) { return true; }
+
+template <class P, class C, class... Path>
+consteval bool check_step(nowhere) {
 #if defined(__cpp_static_assert) && __cpp_static_assert >= 202306L
-        static_assert(updates_case<P, C>,
-                      meta::cat<512>("jaal: '", meta::type_name<P>(),
-                                     "' has no update for message '", meta::type_name<C>(),
-                                     "'; add: static Cmd update(Model&, ",
-                                     meta::type_name<C>(), ")"));
+    static_assert(routable<P, C>,
+                  meta::cat<1024>("jaal: '", meta::type_name<P>(),
+                                  "' has no update for message '", meta::type_name<C>(),
+                                  "' (reached as ", path_text<Path..., C>().view(),
+                                  "); add: static Cmd update(Model&, ",
+                                  meta::type_name<C>(), ")"));
 #else
-        static_assert(updates_case<P, C>,
-                      "jaal: a Msg case has no update(Model&, Case) returning Cmd");
+    static_assert(routable<P, C>,
+                  "jaal: a Msg case has no update(Model&, Case) returning Cmd");
 #endif
-    }
     return true;
+}
+
+template <class P, class C, class... Path, class... Ls>
+consteval bool check_step(into<Ls...>) {
+    return (check_route<P, Ls, Path..., C>() && ...);
+}
+
+template <class P, class C, class... Path>
+consteval bool check_route() {
+    return check_step<P, C, Path...>(plan_of<P, C>{});
 }
 
 template <class P, class V> inline constexpr bool updates_every_case = false;
 template <class P, class... Cs>
-inline constexpr bool updates_every_case<P, std::variant<Cs...>> = (check_case<P, Cs>() && ...);
+inline constexpr bool updates_every_case<P, std::variant<Cs...>> =
+    (check_route<P, Cs, std::variant<Cs...>>() && ...);
 
 template <class P>
 concept has_init = requires(typename P::Model& m) {
     { P::init(m) } -> std::convertible_to<typename P::Cmd>;
 };
+
+// The runtime half of the plan. `route` is the one function that decides
+// where a message goes, and it asks plan_of the same question the concept
+// did — so a program that compiles dispatches exactly where the check said.
+template <class P, class C>
+[[nodiscard]] typename P::Cmd route(typename P::Model& m, C&& c) {
+    using plan = plan_of<P, std::remove_cvref_t<C>>;
+    if constexpr (std::same_as<plan, at_leaf>) {
+        return P::update(m, std::forward<C>(c));
+    } else if constexpr (std::same_as<plan, nowhere>) {
+        return {};                    // unreachable for a Program: check_route
+                                      // already failed, and this keeps that to
+                                      // ONE error instead of a second here.
+    } else {
+        return std::visit(
+            [&]<class L>(L&& leaf) -> typename P::Cmd {
+                return route<P>(m, std::forward<L>(leaf));
+            },
+            std::forward<C>(c));
+    }
+}
 
 template <class P>
 concept has_subscribe = requires(const typename P::Model& m) {
@@ -173,16 +328,23 @@ template <Program P>
 }
 
 /// Fold one message into the model, in place; return its Cmd.
+///
+/// The ROOT is always descended. `Msg` is the program's message SET, not a
+/// message: a handler taking the whole `Msg` would be a program with no
+/// cases, and — worse — a generic `template <class M> update(Model&, M)`
+/// matches `Msg` too, so treating the root as a leaf would silently swallow
+/// every message at the top and disable every exhaustiveness check below it.
+/// The concept folds over the root's alternatives for the same reason, so
+/// the two agree by construction.
+///
+/// Below the root, `route` walks the plan the concept checked
+/// (detail::prog::plan_of): a leaf handler is called, a group with its own
+/// handler is called whole, anything else is descended into.
 template <Program P>
 [[nodiscard]] typename P::Cmd update(typename P::Model& m, typename P::Msg msg) {
     return std::visit(
         [&]<class C>(C&& c) -> typename P::Cmd {
-            // Always true for a Program; the check keeps a missing case to
-            // ONE error (check_case's) instead of a second from this call.
-            if constexpr (detail::prog::updates_case<P, std::remove_cvref_t<C>>)
-                return P::update(m, std::forward<C>(c));
-            else
-                return {};
+            return detail::prog::route<P>(m, std::forward<C>(c));
         },
         std::move(msg));
 }

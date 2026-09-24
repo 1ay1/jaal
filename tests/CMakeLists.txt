@@ -36,6 +36,7 @@ jaal_static_test(layering_umbrellas layering/umbrellas.cpp)
 jaal_test(core_frozen_test core/frozen_test.cpp)
 jaal_test(core_cmd_test core/cmd_test.cpp)
 jaal_test(core_sub_test core/sub_test.cpp)
+jaal_test(core_routing_test core/routing_test.cpp)
 jaal_test(core_child_test core/child_test.cpp)
 jaal_test(core_rng_test core/rng_test.cpp)
 jaal_test(core_children_test core/children_test.cpp)
@@ -144,6 +145,9 @@ jaal_compile_fail(NAME program_effect_not_declared SOURCE compile_fail/kernel.cp
 # shutdown order: the kernel can only be finished BY teardown, in order
 jaal_compile_fail(NAME kernel_no_bare_finish SOURCE compile_fail/kernel.cpp CASE 6
                   MATCH "(too few arguments|no matching (member )?function|candidate function not viable)")
+# nested Msg: the error names the leaf AND the path to it
+jaal_compile_fail(NAME program_missing_leaf_in_group SOURCE compile_fail/kernel.cpp CASE 8
+                  MATCH "has no update for message '[^']*CSubmit' \\(reached as .*CEnter.*-> .*CSubmit\\)")
 jaal_compile_fail(NAME teardown_key_not_forgeable SOURCE compile_fail/kernel.cpp CASE 7
                   MATCH "(private|calling a private constructor|is private)")
 

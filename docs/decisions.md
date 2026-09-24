@@ -672,3 +672,58 @@ own exception escaping `run()`, not by silently abandoning shutdown.
 `tests/kernel/teardown_test.cpp` checks the runtime half: a host whose
 callback throws still gets `release()`, in order, with the signals already
 restored.
+
+## D36. Routing is a tree; groups opt in by name
+
+**Decision.** `Msg` may be a `std::variant` of `std::variant`s. jaal routes a
+message down that tree to its leaf, and each leaf needs its own
+`update(Model&, Leaf)`. A whole domain can instead be handled by one
+`update(Model&, DomainMsg)`, but only if the domain says so:
+
+```cpp
+template <> inline constexpr bool jaal::handled_as_group<StreamMsg> = true;
+```
+
+**Why a tree at all.** Measured on agentty's real shape (232 message types).
+A flat `Msg` with every leaf inline was what agentty had first, and their own
+comment records the cost: `sizeof(Msg)` pinned by the heaviest leaf, an N×N
+dispatch table, and **~19 s to rebuild after touching one leaf**. So they
+hand-grouped the leaves into 20 domain variants with a reducer per TU. A
+runtime that can't express that shape can't host the app. Reproduced with a
+200-message program: one domain TU rebuilds in **1.19 s**, and the TU holding
+the loop went from 6.9 s (flat) to **1.77 s** (tree), because dispatch became
+a tree of small visits instead of one wide one.
+
+**Why groups opt in by NAME, not by having a handler.** This is the part I
+got wrong twice before measuring. A catch-all
+`template <class M> update(Model&, M)` matches a *group* type as happily as a
+leaf. If "has a handler for this group" were inferred, that catch-all would
+claim every domain: the program's own leaf handlers would silently never run,
+and every exhaustiveness check below the group would be switched off. The
+code compiles, the dispatch is wrong, and the check that should have caught
+it is the thing that got disabled. I hit exactly that while writing
+`routing_test.cpp` — a Catchall program sent `Enter` and the generic handler
+took it.
+
+And C++ can't distinguish the two cases: `static_cast<Cmd(*)(Model&, G)>(&P::update)`
+succeeds whether the overload is a template or not (verified). So inference
+can't be made safe, and a name is better anyway: "this whole domain is
+handled in one place" is a decision about an app's structure and deserves a
+line that says so.
+
+**The root is always descended.** `Msg` is the message *set*, not a message.
+A handler for the whole `Msg` would be a program with no cases, and a generic
+handler matches `Msg` too — so the root is folded over its alternatives
+unconditionally, and the concept and the dispatcher agree by construction.
+
+**One plan, read twice.** `plan_of<P, C>` answers "leaf, group, or descend?"
+as a type. The `Program` concept walks it to check reachability; `prog::route`
+walks it to dispatch. Neither reimplements the other, so "it compiled" and
+"it dispatches there" cannot drift apart — the property that makes a 232-case
+program safe to refactor.
+
+**Diagnostics.** A missing leaf carries the path it was reached by:
+`jaal: 'App' has no update for message 'CSubmit' (reached as
+variant<variant<CEnter, CBack, CSubmit>> -> variant<CEnter, CBack, CSubmit>
+-> CSubmit); add: static Cmd update(Model&, CSubmit)` — which is the domain
+whose file you open. (`tests/compile_fail/kernel.cpp` case 8.)
