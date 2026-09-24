@@ -44,7 +44,7 @@ static_assert(std::is_same_v<make_row<fx::quit, fx::quit, fx::after>, make_row<f
 static_assert(std::is_same_v<make_row<>, row<>>);
 static_assert(std::is_same_v<row_union<make_row<fx::quit>, make_row<beep, fx::quit>>,
                              make_row<beep, fx::quit>>);
-static_assert(jaal::core_fx::size == 4);
+static_assert(jaal::core_fx::size == 5);   // quit, after, task, now, random
 
 static_assert(subrow_of<make_row<fx::after>, jaal::core_fx>);
 static_assert(subrow_of<row<>, jaal::core_fx>);

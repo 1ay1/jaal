@@ -32,6 +32,7 @@
 
 #include "../meta/fixed_string.hpp"
 #include "effect.hpp"
+#include "rng.hpp"
 #include "sendable.hpp"
 #include "sink.hpp"
 
@@ -273,6 +274,41 @@ struct now {
         template <class F>
             requires std::is_invocable_r_v<Msg, F&, time_point>
         [[nodiscard]] static Self now(F f) { return Self(type<Msg>{std::move(f)}); }
+    };
+};
+
+/// Draw random numbers and deliver them as a message.
+///
+/// Elm's Random.generate. Like `now`, this is a core effect because the
+/// alternative is a global generator that replay and sim can't control: a
+/// program that reads one directly isn't reproducible, and the bug you're
+/// chasing never comes back. The KERNEL owns the stream, so the same seed
+/// gives the same run (jaal::sim), and a recorded run replays exactly
+/// (jaal::replay folds the messages, so the draws are already in them).
+///
+/// The mapper runs on the loop thread, synchronously, so it may capture.
+///
+///   return {m, Cmd::random([](jaal::rng& r) -> Msg {
+///                  return Rolled{r.in(1, 6)};
+///              })};
+struct random {
+    static constexpr std::string_view name = "random";
+    template <class Msg> struct type {
+        // Takes the rng by reference: one effect can draw as much as it
+        // needs (a shuffle, a whole level) from one stream.
+        std::function<Msg(rng&)> to_msg;
+    };
+    template <class F, class M>
+    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
+        using To = std::invoke_result_t<F, M>;
+        return {[g = std::move(e.to_msg), f = std::forward<F>(f)](rng& r) -> To {
+            return f(g(r));
+        }};
+    }
+    template <class Self, class Msg> struct ctors {
+        template <class F>
+            requires std::is_invocable_r_v<Msg, F&, rng&>
+        [[nodiscard]] static Self random(F f) { return Self(type<Msg>{std::move(f)}); }
     };
 };
 

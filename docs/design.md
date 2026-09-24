@@ -205,8 +205,8 @@ template <class... Rs> using row_union_t = /* dedup(concat(...)) */;
 The core row is the set of effects the kernel runs itself:
 
 ```cpp
-using core_fx  = row<fx::quit, fx::after, fx::task, fx::isolated_task>;
-using core_src = row<fx::every>;          // sources the kernel runs itself
+using core_fx  = row<fx::quit, fx::after, fx::task, fx::now, fx::random>;
+using core_src = row<fx::every, fx::stream>;   // sources the kernel runs itself
 ```
 
 Hosts extend it. maya declares its terminal effects in maya:
@@ -475,6 +475,19 @@ concept handles = requires(H& h, typename D::template type<Msg> e, context<Msg>&
 
 - Dispatch is `std::visit` over a closed variant. No virtual calls, no
   type erasure, no lookup table.
+
+Two core effects exist only because the kernel owns the thing they read:
+
+- `now(f)` reads the kernel's `Clock`, not `std::chrono`, so a test host
+  controls it (`sim_clock`).
+- `random(f)` draws from the kernel's `jaal::rng`, seeded from
+  `options::random_seed` or, when that's 0, from the OS. The seed actually
+  used is reported by `seed_used()`, and `run_options::on_seed` hands it to
+  the program at start-up: log it, pass it back, and the run's draws repeat
+  exactly. `sim` derives it from the sim seed, so ONE seed still controls
+  the whole run; `headless` and `given` fix it, so tests are deterministic.
+  Both draw synchronously on the loop thread, in the order the effects were
+  returned.
 
 ### 4.4 Timers
 

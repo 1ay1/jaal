@@ -24,7 +24,7 @@ namespace {
 
 // ── diff ─────────────────────────────────────────────────────────────────
 struct Opaque { int x; };                                // no ==, a struct: walked
-struct NoEq { NoEq() = default; NoEq(const NoEq&) = default; private: int x = 0; };  // opaque
+struct NoEq { NoEq() = default; NoEq(const NoEq&) = default; private: [[maybe_unused]] int x = 0; };  // opaque
 struct Inner { bool on = false; double level = 0; bool operator==(const Inner&) const = default; };
 struct Model {
     int         n = 0;

@@ -206,6 +206,12 @@ struct run_options {
     /// Stop with 128+signo on interrupt/terminate/hangup that the program
     /// didn't handle. Turn off for a program that must never stop that way.
     bool default_signal_exit = true;
+
+    /// Told the seed Cmd::random ran from, once, at start-up. A real run
+    /// picks its own seed (kernel::options::random_seed == 0), so a program
+    /// that wants its bugs to be reproducible logs it here and passes it
+    /// back as random_seed to replay the same draws. Unset = not reported.
+    std::function<void(std::uint64_t)> on_seed;
 };
 
 template <Program P, class H> int run(H& host, run_options opt);
@@ -271,6 +277,10 @@ int run(H& host, run_options opt) {
     detail::run::forward_host<H, KE> fwd{host};
 
     K k = K::start(fwd, platform::steady_clock{}, opt.kernel, [waker] { waker.wake(); });
+
+    // Before any of the program's messages are folded: a crash in the first
+    // step should still have the seed in the log.
+    if (opt.on_seed) opt.on_seed(k.seed_used());
 
     // Host events arriving from on_ready() route immediately, one at a time.
     host_context<H> cx(

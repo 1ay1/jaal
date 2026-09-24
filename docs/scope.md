@@ -67,6 +67,7 @@ subscription lifecycle. Everything else is a library on top of `task` and
 | `task(body, args...)` | effect | run once on the worker pool, result as a Msg |
 | `task(isolated, body, args...)` | effect | same, on its own thread (for work that may hang) |
 | `now(f)` | effect | the kernel's clock as a Msg (simulated in tests) |
+| `random(f)` | effect | draws from the kernel's seeded generator as a Msg (reproducible) |
 | `every(d, msg)` | source | repeating timer; keeps its phase across model changes |
 | `stream(key, body, args...)` | source | long-running work; runs while subscribed, cancelled when not |
 | `on_signal(set, f)` | router | Ctrl+C, terminate, hangup, resize, child as messages |
@@ -203,14 +204,16 @@ These are **deliberate** — each one is someone else's job or a later layer.
   impure.
 - **A stable ABI.** jaal is header-heavy templates plus a small static
   library. Pin a version.
-- **Pre-C++26 compilers.** Needs GCC 16 or clang 22 for the deep
-  `Sendable` check (structured binding packs). MSVC isn't supported yet.
+- **Pre-C++26 compilers.** Needs GCC 16, clang 22, or Apple clang 21 for the
+  deep `Sendable` check (structured binding packs). MSVC isn't supported yet.
 - **Guaranteed purity.** C++ can't prove `update` doesn't print or read a
   global. jaal can't stop it; replay makes violations show up.
 
 ## Planned, not built
 
-- **A real run on macOS**, and on Windows outside wine.
+- **A real run on Windows outside wine.** macOS is done: the whole suite,
+  including the kqueue conformance tests and real signal delivery, runs on
+  arm64 macOS under debug, asan, tsan and release.
 - **Simulated I/O** (sockets, files) for the sim, once there are I/O
   effects in a library to simulate.
 - **Fuzzing** of the reconciler, timer heap and routing.

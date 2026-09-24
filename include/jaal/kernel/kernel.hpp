@@ -37,6 +37,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <random>
 #include <stop_token>
 #include <string>
 #include <type_traits>
@@ -157,6 +158,20 @@ const RE* as(const HE& ev) noexcept {
 }
 }  // namespace detail::host_ev
 
+namespace detail::rnd {
+/// A seed for a REAL run, when the caller didn't fix one. Mixes the OS
+/// entropy source with the clock, so two kernels started in the same
+/// millisecond still differ. Never used when options::random_seed is set:
+/// tests and sim stay deterministic.
+inline std::uint64_t pick_seed() {
+    std::random_device d;
+    std::uint64_t s = (static_cast<std::uint64_t>(d()) << 32) ^ d();
+    s ^= static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    return s ? s : 0x9E3779B97F4A7C15ULL;   // never 0: that means "unset"
+}
+}  // namespace detail::rnd
+
 // ── kernel ───────────────────────────────────────────────────────────────
 namespace kernel {
 
@@ -196,6 +211,13 @@ struct options {
     /// Called on the loop thread for each fold, effect, subscribe, fault
     /// and step (kernel/trace.hpp). One branch per event when unset.
     trace_hook trace;
+
+    /// The seed for Cmd::random. 0 (the default) means "pick one": the
+    /// kernel draws from the OS so a real run differs each time, and
+    /// REPORTS it through seed_used() so a run can be reproduced by passing
+    /// it back. A test host (headless, sim) fixes it instead, so the same
+    /// test always draws the same numbers.
+    std::uint64_t random_seed = 0;
 };
 
 /// Marker for a host with no input events (a headless server, a test).
@@ -329,6 +351,15 @@ public:
     [[nodiscard]] bool quitting() const noexcept { return exit_.has_value(); }
     [[nodiscard]] C& clock() noexcept { return clock_; }
 
+    /// The seed Cmd::random is running from. Pass it back as
+    /// options::random_seed to reproduce this run's draws. Log it on a
+    /// crash and the run comes back.
+    [[nodiscard]] std::uint64_t seed_used() const noexcept { return seed_used_; }
+
+    /// The kernel's random stream, for a host that needs draws from the
+    /// same reproducible sequence. Loop thread only.
+    [[nodiscard]] rng& random() noexcept { return rng_; }
+
     /// Faults reported so far (update, subscribe, effect or task).
     [[nodiscard]] std::uint64_t fault_count() const noexcept { return faults_; }
 
@@ -361,6 +392,8 @@ private:
         : record_(std::move(record)),
           clock_(std::move(clock)),
           opt_(opt),
+          rng_(opt.random_seed ? opt.random_seed : detail::rnd::pick_seed()),
+          seed_used_(rng_.state()),
           model_(std::move(m)),
           inbox_(wake, opt.mailbox),
           task_faults_(std::make_shared<task_fault_box>()),
@@ -562,6 +595,11 @@ private:
                 const auto d = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     clock_.now().time_since_epoch());
                 pending_.push_back(x.to_msg(std::chrono::steady_clock::time_point(d)));
+            } else if constexpr (std::same_as<U, payload_t<fx::random, msg_type>>) {
+                // The KERNEL's stream, so a seed reproduces the whole run.
+                // Synchronous, on the loop thread: the draw happens now, in
+                // the order the effects were returned.
+                pending_.push_back(x.to_msg(rng_));
             } else {
                 // A non-core effect: only reachable when the program's row
                 // has one, and HostFor has already checked the host handles
@@ -831,6 +869,8 @@ private:
     std::function<void(const msg_type&)> record_;   // first: set before the ctor body folds
     C                   clock_;
     options             opt_;
+    rng                 rng_;
+    std::uint64_t       seed_used_ = 0;
     model_type          model_;
     inbox<msg_type>     inbox_;
     std::shared_ptr<task_fault_box> task_faults_;

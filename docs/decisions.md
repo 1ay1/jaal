@@ -286,7 +286,8 @@ failure.
 **Decision.** An effect or source is built in only if it can't be written
 outside jaal, because it needs the kernel's clock, worker pool, fold or
 subscription lifecycle. The core is: `quit`, `after`, `task` (pool or
-isolated), `now`, `every`, `stream`, plus `on_signal` from `run()`.
+isolated), `now`, `random`, `every`, `stream`, plus `on_signal` from
+`run()`.
 
 **Alternatives.** Ship common effects (HTTP, files, processes, logging) in
 the core.
@@ -297,6 +298,10 @@ watcher, a socket reader or a download is a library, not a kernel change.
 `isolated_task` was merged into `task` as a placement, since it differed
 only in which thread runs it. `now` was added because a task reading
 `std::chrono` reads the real clock, which the test host can't control.
+`random` was added for the same reason: a program drawing from its own
+generator isn't reproducible, so a sim seed wouldn't reproduce a run and a
+bug found by `explore()` couldn't be replayed. The kernel owns the stream
+and reports the seed it used (`seed_used()`), so a real crash comes back.
 
 ## D26. Invalid states are unrepresentable
 

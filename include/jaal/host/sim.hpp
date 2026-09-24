@@ -56,6 +56,7 @@
 #include <utility>
 #include <vector>
 
+#include "../core/rng.hpp"
 #include "../kernel/executor.hpp"
 #include "../kernel/kernel.hpp"
 #include "../platform/clock.hpp"
@@ -64,42 +65,10 @@
 namespace jaal {
 
 // ── the RNG ──────────────────────────────────────────────────────────────
-/// splitmix64: tiny, fast, and the same sequence everywhere.
-class sim_rng {
-public:
-    explicit sim_rng(std::uint64_t seed) noexcept : s_(seed) {}
-
-    std::uint64_t next() noexcept {
-        std::uint64_t z = (s_ += 0x9e3779b97f4a7c15ULL);
-        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-        z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-        return z ^ (z >> 31);
-    }
-
-    /// Uniform in [0, n). n = 0 gives 0. Multiply-shift (Lemire): no
-    /// division, bias below n / 2^64, which no test can see.
-    std::uint64_t below(std::uint64_t n) noexcept {
-        if (n == 0) return 0;
-        return mul_hi(next(), n);
-    }
-
-    /// Uniform in [0, 1).
-    double unit() noexcept { return static_cast<double>(next() >> 11) * 0x1.0p-53; }
-
-    bool chance(double p) noexcept { return p > 0 && unit() < p; }
-
-private:
-    // High 64 bits of a 64x64 multiply, in plain C++ (no __int128).
-    static std::uint64_t mul_hi(std::uint64_t a, std::uint64_t b) noexcept {
-        const std::uint64_t al = a & 0xffffffffu, ah = a >> 32;
-        const std::uint64_t bl = b & 0xffffffffu, bh = b >> 32;
-        const std::uint64_t ll = al * bl, lh = al * bh, hl = ah * bl, hh = ah * bh;
-        const std::uint64_t mid = (ll >> 32) + (lh & 0xffffffffu) + (hl & 0xffffffffu);
-        return hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
-    }
-
-    std::uint64_t s_;
-};
+/// The sim's randomness is jaal::rng (core/rng.hpp): one splitmix64 in the
+/// project, so a sim seed and a Cmd::random seed mean the same thing. Kept
+/// as a name because tests and reports talk about "the sim rng".
+using sim_rng = rng;
 
 // ── options and results ──────────────────────────────────────────────────
 struct sim_options {
@@ -381,6 +350,11 @@ private:
     kernel::options kernel_opts(const sim_options& o) {
         kernel::options k = o.kernel;
         k.fold_budget = 1;
+        // Cmd::random draws from the sim's seed too, unless the test fixed
+        // one: ONE seed controls the whole run, which is the sim's promise.
+        // Split rather than reused, so the program's draws don't consume the
+        // scheduler's and vice versa.
+        if (!k.random_seed) k.random_seed = jaal::rng{seed_}.split().state();
         if (!k.faults)
             k.faults = [this](const fault& f) {
                 report_.faults.push_back(std::string(to_string(f.site)) + ": " + f.what);

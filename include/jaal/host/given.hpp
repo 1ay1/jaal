@@ -41,6 +41,7 @@
 #include "../core/core_fx.hpp"
 #include "../core/diff.hpp"
 #include "../core/program.hpp"
+#include "../core/rng.hpp"
 #include "../core/sink.hpp"
 #include "../core/sub.hpp"
 
@@ -65,6 +66,10 @@ public:
     using msg_type   = typename P::Msg;
     using cmd_type   = cmd_of<P>;
     using time_point = fx::now::time_point;
+
+    /// The seed `random` effects draw from unless with_seed() says otherwise.
+    /// Fixed, so a test that rolls dice asserts on exact numbers.
+    static constexpr std::uint64_t default_seed = 0x1234'5678'9ABC'DEF0ULL;
 
     /// Start from init() (its Cmd is the last Cmd, so settle() runs it).
     given() {
@@ -102,6 +107,10 @@ public:
 
     /// The time a `now` effect gets during settle().
     given& at_time(time_point t) { now_ = t; return *this; }
+
+    /// The seed `random` effects draw from during settle(). Call before the
+    /// draws you care about; it restarts the stream.
+    given& with_seed(std::uint64_t seed) { rng_ = rng{seed}; return *this; }
 
     /// Run tasks and `now` from the last Cmd inline, fold their messages,
     /// repeat for what those return. Stops after `max_rounds` rounds so a
@@ -254,6 +263,9 @@ private:
             } else if constexpr (in_row<fx::now, typename cmd_type::row_type>
                                  && std::same_as<U, payload_t<fx::now, msg_type>>) {
                 produced.push_back(x.to_msg(now_));
+            } else if constexpr (in_row<fx::random, typename cmd_type::row_type>
+                                 && std::same_as<U, payload_t<fx::random, msg_type>>) {
+                produced.push_back(x.to_msg(rng_));
             }
         }, std::move(c.inner));
     }
@@ -264,6 +276,7 @@ private:
     std::vector<timer>        afters_;
     std::optional<int>        quit_;
     time_point                now_{};
+    rng                       rng_{default_seed};
     std::size_t               folds_ = 0;
     std::vector<std::string>  failures_;
 };

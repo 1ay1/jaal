@@ -1,5 +1,5 @@
-// jaal::platform::kqueue_reactor — implementation. Compiled, not yet run:
-// see the STATUS note in the header.
+// jaal::platform::kqueue_reactor — implementation. Run on macOS (arm64)
+// against the full conformance suite.
 
 #include <jaal/platform/darwin/kqueue_reactor.hpp>
 
@@ -21,12 +21,18 @@ namespace {
 // udata, so 0 never names a registration.
 constexpr std::uintptr_t kWakeIdent = 1;
 
-// kevent takes a timespec, which can hold any millisecond count we get, so
-// there's no narrowing to guard. A negative count means "don't block".
+// Longest single kevent() wait. Darwin's kevent rejects a timespec whose
+// tv_sec exceeds 100'000'000 with EINVAL (found on the first real-hardware
+// run: wait(milliseconds::max()) failed instead of blocking). So a longer
+// timeout is waited in chunks of at most one day; wait() loops until the
+// caller's full timeout has elapsed. A negative count means "don't block".
+constexpr std::int64_t kMaxChunkMs = 24LL * 60 * 60 * 1000;
+
 bool to_timespec(std::optional<std::chrono::milliseconds> t, timespec& ts) noexcept {
     if (!t) return false;                        // nullptr timeout: wait forever
-    auto c = t->count();
+    std::int64_t c = t->count();
     if (c < 0) c = 0;
+    if (c > kMaxChunkMs) c = kMaxChunkMs;
     ts.tv_sec  = static_cast<time_t>(c / 1000);
     ts.tv_nsec = static_cast<long>((c % 1000) * 1'000'000);
     return true;
@@ -165,6 +171,8 @@ result<wait_result> kqueue_reactor::wait(std::optional<std::chrono::milliseconds
         const bool bounded = to_timespec(left, ts);
         n = ::kevent(s.kq, nullptr, 0, evs, static_cast<int>(std::size(evs)),
                      bounded ? &ts : nullptr);
+        // A chunk ran out but the caller's timeout didn't: wait again.
+        if (n == 0 && left && left->count() > kMaxChunkMs) continue;
         if (n >= 0) break;
         if (errno != EINTR) return std::unexpected(error::from_errno(errno, "kevent wait"));
     }

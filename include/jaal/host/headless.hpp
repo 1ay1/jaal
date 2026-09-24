@@ -88,9 +88,13 @@ public:
     using kernel_type = kernel::kernel<P, Event, C>;
     using msg_type    = typename P::Msg;
 
+    /// A test host is deterministic: Cmd::random draws from this unless the
+    /// test sets kernel::options::random_seed itself.
+    static constexpr std::uint64_t default_seed = 0x1234'5678'9ABC'DEF0ULL;
+
     explicit headless(kernel::options opt = {},
                       std::function<void(const msg_type&)> record = {})
-        : k_(kernel_type::start(rec_, C{}, opt, {}, std::move(record))) {}
+        : k_(kernel_type::start(rec_, C{}, with_seed(opt), {}, std::move(record))) {}
 
     headless(const headless&)            = delete;
     headless& operator=(const headless&) = delete;
@@ -147,6 +151,11 @@ public:
     int finish() && { return std::move(k_).finish(); }
 
 private:
+    static kernel::options with_seed(kernel::options o) noexcept {
+        if (!o.random_seed) o.random_seed = default_seed;
+        return o;
+    }
+
     bool idle_for_a_moment() {
         // Give pool workers a chance to post; if nothing shows up, idle.
         for (int i = 0; i < 20; ++i) {

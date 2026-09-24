@@ -259,6 +259,46 @@ int rng_is_fixed() {
     return 0;
 }
 
+// ── one seed controls the program's draws too ─────────────────────────────
+// The sim's promise is that ONE seed reproduces the whole run. A program
+// using Cmd::random is part of that run, so its draws must come from the
+// sim seed as well, and two sims with the same seed must roll identically.
+struct Dice {
+    struct Model { std::vector<int> rolls; };
+    struct Roll {};
+    struct Rolled { int face; };
+    using Msg = std::variant<Roll, Rolled>;
+    using Cmd = jaal::CoreCmd<Msg>;
+
+    static Model init() { return {}; }
+
+    static std::pair<Model, Cmd> update(Model m, Msg msg) {
+        if (std::holds_alternative<Roll>(msg))
+            return {m, Cmd::random([](jaal::rng& r) -> Msg {
+                        return Rolled{static_cast<int>(r.in(1, 6))};
+                    })};
+        m.rolls.push_back(std::get<Rolled>(msg).face);
+        return {m, Cmd::none()};
+    }
+};
+
+std::vector<int> sim_rolls(std::uint64_t seed) {
+    jaal::sim<Dice> s(seed);
+    for (int i = 0; i < 12; ++i)
+        s.at(std::chrono::milliseconds(i), Dice::Roll{});
+    s.run();
+    return s.model().rolls;
+}
+
+int random_follows_the_sim_seed() {
+    const auto a = sim_rolls(4);
+    CHECK(a.size() == 12);
+    for (int f : a) CHECK(f >= 1 && f <= 6);
+    CHECK(sim_rolls(4) == a);              // same seed, same rolls
+    CHECK(sim_rolls(5) != a);              // a different seed rolls differently
+    return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -270,6 +310,7 @@ int main() {
     if (int r = limits())              return r;
     if (int r = injected_faults())     return r;
     if (int r = streams())             return r;
+    if (int r = random_follows_the_sim_seed()) return r;
     std::puts("sim: ok");
     return 0;
 }

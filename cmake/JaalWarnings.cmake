@@ -5,6 +5,12 @@
 
 add_library(jaal_warnings INTERFACE)
 
+# The C++26 flag CMake didn't know about (CMakeLists.txt, JAAL_STD_FLAG).
+# Comes after CMake's own -std=c++23, so it wins.
+if(JAAL_STD_FLAG)
+    target_compile_options(jaal_warnings INTERFACE ${JAAL_STD_FLAG})
+endif()
+
 if(MSVC)
     target_compile_options(jaal_warnings INTERFACE
         /W4 /permissive- /Zc:__cplusplus /Zc:preprocessor

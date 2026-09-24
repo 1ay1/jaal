@@ -8,9 +8,13 @@
 //
 // Declared with NO OS headers; implemented in src/platform/darwin/.
 //
-// STATUS: this backend compiles for arm64 macOS (checked with a zig
-// cross-compile) but has NOT been run: there's no Mac in the loop. It
-// passes the conformance suite only once someone runs it on macOS.
+// STATUS: run on arm64 macOS (Apple clang, macOS 27) against the full
+// conformance suite, plus the debug, asan, tsan and release presets.
+//
+// One rule this backend learned the hard way: kevent rejects a timespec
+// whose tv_sec is huge (EINVAL), so a very long wait can't be passed
+// straight through. wait() clamps each kevent to at most a day and loops
+// until the caller's own timeout is spent (D16: conversions saturate).
 
 #include <chrono>
 #include <cstdint>

@@ -23,6 +23,20 @@ option(JAAL_UNITY          "Unity build (for CI; slower incremental)"    OFF)
 # ── language level ───────────────────────────────────────────────────────
 # C++26 where the compiler advertises it, C++23 otherwise (MSVC). The public
 # target only REQUIRES C++23, so consumers on 23 still work.
+# A CMake older than the compiler (e.g. CMake 3.31 with AppleClang 21) doesn't
+# list cxx_std_26 even though the compiler takes -std=c++2c; the build then
+# silently drops to C++23 and leans on -Wc++26-extensions. For jaal's OWN
+# build, probe the flag and pass it directly (JAAL_STD_FLAG). Consumers are
+# unaffected: the public target still only requires C++23.
+set(JAAL_STD_FLAG "")
+if(PROJECT_IS_TOP_LEVEL AND NOT MSVC
+   AND NOT "cxx_std_26" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-std=c++2c" JAAL_HAS_CXX2C)
+    if(JAAL_HAS_CXX2C)
+        set(JAAL_STD_FLAG "-std=c++2c")
+    endif()
+endif()
 if("cxx_std_26" IN_LIST CMAKE_CXX_COMPILE_FEATURES AND NOT MSVC)
     set(JAAL_CXX_STANDARD 26)
 else()

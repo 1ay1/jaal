@@ -91,9 +91,45 @@ auto step = t.first_bad([](const Model& m) { return m.shown >= m.query || m.show
 puts(jaal::to_string(t.changes(*step)).c_str());   // ".1: 2 -> 1"
 ```
 
+## Randomness you can replay
+
+A program that reads its own generator can't be replayed: the bug you're
+chasing never comes back. So drawing is an effect, and the kernel owns the
+stream (Elm's `Random.generate`):
+
+```cpp
+static std::pair<Model, Cmd> update(Model m, Msg msg) {
+    if (std::holds_alternative<Roll>(msg))
+        return {m, Cmd::random([](jaal::rng& r) -> Msg {
+                       return Rolled{r.in(1, 6)};       // or shuffle a deck
+                   })};
+    ...
+}
+```
+
+`jaal::rng` is splitmix64: 8 bytes of state and the same sequence on every
+platform and standard library (the distributions in `<random>` are not
+portable, which would break replay). It has `next`, `below`, `in`,
+`uniform`, `between`, `chance`, `pick` and `split`.
+
+A real run picks its own seed and reports it, so a crash is reproducible:
+
+```cpp
+jaal::run_options o;
+o.on_seed = [](std::uint64_t s) { log("seed %llu", s); };   // log it
+o.kernel.random_seed = from_the_log;                       // replay it
+```
+
+In tests the seed is fixed instead: `headless` and `given` default to one,
+and `sim` derives it from the sim seed, so one seed still controls the whole
+run.
+
 ## Building
 
-Needs GCC 16 or clang 22 (C++26), CMake 3.29+, Ninja.
+Needs a C++26 compiler with structured binding packs: GCC 16, clang 22, or
+Apple clang 21 (Xcode 26). CMake 3.29+, Ninja. On macOS, jaal passes
+`-std=c++2c` itself when CMake is older than the compiler and doesn't know
+the flag yet.
 
 ```sh
 cmake --preset dev          # debug; uses ccache and mold/lld when installed
@@ -104,10 +140,12 @@ ctest --preset dev
 Other presets: `clang`, `asan`, `tsan`, `release`, `mingw` (Windows cross
 build with llvm-mingw; tests run under wine).
 
-To run the whole matrix (gcc, clang, asan, tsan, windows under wine):
+To run the whole matrix:
 
 ```sh
-scripts/check.sh
+scripts/check.sh              # Linux: gcc, clang, asan, tsan, windows-under-wine
+                             # macOS: clang, asan, tsan, release
+scripts/check.sh asan tsan   # or name the presets you want
 ```
 
 It prints one line per preset and exits non-zero if any fails. About
@@ -115,14 +153,16 @@ It prints one line per preset and exits non-zero if any fails. About
 
 ## What's tested where
 
-| | Linux | Windows | macOS |
+| | Linux | macOS | Windows |
 |---|---|---|---|
-| core, kernel | runs | runs (wine) | compiles |
-| reactor | epoll + poll, run | wait_reactor, run under wine | kqueue, compiles only |
-| signals | run | handler run directly; not yet via a real console | compiles only |
+| core, kernel | runs | runs | runs (wine) |
+| reactor | epoll + poll, run | kqueue + poll, run | wait_reactor, run under wine |
+| signals | run | run (real SIGINT/TERM/HUP) | handler run directly; not yet via a real console |
+| sanitizers | asan, tsan | asan, tsan | — |
 
-macOS has not been run on real hardware yet, and Windows has only run
-under wine. Both are open.
+Linux and macOS both run the whole suite on real hardware, under the debug,
+clang, asan, tsan and release presets. Windows has only run under wine;
+that's the open one.
 
 ## Using it from CMake
 

@@ -11,6 +11,11 @@
 #   tsan    thread sanitizer               data races
 #   mingw   windows cross build, run under wine
 #
+# The default set depends on the OS: `dev` wants gcc and `mingw` wants a
+# cross-compiler and wine, neither of which a stock macOS has, so on macOS
+# the default is clang/asan/tsan/release. Ask for any preset by name to
+# override that.
+#
 # Exits non-zero if any preset fails to configure, build or pass, and
 # prints a one-line summary per preset at the end. Stops a hung test after
 # 180 s instead of waiting forever.
@@ -18,8 +23,25 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
-presets="${*:-dev clang asan tsan mingw}"
-jobs="$(nproc 2>/dev/null || echo 4)"
+case "$(uname -s)" in
+    Darwin) default_presets="clang asan tsan release" ;;
+    *)      default_presets="dev clang asan tsan mingw" ;;
+esac
+presets="${*:-$default_presets}"
+
+# nproc is GNU; macOS and the BSDs have sysctl.
+jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
+# macOS 27 ships SDKs its own linker rejects (tapi "unknown architecture" on
+# the versioned MacOSX27.sdk), which breaks every link that carries a bare
+# -fsanitize= flag. Pin the SDK xcrun agrees with, unless the caller has.
+if [ "$(uname -s)" = Darwin ] && [ -z "${SDKROOT:-}" ]; then
+    if sdk="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null)" && [ -d "$sdk" ]; then
+        SDKROOT="$sdk"
+        export SDKROOT
+    fi
+fi
+
 summary=""
 failed=0
 

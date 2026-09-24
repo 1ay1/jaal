@@ -21,6 +21,7 @@
 #include "core/overload.hpp"
 #include "core/program.hpp"
 #include "core/program_base.hpp"
+#include "core/rng.hpp"
 #include "core/router.hpp"
 #include "core/row.hpp"
 #include "core/sendable.hpp"

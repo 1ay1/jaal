@@ -7,7 +7,7 @@
 // above it names an OS.
 //
 //   Linux           epoll_reactor   + posix_signals
-//   macOS, BSDs     kqueue_reactor  + posix_signals   (compiled, not yet run)
+//   macOS, BSDs     kqueue_reactor  + posix_signals   (macOS run; BSDs compiled)
 //   other POSIX     poll_reactor    + posix_signals
 //   Windows         wait_reactor    + console_signals
 
