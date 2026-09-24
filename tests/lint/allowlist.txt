@@ -1,0 +1,20 @@
+# Files allowed to use raw concurrency primitives, and which ones.
+# Each is jaal's own implementation of a safe type: the raw primitive is
+# what the safe type is built from. Anything not listed here must go
+# through the safe types. See tests/lint/banlist.cmake.
+
+# Sink is defined here; sink_access is its private minting key.
+core/sink.hpp: sink_access
+# Task map builds a forwarding sink for the mapped task.
+core/fx.hpp: sink_access
+
+# The mailbox IS the lock around the message queue; it mints sinks to itself.
+kernel/mailbox.hpp: mutex sink_access
+# loop_key is defined here.
+kernel/loop.hpp: loop_key
+# The worker pool: threads, the job queue lock, and detached isolated threads.
+kernel/pool.hpp: thread detach mutex
+# scope: joins every helper thread; `observed` is an atomic flag per helper.
+kernel/scope.hpp: thread atomic
+# guarded<T>: the shared_mutex it wraps, and the debug nested-lock detector.
+kernel/guarded.hpp: mutex thread_local

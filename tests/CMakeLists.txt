@@ -33,6 +33,7 @@ jaal_test(core_cmd_test core/cmd_test.cpp)
 jaal_test(core_sub_test core/sub_test.cpp)
 jaal_test(kernel_parts_test kernel/kernel_parts_test.cpp)
 jaal_test(kernel_test kernel/kernel_test.cpp)
+jaal_test(kernel_scope_test kernel/scope_test.cpp)
 
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)
@@ -83,9 +84,27 @@ jaal_compile_fail(NAME task_map_captureless  SOURCE compile_fail/cmd.cpp CASE 5
 jaal_compile_fail(NAME sink_msg_sendable     SOURCE compile_fail/cmd.cpp CASE 6
                   MATCH "jaal: a Sink's Msg must be Sendable")
 
+# scope / guarded
+jaal_compile_fail(NAME guarded_no_escape  SOURCE compile_fail/scope.cpp CASE 1
+                  MATCH "jaal: guarded<T>::with's lambda returns something that points")
+# gcc: "use of deleted function 'jaal::handle<T>::handle(jaal::handle<T>&&) [with T = int]'"
+# clang: "call to deleted constructor of ... 'jaal::handle<int>'"
+jaal_compile_fail(NAME scope_handle_pinned SOURCE compile_fail/scope.cpp CASE 2
+                  MATCH "deleted (function|constructor)[^\n]*jaal::handle<")
+jaal_compile_fail(NAME scope_nursery_private SOURCE compile_fail/scope.cpp CASE 3
+                  MATCH "private")
+
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering
          COMMAND ${CMAKE_COMMAND}
                  -DROOT=${PROJECT_SOURCE_DIR}/include/jaal
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/layering/check.cmake)
 set_tests_properties(layering PROPERTIES LABELS "static")
+
+# ── banlist: raw threads/locks/atomics only where jaal implements them ───
+add_test(NAME banlist
+         COMMAND ${CMAKE_COMMAND}
+                 -DROOT=${PROJECT_SOURCE_DIR}/include/jaal
+                 -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/lint/allowlist.txt
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/lint/banlist.cmake)
+set_tests_properties(banlist PROPERTIES LABELS "static")
