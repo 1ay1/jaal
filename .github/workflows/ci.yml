@@ -48,11 +48,14 @@ jobs:
       - run: cmake --preset mingw
       - run: cmake --build --preset mingw -j
       - name: test (under wine)
-        # In a container job, $HOME (/github/home) isn't owned by the user
-        # the steps run as, and wine refuses to create its prefix there.
-        # Give it one in the workspace.
+        # Wine refuses a prefix whose PARENT directory isn't owned by the
+        # current user. In a container job both $HOME (/github/home) and
+        # the checkout (/__w/...) are owned by a different uid than the one
+        # the steps run as. A directory this step creates itself is owned by
+        # the right user, so the prefix goes inside one.
         run: |
-          export WINEPREFIX="$GITHUB_WORKSPACE/.wine"
+          d="$(mktemp -d)"
+          export WINEPREFIX="$d/wine"
           export WINEDEBUG=-all
           wineboot --init >/dev/null 2>&1 || true
           ctest --test-dir build/mingw --output-on-failure --timeout 180
