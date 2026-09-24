@@ -59,6 +59,7 @@ jaal_test(kernel_timeline_test kernel/timeline_test.cpp)
 jaal_test(kernel_given_test kernel/given_test.cpp)
 jaal_test(kernel_resume_test kernel/resume_test.cpp)
 jaal_test(kernel_stream_stop_test kernel/stream_stop_test.cpp)
+jaal_test(kernel_teardown_test kernel/teardown_test.cpp)
 # ^C during shutdown: needs fork() and a real signal, so POSIX only.
 if(UNIX)
     jaal_test(kernel_signal_shutdown_test kernel/signal_shutdown_test.cpp)
@@ -140,6 +141,11 @@ jaal_compile_fail(NAME program_missing_case SOURCE compile_fail/kernel.cpp CASE 
                   MATCH "has no update for message '[^']*Reset'; add: static Cmd update\\(Model&, [^)]*Reset\\)")
 jaal_compile_fail(NAME program_effect_not_declared SOURCE compile_fail/kernel.cpp CASE 5
                   MATCH "jaal: this effect is not in the Cmd's row")
+# shutdown order: the kernel can only be finished BY teardown, in order
+jaal_compile_fail(NAME kernel_no_bare_finish SOURCE compile_fail/kernel.cpp CASE 6
+                  MATCH "(too few arguments|no matching (member )?function|candidate function not viable)")
+jaal_compile_fail(NAME teardown_key_not_forgeable SOURCE compile_fail/kernel.cpp CASE 7
+                  MATCH "(private|calling a private constructor|is private)")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering

@@ -67,6 +67,7 @@
 #include "../platform/select.hpp"
 #include "../platform/signal.hpp"
 #include "kernel.hpp"
+#include "teardown.hpp"
 #include "timer_heap.hpp"
 
 namespace jaal {
@@ -286,14 +287,16 @@ int run(H& host, run_options opt, durable<P> d) {
     }
     auto waker = reactor->waker();
 
-    // Declared BEFORE the kernel so they're destroyed AFTER it: the kernel's
-    // mailbox wakes the reactor, and its shutdown must finish first.
     auto sigs = pf::native_signals::install(detail::run::all_signals);
     std::optional<typename pf::native_reactor::registration> sig_reg;
     if (sigs) {
         auto r = reactor->watch(sigs->handle(), interest::read, detail::run::kSignalToken);
         if (r) sig_reg.emplace(std::move(*r));
     }
+    // The signal source the teardown guard will own. It has to be watchable
+    // for as long as the loop runs and released before shutdown, and those
+    // are the guard's job, not this function's.
+    using sig_source = decltype(sigs);
 
     detail::run::forward_host<H, KE> fwd{host};
 
@@ -302,6 +305,13 @@ int run(H& host, run_options opt, durable<P> d) {
         ? K::start_from(fwd, std::move(*d.resume), std::move(d.resume_cmd),
                         platform::steady_clock{}, opt.kernel, wake, std::move(d.journal))
         : K::start(fwd, platform::steady_clock{}, opt.kernel, wake, std::move(d.journal));
+
+    // Shutdown order, owned by a destructor (kernel/teardown.hpp): signals
+    // off, then host.release(), then kernel.finish(). Declared here so it
+    // runs on EVERY path out of this function, including an exception thrown
+    // by a host callback (which used to skip release() entirely and shut the
+    // kernel down with the signal handlers still installed).
+    kernel::teardown<K, H, sig_source> guard{k, host, std::move(sigs)};
 
     // Before any of the program's messages are folded: a crash in the first
     // step should still have the seed in the log.
@@ -334,8 +344,8 @@ int run(H& host, run_options opt, durable<P> d) {
         for (std::uint8_t i = 0; i < res->count; ++i) {
             const auto& r = res->ready[i];
             if (r.token == detail::run::kSignalToken) {
-                if (!sigs) continue;
-                for (auto s : sigs->take()) {
+                if (!guard.signals()) continue;
+                for (auto s : guard.signals()->take()) {
                     const auto produced = k.route(KE{signal_event{signal_set{s}}}, fwd);
                     if (produced == 0 && opt.default_signal_exit
                         && (s == sig::interrupt || s == sig::terminate || s == sig::hangup))
@@ -351,18 +361,8 @@ int run(H& host, run_options opt, durable<P> d) {
         }
         // A wake just means "the mailbox has messages": step() drains it.
     }
-    // The loop is over; now shutdown runs, and it can take a while (a task
-    // that ignores its stop token holds it for the whole grace). Signal
-    // handlers must NOT stay installed through that: they'd keep catching
-    // SIGINT into a pipe nobody drains, so a user hammering ^C on a
-    // slow-exiting program would be ignored. Dropping the source here
-    // unwatches the pipe and restores each signal's previous disposition,
-    // so from this point a second ^C kills the process the ordinary way.
-    // (Measured before this: 20 SIGINTs over a 10 s shutdown, all swallowed.)
-    sig_reg.reset();
-    if (sigs) { auto dead = std::move(*sigs); (void)dead; }   // dtor restores the handlers
-    if constexpr (requires { host.release(); }) host.release();
-    return std::move(k).finish();
+    sig_reg.reset();              // unwatch the pipe before the source goes
+    return guard.exit_code();     // signals off, release(), finish()
 }
 
 template <Program P, class H>

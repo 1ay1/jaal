@@ -3,6 +3,7 @@
 #include <jaal/core/core_fx.hpp>
 #include <jaal/core/child.hpp>
 #include <jaal/host/headless.hpp>
+#include <jaal/kernel/teardown.hpp>
 #include <jaal/kernel/timeline.hpp>
 
 #include <functional>
@@ -91,6 +92,27 @@ struct Noisy {
     using Cmd = jaal::Cmd<Msg>;
     static Cmd update(Model&, Go) { return Beep{}; }
 };
+#elif JAAL_CASE == 6
+// shutting the kernel down by hand: finish() needs a teardown_key, and only
+// kernel::teardown can make one, so the order (signals off, host.release(),
+// finish) can't be taken apart. A kernel that shuts down with its signal
+// handlers still installed is unkillable by ^C for the whole grace (D34/D35).
+void f() {
+    struct Counter {
+        struct Model { int n = 0; };
+        struct Inc {};
+        using Msg = std::variant<Inc>;
+        using Cmd = jaal::Cmd<Msg>;
+        static Cmd update(Model& m, Inc) { ++m.n; return {}; }
+    };
+    jaal::recorder rec;
+    auto k = jaal::kernel::kernel<Counter>::start(rec);
+    (void)std::move(k).finish();
+}
+#elif JAAL_CASE == 7
+// forging the key: its constructor is private, so a caller can't make one
+// to get at finish().
+void f() { (void)jaal::kernel::teardown_key{}; }
 #else
 #  error "unknown JAAL_CASE"
 #endif

@@ -280,7 +280,8 @@ message is printed. Shutdown is bounded
 ([D20](decisions.md#d20-shutdown-is-bounded)): a worker still running after
 the grace period is abandoned and reported, not waited on forever.
 
-The order once the loop ends is fixed:
+The order once the loop ends is fixed, and it's a destructor
+(`kernel/teardown.hpp`), not a convention:
 
 1. **signal handlers come off** ([D34](decisions.md#d34-signal-handlers-come-off-before-shutdown)),
    restoring whatever disposition each signal had before jaal started — so a
@@ -292,7 +293,9 @@ The order once the loop ends is fixed:
    workers within the grace, close the mailbox
 
 So `release()` can assume the loop is over and no more events will arrive,
-and it must not assume any task has finished yet.
+and it must not assume any task has finished yet. If it throws, the throw is
+swallowed and step 3 still runs: a wedged worker must not outlive the
+process's last chance to stop it.
 
 ## Driving it yourself
 
@@ -303,13 +306,24 @@ don't call `run`. Make the kernel and step it:
 auto k = jaal::kernel::kernel<App, event_type, jaal::platform::steady_clock>::start(
              host, {}, opts, [waker] { waker.wake(); });
 
+// Shutdown order, owned by a destructor: signals off, host.release(),
+// kernel.finish(). Declare it and forget it — it runs on every path out of
+// the scope, including an exception from your own code.
+jaal::kernel::teardown guard{k, host, std::move(sigs)};   // or kernel::no_signals{}
+
 while (!k.quitting()) {
     const auto turn = k.step(host);            // fold, re-subscribe
     if (turn.model_changed) draw(k.model());
     if (auto d = k.next_deadline()) wait_until(*d);   // your wait
 }
-return std::move(k).finish();
+return guard.exit_code();
 ```
+
+There's no way to do this in the wrong order: `kernel::finish()` takes a key
+only `teardown` can make, so `std::move(k).finish()` doesn't compile
+([D35](decisions.md#d35-shutdown-order-is-a-destructor-not-a-convention)).
+If you forget `exit_code()`, the destructor still shuts everything down in
+order; you just don't see the code.
 
 `step()` folds at most `fold_budget` messages, so a message storm can't
 starve your input or your frames. `next_deadline()` tells you how long you

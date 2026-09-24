@@ -220,6 +220,18 @@ struct options {
     std::uint64_t random_seed = 0;
 };
 
+/// Proof that a shutdown step is being taken by kernel::teardown, in order.
+/// Only teardown can make one, so kernel::finish() can't be called by hand:
+/// the kernel must go down LAST (signals off, host.release(), then it), and
+/// calling finish() directly is how that order gets got wrong. See
+/// kernel/teardown.hpp and docs/decisions.md D35.
+class teardown_key {
+    teardown_key() = default;
+    template <class K, class H, class S> friend class teardown;
+};
+
+template <class K, class H, class S> class teardown;   // kernel/teardown.hpp
+
 /// Marker for a host with no input events (a headless server, a test).
 struct no_events {};
 
@@ -390,7 +402,17 @@ public:
     [[nodiscard]] mailbox_stats mailbox_load() const { return inbox_.stats(); }
 
     /// Ordered shutdown, once. Consumes the kernel.
-    int finish() && {
+    ///
+    /// Takes a teardown_key, which only jaal::kernel::teardown can make. The
+    /// kernel is the LAST thing to go down (signals off, host.release(),
+    /// then this), and calling finish() by hand is how that order gets got
+    /// wrong: a program that shuts down with its signal handlers still
+    /// installed is unkillable by ^C for the whole grace (D34). So the order
+    /// lives in teardown's destructor and this is unreachable without it:
+    ///
+    ///   kernel::teardown guard{k, host, std::move(sigs)};   // ... loop ...
+    ///   return guard.exit_code();
+    int finish(teardown_key) && {
         shutdown();
         return exit_.value_or(0);
     }

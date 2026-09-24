@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "../kernel/kernel.hpp"
+#include "../kernel/teardown.hpp"
 #include "../platform/clock.hpp"
 
 namespace jaal {
@@ -161,7 +162,16 @@ public:
     [[nodiscard]] kernel_type& kernel() noexcept { return k_; }
     [[nodiscard]] Sink<msg_type> sink() const { return k_.sink(); }
 
-    int finish() && { return std::move(k_).finish(); }
+    /// Shut down and report the exit code. Goes through the same ordered
+    /// teardown as a real run (kernel/teardown.hpp): a test host has no
+    /// signals and the recorder has no release(), so only the kernel step
+    /// does anything — but it goes through the one path, so a test can't
+    /// exercise an order production never uses.
+    int finish() && {
+        kernel::teardown<kernel_type, recorder, kernel::no_signals> guard{
+            k_, rec_, kernel::no_signals{}};
+        return guard.exit_code();
+    }
 
 private:
     static kernel::options with_seed(kernel::options o) noexcept {

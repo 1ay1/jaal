@@ -630,3 +630,45 @@ than exit tidily. It fails deterministically against the old code.
 in a non-interactive shell) stays ignored — `release()` restores the
 *previous* disposition, not the default, so jaal never makes a program more
 killable than it was when it started.
+
+## D35. Shutdown order is a destructor, not a convention
+
+**Decision.** `jaal::kernel::teardown` owns the order in which a running
+program is given up — signal handlers off, `host.release()`, then
+`kernel::finish()` — and it does it in its destructor. `kernel::finish()`
+takes a `teardown_key` that only `teardown` can construct, so the last step
+cannot be taken by hand, early, or alone.
+
+**Why the previous fix wasn't enough.** D34 put those three steps in the
+right order at the end of `run()`. That fixed the bug I had measured and left
+the *class* of bug open, in two ways:
+
+- **Any early exit skipped them.** A host callback that throws (`present`,
+  `on_ready`) unwinds straight past the statements. Measured on the D34
+  code: `release()` never ran, and the kernel then shut down for the full
+  grace with the handlers still installed — the same unkillable process,
+  reached by a different path.
+- **Every other driver had to repeat it.** `docs/hosts.md` invites a host to
+  own the loop and call `finish()` itself. Nothing said "signals first", and
+  nothing stopped a driver from getting it wrong. `headless` was already a
+  second copy of the sequence.
+
+A comment can't prevent either. A destructor prevents both: C++ runs it on
+every path out of the scope, and the key makes the ordered path the only one
+that compiles.
+
+**Cost.** One more type, and a driver must name it (`teardown guard{k, host,
+std::move(sigs)}`). The signal source is taken by value, so the caller gives
+up ownership; an lvalue won't bind, which is what stops a second owner from
+keeping the handlers installed.
+
+**`release()` may throw.** The guard catches it. The host is program code, so
+it can fail, and if that skipped `finish()` a wedged worker would outlive the
+process's last chance to stop it. A throwing `release()` is reported by its
+own exception escaping `run()`, not by silently abandoning shutdown.
+
+**Tests.** `tests/compile_fail/kernel.cpp` case 6 is `std::move(k).finish()`
+(no key: doesn't compile) and case 7 forges a `teardown_key` (private ctor).
+`tests/kernel/teardown_test.cpp` checks the runtime half: a host whose
+callback throws still gets `release()`, in order, with the signals already
+restored.
