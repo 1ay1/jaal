@@ -1,0 +1,7 @@
+# Files in src/ allowed raw concurrency primitives, and which ones.
+# See tests/lint/banlist.cmake.
+
+# The POSIX signal handler may only touch lock-free atomics (per
+# [support.signal]); the loop-side install/uninstall bookkeeping is under a
+# mutex that the handler never takes.
+platform/posix/signals.cpp: mutex atomic

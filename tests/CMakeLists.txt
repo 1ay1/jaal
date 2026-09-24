@@ -35,6 +35,7 @@ jaal_test(kernel_parts_test kernel/kernel_parts_test.cpp)
 jaal_test(kernel_test kernel/kernel_test.cpp)
 jaal_test(kernel_scope_test kernel/scope_test.cpp)
 jaal_test(platform_conformance platform/conformance.cpp)
+jaal_test(platform_signals_test platform/signals_test.cpp)
 
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)
@@ -110,6 +111,14 @@ add_test(NAME banlist
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/lint/banlist.cmake)
 set_tests_properties(banlist PROPERTIES LABELS "static")
 
+# Same rule for the compiled backends in src/, against their own allowlist.
+add_test(NAME banlist_src
+         COMMAND ${CMAKE_COMMAND}
+                 -DROOT=${PROJECT_SOURCE_DIR}/src
+                 -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/lint/allowlist_src.txt
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/lint/banlist.cmake)
+set_tests_properties(banlist_src PROPERTIES LABELS "static")
+
 # ── macOS compile check ──────────────────────────────────────────────────
 # There's no Mac here, so the darwin backends can't RUN in this suite. zig
 # ships macOS libc headers, so they can at least COMPILE for arm64 macOS on
@@ -118,7 +127,7 @@ set_tests_properties(banlist PROPERTIES LABELS "static")
 if(NOT APPLE)
     find_program(JAAL_ZIG zig)
     if(JAAL_ZIG)
-        foreach(src darwin/kqueue_reactor posix/poll_reactor)
+        foreach(src darwin/kqueue_reactor posix/poll_reactor posix/signals)
             string(REPLACE "/" "_" tname "${src}")
             add_test(NAME macos_compile.${tname}
                      COMMAND ${JAAL_ZIG} c++ -target aarch64-macos -std=c++2c

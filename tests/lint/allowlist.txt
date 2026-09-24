@@ -18,3 +18,7 @@ kernel/pool.hpp: thread detach mutex
 kernel/scope.hpp: thread atomic
 # guarded<T>: the shared_mutex it wraps, and the debug nested-lock detector.
 kernel/guarded.hpp: mutex thread_local
+
+# The signal handler's test hook is an atomic (the only thing a handler
+# may touch). Declared here so tests and the .cpp agree on it.
+platform/posix/signals.hpp: atomic
