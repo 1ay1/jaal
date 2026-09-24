@@ -11,6 +11,7 @@
 //
 // Docs: docs/scope.md (what's offered), docs/decisions.md (why).
 
+#include "core/child.hpp"
 #include "core/cmd.hpp"
 #include "core/core_fx.hpp"
 #include "core/diff.hpp"

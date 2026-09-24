@@ -49,6 +49,7 @@ background work, or effects that run during replay.
 | `Sub<Msg, Row>` | subscriptions as data; diffed by key against what's running |
 | row subtyping | a `Cmd` with fewer effects converts to one with more, never back |
 | `map` | re-target a child's `Cmd`/`Sub` at the parent's `Msg` (components) |
+| `child<C, ParentMsg, Wrap>` | embed program `C` in a parent: `match`, `update` in place, mapped `init`/`subscribe`, stream keys prefixed so two copies don't clash. One fixed slot per `child<>`; lists of children aren't supported yet |
 | `jaal::program<>` | declare effects once, get `Cmd`, `Sub`, `step` aliases |
 | `step` | `update` can return just a model, meaning "no effects" |
 

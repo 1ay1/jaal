@@ -31,6 +31,7 @@ jaal_static_test(core_sendable_test core/sendable_test.cpp)
 jaal_test(core_frozen_test core/frozen_test.cpp)
 jaal_test(core_cmd_test core/cmd_test.cpp)
 jaal_test(core_sub_test core/sub_test.cpp)
+jaal_test(core_child_test core/child_test.cpp)
 jaal_test(kernel_parts_test kernel/kernel_parts_test.cpp)
 jaal_test(kernel_test kernel/kernel_test.cpp)
 jaal_test(kernel_scope_test kernel/scope_test.cpp)
@@ -109,6 +110,8 @@ jaal_compile_fail(NAME router_event_not_produced SOURCE compile_fail/kernel.cpp 
                   MATCH "jaal: a subscription routes events this host doesn't produce")
 jaal_compile_fail(NAME timeline_needs_frozen_model SOURCE compile_fail/kernel.cpp CASE 2
                   MATCH "is not Frozen: it contains '[^']*shared_ptr[^']*', a pointer-like owner")
+jaal_compile_fail(NAME child_wrap_not_in_parent SOURCE compile_fail/kernel.cpp CASE 3
+                  MATCH "Wrap must be one of ParentMsg's alternatives")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering

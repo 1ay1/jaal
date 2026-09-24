@@ -1,6 +1,7 @@
 // Compile-fail cases for the kernel's host checks.
 
 #include <jaal/core/core_fx.hpp>
+#include <jaal/core/child.hpp>
 #include <jaal/host/headless.hpp>
 #include <jaal/kernel/timeline.hpp>
 
@@ -59,6 +60,12 @@ struct Shared {
     static std::pair<Model, Cmd> update(Model m, Msg) { ++m.doc->words; return {m, Cmd::none()}; }
 };
 jaal::timeline<Shared> t({});
+#elif JAAL_CASE == 3
+// Wrap isn't one of the parent's Msg alternatives: the child's messages
+// would have nowhere to go
+struct Stray { App::Msg msg; };
+using Parent = std::variant<int>;
+jaal::child<App, Parent, Stray> c;
 #else
 #  error "unknown JAAL_CASE"
 #endif
