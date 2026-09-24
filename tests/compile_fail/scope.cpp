@@ -24,6 +24,17 @@ void f() {
 #elif JAAL_CASE == 3
 // a nursery can't be made outside scope()
 void f() { jaal::nursery n{std::stop_token{}}; }
+#elif JAAL_CASE == 4
+// taking a second lock while holding the first (lock-order deadlock), by
+// capturing it
+void f(jaal::guarded<int>& a, jaal::guarded<int>& b) {
+    a.with([&](int& x) { b.with([](int& y) { ++y; }); ++x; });
+}
+#elif JAAL_CASE == 5
+// ... or by passing it in as an argument
+void f(jaal::guarded<int>& a, jaal::guarded<int>& b) {
+    a.with([](int&, jaal::guarded<int>* other) { other->with([](int&) {}); }, &b);
+}
 #else
 #  error "unknown JAAL_CASE"
 #endif

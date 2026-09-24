@@ -20,6 +20,7 @@
 #include "kernel/guarded.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/mailbox.hpp"
+#include "kernel/waits.hpp"
 #include "kernel/replay.hpp"
 #include "kernel/run.hpp"
 #include "kernel/scope.hpp"

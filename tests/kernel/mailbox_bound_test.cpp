@@ -1,6 +1,7 @@
 // tests/kernel/mailbox_bound_test.cpp — a mailbox with a capacity.
 
 #include <jaal/kernel/mailbox.hpp>
+#include <jaal/kernel/scope.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -109,6 +110,32 @@ int unbounded_is_default() {
     return 0;
 }
 
+// The cross-thread version of loop_thread_never_blocks. The loop opens a
+// scope and joins a helper; the helper sends to the loop's FULL blocking
+// mailbox. Only the loop can drain it, and the loop is waiting on the
+// helper: a deadlock that used to hang forever. Now the helper's post is
+// refused (counted in loop_full) and both finish.
+int scope_helper_of_the_loop_never_blocks() {
+    k::inbox<M> in({}, opts(1, k::overflow::block));   // made here: this thread is the loop
+    auto s = in.sink();
+    if (!s.send(M{0})) return 701;                     // now full
+    bool sent = true;
+    jaal::scope([&](jaal::nursery& n) {
+        auto h = n.spawn([&s] { return s.send(M{1}); });   // would wait for a drain
+        sent = h.join();                                     // the loop waits on it
+    });
+    if (sent) return 702;                              // refused, not queued
+    if (in.stats().loop_full != 1) return 703;
+    // A thread the loop is NOT waiting on still gets real backpressure.
+    std::jthread other([&s] { (void)s.send(M{2}); });  // blocks until the drain
+    std::this_thread::sleep_for(20ms);
+    std::vector<M> out;
+    in.drain(out);
+    other.join();
+    if (in.stats().blocked != 1) return 704;
+    return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -124,7 +151,7 @@ int main() {
     });
     int (*const checks[])() = {drop_newest, drop_oldest, block_backpressure,
                                close_releases_blocked_sender, loop_thread_never_blocks,
-                               unbounded_is_default};
+                               unbounded_is_default, scope_helper_of_the_loop_never_blocks};
     for (auto f : checks)
         if (int r = f()) {
             std::fprintf(stderr, "mailbox_bound_test: check %d failed\n", r);

@@ -120,6 +120,15 @@ are three levels:
 - **Level B, caught by tooling.** It builds, but CI fails: a lint, TSan, ASan.
 - **Level C, convention.** Documented, reviewed, not checked.
 
+One more, between A and B:
+
+- **A-runtime, made unreachable by the runtime.** The wrong program
+  compiles, but the bad outcome can't happen: the runtime refuses the
+  operation (and says so, or counts it) instead of letting it race or hang.
+  Used where the type system can't see the cause (C++ can't stop `[&]` from
+  reaching a nursery) but the runtime can decide it exactly, on every call,
+  in every build. Never a debug-only check.
+
 The goal: **everything in jaal's API is Level A**. Getting around it
 requires something visible (a raw pointer, `std::thread`, `const_cast`,
 `reinterpret_cast`), and those are Level B through a ban-list check. Level C
@@ -403,27 +412,34 @@ Sometimes a lock is the right answer (a cache shared by many workers).
 template <class T>
 class guarded {
 public:
-    template <class F> requires Sendable<std::invoke_result_t<F, T&>>
-    auto with(F&& f) -> std::invoke_result_t<F, T&>;          // exclusive
-
-    template <class F> requires Sendable<std::invoke_result_t<F, const T&>>
-    auto read(F&& f) const -> std::invoke_result_t<F, const T&>;   // shared
+    // f is captureless; args are Sendable, moved in; the result is Sendable.
+    template <class F, class... Args> auto with(F f, Args... args);         // exclusive
+    template <class F, class... Args> auto read(F f, Args... args) const;   // shared
 private:
     mutable std::shared_mutex m_;
     T value_;
 };
+
+cache.with([](auto& m, std::string k) { ++m[k]; }, key);
 ```
 
 - **The data is only reachable while the lock is held.** There's no getter,
   no raw mutex, nothing to forget to lock.
-- **Nothing escapes the lock.** The lambda's result must be Sendable, which
-  bans references, pointers and views into `T`. You get a copy out, never a
-  handle in.
-- **No two locks at once, by construction.** Calling `with` on a second
-  `guarded` from inside the first's lambda would allow lock-order
-  deadlocks. A thread-local "lock held" flag rejects that at runtime in debug
-  builds (Level B). A stricter version (a `lock_level<N>` parameter that must
-  increase) can make it Level A later if it's needed.
+- **Nothing escapes the lock.** The function's result must be Sendable,
+  which bans references, pointers and views into `T`. You get a copy out,
+  never a handle in.
+- **No second lock can be taken inside the first (Level A).** Every
+  lock-order deadlock starts with a thread holding lock A while taking lock
+  B. Inside `with`/`read` the code can only reach what it was given: the
+  function is captureless (so it can't capture a second `guarded`), and its
+  arguments must be Sendable (and `guarded<U>`, a pointer, a reference or a
+  `reference_wrapper` to one are not). The second lock has no name inside
+  the first. This replaced a debug-only runtime check (it was Level B); the
+  compile-fail tests `guarded_no_nested_capture` and `guarded_no_nested_arg`
+  pin it.
+  The remaining route is a global or static `guarded`, which a captureless
+  function can still name; that's the same hole as for task bodies, closed
+  the same way (the ban-list rejects mutable statics outside jaal).
 - Used rarely. The preferred answer is always an owner you send messages to.
 
 ### 4.9 `once<T>` and `latch`-style results
@@ -477,7 +493,12 @@ documented).
 | data race on plain data | nothing mutable is shared: owned, moved, or frozen. `guarded<T>` for the rare lock | A |
 | forgot to lock | `guarded<T>` has no unlocked access | A |
 | reference escapes a lock | `with`/`read` results must be Sendable | A |
-| lock-order deadlock | one lock per call; nested `with` rejected | B (debug) |
+| lock-order deadlock | a second lock can't be named inside `with`/`read`: captureless function, Sendable args, `guarded` isn't Sendable | A |
+| waiting on a sibling helper (join cycle) | only the scope's own thread may `spawn`/`join`, so the wait graph is a tree; a helper that tries gets `scope_misuse` | A-runtime |
+| helper blocks sending to the loop that is joining it | the mailbox knows who waits on the sender (`kernel/waits.hpp`) and refuses instead of blocking; counted in `loop_full` | A-runtime |
+| loop blocks sending to its own full mailbox | refused and counted in `loop_full` | A-runtime |
+| a stopped subscription's message reaches `update` | every message carries its ORIGIN; the loop drops a stopped origin's messages at drain AND re-checks at fold time, after re-subscribing (so a stop earlier in the same batch counts) | A-runtime |
+| shutdown waits out the grace on a blocked sender | the mailbox is closed before workers are joined, releasing blocked senders | A-runtime |
 | cycle keeps runtime alive (P2) | Sink can't be upgraded to strong | A |
 | worker destroys runtime, self-join (P2) | mailbox's only strong owner is the kernel | A |
 | exception kills process from a worker | every thread body is wrapped (from agentty's `isolated_thread`) | A |

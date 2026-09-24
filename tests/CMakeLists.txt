@@ -54,6 +54,7 @@ jaal_test(kernel_sim_test kernel/sim_test.cpp)
 jaal_test(kernel_timeline_test kernel/timeline_test.cpp)
 jaal_test(kernel_given_test kernel/given_test.cpp)
 jaal_test(kernel_resume_test kernel/resume_test.cpp)
+jaal_test(kernel_stream_stop_test kernel/stream_stop_test.cpp)
 
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)
@@ -106,13 +107,18 @@ jaal_compile_fail(NAME sink_msg_sendable     SOURCE compile_fail/cmd.cpp CASE 6
 
 # scope / guarded
 jaal_compile_fail(NAME guarded_no_escape  SOURCE compile_fail/scope.cpp CASE 1
-                  MATCH "jaal: guarded<T>::with's lambda returns something that points")
+                  MATCH "jaal: guarded<T>::with/read returns something that points into")
 # gcc: "use of deleted function 'jaal::handle<T>::handle(jaal::handle<T>&&) [with T = int]'"
 # clang: "call to deleted constructor of ... 'jaal::handle<int>'"
 jaal_compile_fail(NAME scope_handle_pinned SOURCE compile_fail/scope.cpp CASE 2
                   MATCH "deleted (function|constructor)[^\n]*jaal::handle<")
 jaal_compile_fail(NAME scope_nursery_private SOURCE compile_fail/scope.cpp CASE 3
                   MATCH "private")
+# lock-order deadlock can't be written: no second lock inside the first
+jaal_compile_fail(NAME guarded_no_nested_capture SOURCE compile_fail/scope.cpp CASE 4
+                  MATCH "jaal: guarded<T>::with/read takes a CAPTURELESS function")
+jaal_compile_fail(NAME guarded_no_nested_arg SOURCE compile_fail/scope.cpp CASE 5
+                  MATCH "jaal: an argument to guarded<T>::with/read is not Sendable")
 
 # kernel / hosts
 jaal_compile_fail(NAME router_event_not_produced SOURCE compile_fail/kernel.cpp CASE 1

@@ -495,3 +495,58 @@ which pass unchanged.
 
 (`tests/compile_fail/kernel.cpp` cases 4 and 5 pin the two diagnostics a
 newcomer hits first.)
+
+## D32. Deadlocks and stale messages: unrepresentable, or refused at runtime
+
+**Decision.** Every way jaal knows of to deadlock, or to deliver a message
+from a stopped subscription, is either a compile error or refused by the
+runtime on every call, in every build. No debug-only checks.
+
+**The four holes, and what closed each.**
+
+1. *A stopped stream's message reached `update` (a real bug, reproduced:
+   `features_test` failed 75 runs in 300 on clang).* Two windows. (A) The
+   message was still in the mailbox when the stream stopped; liveness had
+   been checked by the SENDER, at send time, which can never close that
+   window. (B) The message had been drained into the same fold batch as the
+   message that stopped its stream: `[Rekey, Item(0)]` folded `Rekey`, then
+   `Item(0)`, and only re-subscribed after the batch. Fix: every message
+   carries its ORIGIN (a stream run or `every` timer gets one). The mailbox
+   drops a retired origin's messages at drain; the kernel carries the
+   origin to the fold, re-subscribes first if an earlier message in the
+   batch changed the model, and drops the message if its subscription is
+   gone. Liveness is loop state and is decided on the loop, at the last
+   moment, so no thread interleaving reaches `update`. The cross-thread
+   `live_streams_` set and its lock are gone. `stream_stop_test` reproduces
+   both windows deterministically; the old kernel fails it.
+
+2. *Lock-order deadlock through `guarded<T>` (was Level B, debug only).*
+   `with`/`read` now take a captureless function plus Sendable arguments.
+   A second `guarded` can't be captured, and can't be passed (it isn't
+   Sendable; neither is a pointer, reference or `reference_wrapper`). The
+   second lock has no name inside the first. Compile-fail tests pin both
+   routes.
+
+3. *Join cycle in a scope.* A helper could reach a sibling's `handle`
+   through `[&]` and join it while the sibling joined back. Now only the
+   thread that opened the scope may `spawn` or `join`, so the only waits
+   are owner → helper: a tree, no cycle. The same rule gives the nursery's
+   helper list a single writer, which removes a data race. A helper that
+   tries gets `scope_misuse`, surfaced from `scope()`.
+
+4. *A scope helper blocking on the full mailbox of the loop that joins it.*
+   Only the loop drains; the loop waits for the helper. The mailbox already
+   refused a blocking post from the loop thread itself; it now also refuses
+   one from any thread the loop is (transitively) waiting on, tracked by
+   `kernel/waits.hpp` (each helper inherits its owner's waiters plus the
+   owner). Counted in `mailbox_stats::loop_full`. A thread the loop is NOT
+   waiting on still gets real backpressure.
+
+**Why runtime for 3 and 4.** C++ can't forbid a `[&]` lambda from reaching
+the nursery without forbidding the borrowing `scope` exists for, and it
+can't see which thread a Sink is used on. But the runtime can decide both
+exactly, every time, at O(depth) cost. That's "A-runtime" in
+docs/concurrency.md §2: the program compiles, the bad outcome can't happen.
+
+**Measured.** `features_test` + `stream_stop_test`, 200 runs each on clang
+and tsan: 0 failures (was 75/300 on clang, ~1/40 on tsan).

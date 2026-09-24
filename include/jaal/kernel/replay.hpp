@@ -43,7 +43,7 @@ class recording {
 public:
     /// A hook for kernel::options::record.
     [[nodiscard]] std::function<void(const Msg&)> hook() {
-        return [this](const Msg& m) { log_.with([&](auto& v) { v.push_back(m); }); };
+        return [this](const Msg& m) { log_.with([](auto& v, Msg c) { v.push_back(std::move(c)); }, m); };
     }
 
     [[nodiscard]] std::vector<Msg> messages() const {

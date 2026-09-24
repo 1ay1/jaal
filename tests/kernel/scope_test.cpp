@@ -126,25 +126,78 @@ static int scope_tests() {
         });
         if (sum != 136) return 108;
     }
+
+    // 8. the mutual-join deadlock is REFUSED, not hung. Helper A tries to
+    //    join helper B (which could be joining A): only the scope's thread
+    //    may join, so A gets scope_misuse, which surfaces from scope().
+    {
+        bool refused = false;
+        try {
+            jaal::scope([&](jaal::nursery& n) {
+                auto b = n.spawn([](std::stop_token st) {
+                    while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
+                    return 2;
+                });
+                (void)n.spawn([&b] { return b.join(); });   // would wait on a sibling
+            });
+        } catch (const jaal::scope_misuse&) {
+            refused = true;
+        }
+        if (!refused) return 109;
+    }
+
+    // 9. a helper can't spawn into the nursery (one writer for its list)
+    {
+        bool refused = false;
+        try {
+            jaal::scope([&](jaal::nursery& n) {
+                (void)n.spawn([&n] { (void)n.spawn([] {}); });
+            });
+        } catch (const jaal::scope_misuse&) {
+            refused = true;
+        }
+        if (!refused) return 110;
+    }
+
+    // 10. join() twice is refused (the result was moved out the first time)
+    {
+        bool refused = false;
+        jaal::scope([&](jaal::nursery& n) {
+            auto h = n.spawn([] { return 1; });
+            (void)h.join();
+            try { (void)h.join(); } catch (const std::logic_error&) { refused = true; }
+        });
+        if (!refused) return 111;
+    }
     return 0;
 }
 
-// ── guarded<T> ──────────────────────────────────────────────────────────
-// with(bad) is DECLARED so it can explain itself, which means a
-// requires-expression would see it as callable. So test the rule itself;
-// tests/compile_fail/scope.cpp checks a real call fails with the message.
-template <class G, class F>
-concept can_with = jaal::detail::guard::escapable<
-    std::invoke_result_t<F, std::map<std::string, int>&>>;
-using GMap = jaal::guarded<std::map<std::string, int>>;
-using ret_ref  = decltype([](std::map<std::string, int>& m) -> int& { return m["a"]; });
-using ret_ptr  = decltype([](std::map<std::string, int>& m) { return &m; });
-using ret_view = decltype([](std::map<std::string, int>&) { return std::string_view("x"); });
-using ret_val  = decltype([](std::map<std::string, int>& m) { return m.size(); });
-static_assert(!can_with<GMap, ret_ref>);    // a reference into the data can't escape
-static_assert(!can_with<GMap, ret_ptr>);    // nor a pointer
-static_assert(!can_with<GMap, ret_view>);   // nor a view
-static_assert(can_with<GMap, ret_val>);     // a copy can
+// ── guarded<T> ────────────────────────────────────────────────────────────────────────
+// The rules are compile-time, so they're checked on the building blocks;
+// tests/compile_fail/scope.cpp checks that real calls fail with the
+// messages.
+using Map  = std::map<std::string, int>;
+using GMap = jaal::guarded<Map>;
+
+// Nothing points into the data from outside the lock.
+using ret_ref  = decltype([](Map& m) -> int& { return m["a"]; });
+using ret_ptr  = decltype([](Map& m) { return &m; });
+using ret_view = decltype([](Map&) { return std::string_view("x"); });
+using ret_val  = decltype([](Map& m) { return m.size(); });
+static_assert(!jaal::detail::guard::escapable<std::invoke_result_t<ret_ref, Map&>>);
+static_assert(!jaal::detail::guard::escapable<std::invoke_result_t<ret_ptr, Map&>>);
+static_assert(!jaal::detail::guard::escapable<std::invoke_result_t<ret_view, Map&>>);
+static_assert(jaal::detail::guard::escapable<std::invoke_result_t<ret_val, Map&>>);
+
+// A second lock can't be reached from inside the first: the function can't
+// capture one, and no argument can carry one.
+using by_val_capture = decltype([x = 1](Map&) { (void)x; });
+using no_capture     = decltype([](Map&, int) {});
+static_assert(!jaal::detail::guard::captureless<by_val_capture>);
+static_assert(jaal::detail::guard::captureless<no_capture>);
+static_assert(!jaal::Sendable<GMap>);                        // can't be an argument
+static_assert(!jaal::Sendable<GMap*>);                       // nor a pointer to one
+static_assert(!jaal::Sendable<std::reference_wrapper<GMap>>); // nor a reference
 static_assert(!std::is_copy_constructible_v<GMap>);
 
 static int guarded_tests() {
@@ -155,10 +208,10 @@ static int guarded_tests() {
         for (int t = 0; t < 8; ++t)
             ts.emplace_back([&g, t] {
                 for (int i = 0; i < 1000; ++i)
-                    g.with([&](auto& m) { ++m["k" + std::to_string(t % 3)]; });
+                    g.with([](Map& m, std::string k) { ++m[k]; }, "k" + std::to_string(t % 3));
             });
     }
-    const int total = g.read([](const auto& m) {
+    const int total = g.read([](const Map& m) {
         int s = 0;
         for (auto& [_, v] : m) s += v;
         return s;
@@ -176,20 +229,10 @@ static int guarded_tests() {
     }
     if (counter.read([](const int& v) { return v; }) != 2000) return 202;
 
-#ifndef NDEBUG
-    // nesting two guarded locks on one thread is rejected in debug builds
-    // (lock-order deadlocks start with nested locks)
-    jaal::guarded<int> a(1), b(2);
-    bool rejected = false;
-    try {
-        a.with([&](int&) { b.with([](int&) {}); });
-    } catch (const jaal::nested_guard_error&) {
-        rejected = true;
-    }
-    if (!rejected) return 203;
-    // and the outer lock was released on the way out: it's usable again
-    if (a.read([](const int& v) { return v; }) != 1) return 204;
-#endif
+    // arguments are moved in, results copied out
+    jaal::guarded<std::string> s;
+    s.with([](std::string& v, std::string a, int n) { v = a + std::to_string(n); }, std::string("x"), 7);
+    if (s.read([](const std::string& v) { return v; }) != "x7") return 203;
     return 0;
 }
 

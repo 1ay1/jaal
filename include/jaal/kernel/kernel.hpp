@@ -297,7 +297,9 @@ public:
     std::size_t route(const event_type& ev, H& host) {
         if (exit_) return 0;
         const auto before = pending_.size();
-        for (auto& r : routers_) r(ev, pending_);
+        for (auto& r : routers_) r(ev, routed_);
+        for (auto& m : routed_) pending_.push_back({0, std::move(m)});
+        routed_.clear();
         const auto produced = pending_.size() - before;
         fold_pending(host);
         reconcile(host);
@@ -305,7 +307,7 @@ public:
     }
 
     /// Queue a message from the loop thread itself (a host callback).
-    void dispatch(msg_type m) { pending_.push_back(std::move(m)); }
+    void dispatch(msg_type m) { pending_.push_back({0, std::move(m)}); }
 
     /// End the program from outside update() (a signal with no handler, a
     /// host that lost its terminal). The next step() reports quit. A quit
@@ -325,15 +327,15 @@ public:
                                    : std::chrono::steady_clock::time_point{};
 
         // 1. background messages, every turn, whether or not we were woken
-        inbox_.drain(scratch_);
-        for (auto& m : scratch_) pending_.push_back(std::move(m));
+        inbox_.drain_tagged(scratch_);
+        for (auto& e : scratch_) pending_.push_back({e.from, std::move(e.msg)});
         drain_task_faults();
         if (exit_) { t.exit = exit_; return t; }
 
         // 2. timers due now
         fired_.clear();
         timers_.collect_due(clock_.now(), fired_);
-        for (auto& m : fired_) pending_.push_back(std::move(m));
+        for (auto& q : fired_) pending_.push_back(std::move(q));
 
         // 3. fold, within the budget
         const auto before = folds_;
@@ -402,6 +404,16 @@ private:
     // the error is queued and read (acquire) before locking; step() only
     // locks when it's set. Measured: taking the lock unconditionally was
     // ~75% of an idle step. The errors themselves stay under guarded<T>.
+    // Every message waiting to be folded, with where it came from. The
+    // origin rides along to the moment of folding, and fold_pending checks
+    // it THERE, on the loop thread: a stream retired after its message was
+    // drained (a batch [Rekey, Item] retires Item's stream at Rekey) still
+    // never reaches update().
+    struct queued {
+        origin_id from = 0;
+        msg_type  msg;
+    };
+
     struct task_fault_box {
         guarded<std::vector<std::exception_ptr>> errors;
         std::atomic<bool>                        pending{false};
@@ -454,8 +466,23 @@ private:
             std::size_t i = 0;
             for (; i < batch.size(); ++i) {
                 if (n >= opt_.fold_budget) break;
+                // A message from a subscription meets the model it's about
+                // to change. If an earlier message in this batch changed the
+                // model, re-subscribe FIRST, so "is this subscription still
+                // wanted?" is answered for THIS model. Then drop it if its
+                // subscription is gone. All on the loop thread: no
+                // interleaving of stream threads can get a stopped
+                // subscription's message into update(). (Plain messages
+                // keep batching: they have no subscription to go stale.)
+                if (batch[i].from != 0) {
+                    if (subs_dirty_) reconcile(host);
+                    if (!live_origins_.contains(batch[i].from)) {
+                        inbox_.count_retired();
+                        continue;
+                    }
+                }
                 ++n;
-                if (!fold_one(std::move(batch[i]), host)) {
+                if (!fold_one(std::move(batch[i].msg), host)) {
                     // The message faulted. Under `stop` the kernel is now
                     // quitting; under `skip` it's dropped and we go on.
                     if (exit_) { ++i; break; }
@@ -473,7 +500,7 @@ private:
             // Budget hit mid-batch: put the unfolded tail back, in order,
             // AHEAD of anything the effects queued.
             if (i < batch.size()) {
-                std::vector<msg_type> rest;
+                std::vector<queued> rest;
                 rest.reserve(batch.size() - i + pending_.size());
                 for (; i < batch.size(); ++i) rest.push_back(std::move(batch[i]));
                 for (auto& m : pending_) rest.push_back(std::move(m));
@@ -601,9 +628,9 @@ private:
             } else if constexpr (std::same_as<U, payload_t<fx::send, msg_type>>) {
                 // Straight onto the pending queue: folded in this step, in
                 // the order the effects were returned. No timer involved.
-                pending_.push_back(std::move(x.msg));
+                pending_.push_back({0, std::move(x.msg)});
             } else if constexpr (std::same_as<U, payload_t<fx::after, msg_type>>) {
-                timers_.after(clock_.now(), x.delay, std::move(x.msg));
+                timers_.after(clock_.now(), x.delay, queued{0, std::move(x.msg)});
             } else if constexpr (std::same_as<U, payload_t<fx::task, msg_type>>) {
                 auto job = [t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
                             s = inbox_.sink()](std::stop_token st) mutable {
@@ -616,12 +643,12 @@ private:
                 // count since its epoch, which is what tests compare.
                 const auto d = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     clock_.now().time_since_epoch());
-                pending_.push_back(x.to_msg(std::chrono::steady_clock::time_point(d)));
+                pending_.push_back({0, x.to_msg(std::chrono::steady_clock::time_point(d))});
             } else if constexpr (std::same_as<U, payload_t<fx::random, msg_type>>) {
                 // The KERNEL's stream, so a seed reproduces the whole run.
                 // Synchronous, on the loop thread: the draw happens now, in
                 // the order the effects were returned.
-                pending_.push_back(x.to_msg(rng_));
+                pending_.push_back({0, x.to_msg(rng_)});
             } else {
                 // A non-core effect: only reachable when the program's row
                 // has one, and HostFor has already checked the host handles
@@ -728,8 +755,11 @@ private:
                 // no_source_key: can't be constructed, never reached
             } else if constexpr (std::same_as<D, fx::every>) {
                 const auto& payload = std::get<payload_t<D, msg_type>>(p);
-                const auto id = timers_.every(clock_.now(), payload.interval, payload.msg);
-                timer_of_[k] = id;
+                const origin_id origin = inbox_.open_origin();
+                live_origins_.insert(origin);
+                const auto id = timers_.every(clock_.now(), payload.interval,
+                                              queued{origin, payload.msg});
+                timer_of_[k] = {id, origin};
             } else if constexpr (std::same_as<D, fx::stream>) {
                 start_stream(k, std::get<payload_t<D, msg_type>>(p));
             } else {
@@ -760,8 +790,9 @@ private:
             using D = typename key_desc<TK>::type;
             if constexpr (std::same_as<D, fx::every>) {
                 if (auto it = timer_of_.find(k); it != timer_of_.end())
-                    timers_.replace_payload(it->second,
-                                            std::get<payload_t<D, msg_type>>(p).msg);
+                    timers_.replace_payload(it->second.id,
+                                            queued{it->second.origin,
+                                                   std::get<payload_t<D, msg_type>>(p).msg});
             }
         }, k);
     }
@@ -773,7 +804,9 @@ private:
             if constexpr (std::is_void_v<D>) {
             } else if constexpr (std::same_as<D, fx::every>) {
                 if (auto it = timer_of_.find(k); it != timer_of_.end()) {
-                    timers_.cancel(it->second);
+                    timers_.cancel(it->second.id);
+                    live_origins_.erase(it->second.origin);
+                    inbox_.retire(it->second.origin);
                     timer_of_.erase(it);
                 }
             } else if constexpr (std::same_as<D, fx::stream>) {
@@ -784,29 +817,29 @@ private:
         }, k);
     }
 
-    // ── streams ────────────────────────────────────────────────────────────────────
+    // ── streams ──────────────────────────────────────────────────────────
     // Each running stream gets its own thread (streams are long and often
-    // block; they must not starve the task pool) and a GENERATION. Its Sink
-    // is a gate that stamps each message with that generation, and
-    // fold_pending drops messages whose generation is no longer live. So
-    // stopping a stream is immediate from the program's point of view, even
-    // if the body ignores its stop token for a while.
+    // block; they must not starve the task pool) and its own mailbox ORIGIN.
+    // Stopping the stream retires the origin, and the mailbox drops every
+    // message from it at drain, including messages queued before the stop
+    // (kernel/mailbox.hpp, "Origins"). Liveness is decided on the loop, so
+    // a stopped stream's messages can't reach update() however the threads
+    // interleave, even if the body ignores its stop token.
     struct stream_run {
-        std::uint64_t    gen;
+        origin_id        origin;
         std::stop_source stop;
-        // The gate this run posts through. Owned HERE (the Sink the body
-        // holds is weak), so it lives exactly as long as the run is
-        // subscribed; after that the body's sends return false.
-        std::shared_ptr<detail::mailbox_iface<msg_type>> gate;
+        // Keeps the origin-tagging sink alive while the run is subscribed.
+        // The Sink the body holds is weak: after this goes, its sends
+        // return false.
+        std::shared_ptr<detail::mailbox_iface<msg_type>> tagger;
     };
 
     void start_stream(const src_key& k, const payload_t<fx::stream, msg_type>& p) {
-        const std::uint64_t gen = ++stream_gen_;
-        live_streams_->with([&](auto& live) { live.insert(gen); });
-        stream_run run{gen, std::stop_source{}, make_gate(gen)};
-        auto own  = run.stop.get_token();
-        auto sink = sink_access::make<msg_type>(
-            std::weak_ptr<detail::mailbox_iface<msg_type>>(run.gate));
+        const origin_id origin = inbox_.open_origin();
+        live_origins_.insert(origin);
+        auto [tagger, sink] = inbox_.sink_from(origin);
+        stream_run run{origin, std::stop_source{}, std::move(tagger)};
+        auto own = run.stop.get_token();
         streams_[k] = std::move(run);
 
         // The body's stop_token must fire on EITHER the stream being dropped
@@ -821,32 +854,11 @@ private:
         });
     }
 
-    // A gate for one stream run: posts go to the real mailbox, but only while
-    // that run's generation is live. Two layers, both needed:
-    //   * the gate object is owned by stream_run, and dropped with it, so a
-    //     stopped stream's Sink goes dead (weak) and sends return false
-    //   * the generation check covers the window where a send has already
-    //     locked the weak pointer when the stream is dropped
-    std::shared_ptr<detail::mailbox_iface<msg_type>> make_gate(std::uint64_t gen) {
-        struct gate final : detail::mailbox_iface<msg_type> {
-            Sink<msg_type>                                              out;
-            std::shared_ptr<guarded<std::unordered_set<std::uint64_t>>> live;
-            std::uint64_t                                               gen;
-            gate(Sink<msg_type> o, decltype(live) l, std::uint64_t g)
-                : out(std::move(o)), live(std::move(l)), gen(g) {}
-            bool post(msg_type m) override {
-                const bool alive = live->read([&](const auto& s) { return s.contains(gen); });
-                return alive && out.send(std::move(m));
-            }
-        };
-        return std::make_shared<gate>(inbox_.sink(), live_streams_, gen);
-    }
-
     void stop_stream(const src_key& k) {
         auto it = streams_.find(k);
         if (it == streams_.end()) return;
-        const auto gen = it->second.gen;
-        live_streams_->with([&](auto& live) { live.erase(gen); });
+        live_origins_.erase(it->second.origin);   // queued or batched: dropped at fold
+        inbox_.retire(it->second.origin);         // still in the mailbox: dropped at drain
         it->second.stop.request_stop();
         streams_.erase(it);
     }
@@ -866,11 +878,13 @@ private:
         timers_.clear();
         routers_.clear();
         timer_of_.clear();
-        // Streams: ask each to stop and mark every generation dead, so a
-        // stream still finishing its last send drops it.
-        for (auto& [k, run] : streams_) run.stop.request_stop();
+        // Streams: retire and stop each, so nothing they send is folded.
+        for (auto& [k, run] : streams_) {
+            inbox_.retire(run.origin);
+            run.stop.request_stop();
+        }
         streams_.clear();
-        live_streams_->with([](auto& live) { live.clear(); });
+        live_origins_.clear();
         // Close the mailbox FIRST. A worker blocked in send() on a full
         // mailbox is released with `false`, and every later send fails at
         // once, so workers finish quickly instead of running out the grace.
@@ -911,7 +925,7 @@ private:
             std::function<void()> wake) {
         typename executor<msg_type>::error_fn on_error =
             [box = std::move(box), wake](std::exception_ptr e) {
-                box->errors.with([&](auto& v) { v.push_back(std::move(e)); });
+                box->errors.with([](auto& v, std::exception_ptr x) { v.push_back(std::move(x)); }, std::move(e));
                 box->pending.store(true, std::memory_order_release);
                 if (wake) wake();
             };
@@ -920,17 +934,22 @@ private:
         }
         return std::make_unique<pool_executor<msg_type>>(opt.max_workers, std::move(on_error));
     }
-    timer_heap<C, msg_type> timers_;
+    timer_heap<C, queued> timers_;
     running_sources<msg_type, sub_row> sources_;
-    std::unordered_map<src_key, timer_id, detail::rec::key_hash> timer_of_;
+    struct running_timer {
+        timer_id  id;
+        origin_id origin;
+    };
+    std::unordered_map<src_key, running_timer, detail::rec::key_hash> timer_of_;
     std::unordered_map<src_key, stream_run, detail::rec::key_hash> streams_;
-    std::shared_ptr<guarded<std::unordered_set<std::uint64_t>>> live_streams_ =
-        std::make_shared<guarded<std::unordered_set<std::uint64_t>>>();
-    std::uint64_t       stream_gen_ = 0;
     std::vector<router_fn> routers_;
-    std::vector<msg_type> pending_;
-    std::vector<msg_type> scratch_;
-    std::vector<msg_type> fired_;
+    std::vector<msg_type>  routed_;              // scratch for route()
+    std::vector<queued> pending_;
+    std::vector<typename inbox<msg_type>::entry> scratch_;
+    // Origins of the subscriptions running right now (streams and every
+    // timers). Loop-only, so the check in fold_pending has no window.
+    std::unordered_set<origin_id> live_origins_;
+    std::vector<queued> fired_;
     std::uint64_t       folds_      = 0;
     std::uint64_t       faults_     = 0;
     std::size_t         abandoned_  = 0;

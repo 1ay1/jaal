@@ -27,8 +27,11 @@ kernel/loop.hpp: loop_key
 kernel/pool.hpp: thread detach mutex
 # scope: joins every helper thread; `observed` is an atomic flag per helper.
 kernel/scope.hpp: thread atomic
-# guarded<T>: the shared_mutex it wraps, and the debug nested-lock detector.
-kernel/guarded.hpp: mutex thread_local
+# The "who waits on this thread" set that lets a mailbox refuse a post
+# that would deadlock (a scope helper sending to the loop that joins it).
+kernel/waits.hpp: thread thread_local
+# guarded<T>: the shared_mutex it wraps.
+kernel/guarded.hpp: mutex
 
 # The signal handler's test hook is an atomic (the only thing a handler
 # may touch). Declared here so tests and the .cpp agree on it.

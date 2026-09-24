@@ -3,30 +3,42 @@
 // impossible to write.
 //
 //   jaal::guarded<std::map<std::string, int>> cache;
-//   cache.with([](auto& m) { m["k"] = 1; });                  // exclusive
-//   int n = cache.read([](const auto& m) { return m.size(); });   // shared
+//   cache.with([](auto& m, std::string k) { ++m[k]; }, key);         // exclusive
+//   int n = cache.read([](const auto& m) { return int(m.size()); });   // shared
 //
-// Rules, each enforced:
+// Rules, each enforced by the compiler:
+//
 //   * The data is ONLY reachable while the lock is held. There's no get(),
 //     no raw mutex, nothing to forget to lock.
-//   * Nothing escapes the lock. The lambda's result must be Sendable, which
-//     rules out references, pointers and views into T. You get a copy out,
-//     never a handle in.
-//   * No nested locks on one thread. Lock-order deadlocks start with one
-//     thread holding lock A while taking lock B. Debug builds track "this
-//     thread holds a guarded lock" and throw nested_guard_error if a second
-//     with()/read() starts inside the first. (Release builds skip the
-//     check; it's a debugging aid, not a guarantee.)
+//
+//   * Nothing escapes the lock. The function's result must be Sendable,
+//     which rules out references, pointers and views into T. You get a copy
+//     out, never a handle in.
+//
+//   * NO LOCK CAN BE TAKEN WHILE ANOTHER IS HELD. Every lock-order deadlock
+//     starts with a thread holding lock A while taking lock B. Inside
+//     with()/read(), code can only reach what it was GIVEN: the function is
+//     captureless, and its extra arguments must be Sendable. A guarded<U>
+//     (it owns a mutex), a pointer or reference to one, or a Sink with a
+//     blocking mailbox behind it... none of those can be passed in:
+//       - a capture is rejected (the function must be captureless)
+//       - guarded<U> is not Sendable, and neither is a pointer, reference
+//         or reference_wrapper to anything
+//     So the second lock has no name inside the first. The deadlock can't
+//     be written, rather than being caught at runtime.
+//
+//     The one way round it is a global or a static (a captureless function
+//     can still name those). The ban-list (tests/lint) rejects mutable
+//     statics and globals outside jaal's own files, which is how the same
+//     hole is closed for task bodies.
 //
 // Prefer not to need this. The first answer to shared state is an owner
 // you send messages to; guarded<T> is for the few places a lock really is
 // simpler (a cache many workers read).
 
 #include <concepts>
-#include <functional>
 #include <mutex>
 #include <shared_mutex>
-#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -34,35 +46,18 @@
 
 namespace jaal {
 
-/// Thrown (debug builds) when a guarded lock is taken while another is held
-/// on the same thread.
-struct nested_guard_error : std::logic_error {
-    nested_guard_error()
-        : std::logic_error("jaal: nested guarded<T> locks on one thread "
-                           "(lock-order deadlock risk)") {}
-};
-
 namespace detail::guard {
 
 // Void results are fine; anything else must be safe to hand out.
 template <class R>
 concept escapable = std::is_void_v<R> || Sendable<std::remove_cv_t<R>>;
 
-#ifndef NDEBUG
-inline thread_local int held = 0;       // jaal's own allowlisted thread_local
-
-struct hold {
-    hold() {
-        if (held != 0) throw nested_guard_error{};
-        ++held;
-    }
-    ~hold() { --held; }
-    hold(const hold&)            = delete;
-    hold& operator=(const hold&) = delete;
-};
-#else
-struct hold {};
-#endif
+// No captures: an empty, default-constructible callable is a lambda with an
+// empty capture list (or a stateless function object). That's what makes
+// "the function can only reach its arguments" true.
+template <class F>
+concept captureless = std::is_empty_v<std::remove_cvref_t<F>>
+                   && std::default_initializable<std::remove_cvref_t<F>>;
 
 }  // namespace detail::guard
 
@@ -80,47 +75,55 @@ public:
     guarded(guarded&&)                 = delete;
     guarded& operator=(guarded&&)      = delete;
 
-    /// Exclusive access. f's result must not point into T.
-    template <std::invocable<T&> F>
-        requires detail::guard::escapable<std::invoke_result_t<F, T&>>
-    auto with(F&& f) -> std::invoke_result_t<F, T&> {
-        [[maybe_unused]] detail::guard::hold h;          // before the lock: throws with nothing held
+    /// Exclusive access: f(T&, args...). f is captureless; args are moved
+    /// in and must be Sendable; the result must not point into T.
+    template <class F, class... Args>
+    auto with(F f, Args... args) -> std::invoke_result_t<F&, T&, Args&&...> {
+        check<F, T&, Args...>();
         std::unique_lock lk(m_);
-        return std::invoke(std::forward<F>(f), value_);
+        return f(value_, std::move(args)...);
     }
 
-    /// Shared access: many readers at once, no writer. f's result must not
-    /// point into T.
-    template <std::invocable<const T&> F>
-        requires detail::guard::escapable<std::invoke_result_t<F, const T&>>
-    auto read(F&& f) const -> std::invoke_result_t<F, const T&> {
-        [[maybe_unused]] detail::guard::hold h;
+    /// Shared access: f(const T&, args...). Many readers at once, no
+    /// writer. Same rules as with().
+    template <class F, class... Args>
+    auto read(F f, Args... args) const -> std::invoke_result_t<F&, const T&, Args&&...> {
+        check<F, const T&, Args...>();
         std::shared_lock lk(m_);
-        return std::invoke(std::forward<F>(f), std::as_const(value_));
-    }
-
-    // Same calls with a result that would point into the locked data:
-    // explain instead of "no matching function".
-    template <std::invocable<T&> F>
-        requires (!detail::guard::escapable<std::invoke_result_t<F, T&>>)
-    void with(F&&) {
-        static_assert(detail::guard::escapable<std::invoke_result_t<F, T&>>,
-                      "jaal: guarded<T>::with's lambda returns something that points "
-                      "into the locked data (a reference, pointer or view); return a "
-                      "copy instead");
-    }
-    template <std::invocable<const T&> F>
-        requires (!detail::guard::escapable<std::invoke_result_t<F, const T&>>)
-    void read(F&&) const {
-        static_assert(detail::guard::escapable<std::invoke_result_t<F, const T&>>,
-                      "jaal: guarded<T>::read's lambda returns something that points "
-                      "into the locked data (a reference, pointer or view); return a "
-                      "copy instead");
+        return f(std::as_const(value_), std::move(args)...);
     }
 
 private:
+    // One place, one message per rule, in the order a reader should fix
+    // them. static_assert inside the body (rather than a requires-clause)
+    // so the error is the sentence, not "no matching function".
+    template <class F, class Ref, class... Args>
+    static consteval void check() {
+        static_assert(detail::guard::captureless<F>,
+                      "jaal: guarded<T>::with/read takes a CAPTURELESS function; pass what it "
+                      "needs as arguments after it. (A capture could name a second lock, and "
+                      "holding two locks is how deadlocks start.)");
+        static_assert((Sendable<Args> && ...),
+                      "jaal: an argument to guarded<T>::with/read is not Sendable. A pointer, "
+                      "reference or guarded<U> could reach a second lock while this one is "
+                      "held; pass owned values.");
+        if constexpr (detail::guard::captureless<F> && (Sendable<Args> && ...)) {
+            static_assert(std::invocable<F&, Ref, Args&&...>,
+                          "jaal: guarded<T>::with/read: the function can't be called as "
+                          "f(T&, args...) (read: f(const T&, args...))");
+            if constexpr (std::invocable<F&, Ref, Args&&...>)
+                static_assert(detail::guard::escapable<std::invoke_result_t<F&, Ref, Args&&...>>,
+                              "jaal: guarded<T>::with/read returns something that points into "
+                              "the locked data (a reference, pointer or view); return a copy "
+                              "instead");
+        }
+    }
+
     mutable std::shared_mutex m_;
     T                         value_{};
 };
+
+// A guarded<T> owns a lock; it never crosses into another lock's body.
+template <class T> inline constexpr bool sendable_opt_out<guarded<T>> = true;
 
 }  // namespace jaal
