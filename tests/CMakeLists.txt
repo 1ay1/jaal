@@ -31,6 +31,7 @@ jaal_static_test(core_sendable_test core/sendable_test.cpp)
 jaal_test(core_frozen_test core/frozen_test.cpp)
 jaal_test(core_cmd_test core/cmd_test.cpp)
 jaal_test(core_sub_test core/sub_test.cpp)
+jaal_test(kernel_parts_test kernel/kernel_parts_test.cpp)
 
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)
