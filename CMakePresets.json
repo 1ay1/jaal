@@ -56,14 +56,21 @@
       }
     },
     {
-      "name": "mingw",
-      "displayName": "Windows cross-compile via llvm-mingw",
+      "name": "clang",
+      "displayName": "Debug with clang (second compiler)",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_SYSTEM_NAME": "Windows",
-        "CMAKE_CXX_COMPILER": "x86_64-w64-mingw32-clang++",
-        "JAAL_SPLIT_DWARF": "OFF"
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "mingw",
+      "displayName": "Windows cross-compile via llvm-mingw (tests run under wine)",
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/llvm-mingw.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     }
   ],
@@ -73,12 +80,25 @@
     { "name": "ci",      "configurePreset": "ci" },
     { "name": "asan",    "configurePreset": "asan" },
     { "name": "tsan",    "configurePreset": "tsan" },
+    { "name": "clang",   "configurePreset": "clang" },
     { "name": "mingw",   "configurePreset": "mingw" }
   ],
   "testPresets": [
     {
       "name": "dev",
       "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 12 }
+    },
+    {
+      "name": "clang",
+      "configurePreset": "clang",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 12 }
+    },
+    {
+      "name": "mingw",
+      "configurePreset": "mingw",
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 12 }
     },
