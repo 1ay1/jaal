@@ -233,6 +233,43 @@ public:
         return Sub(*this).map(std::move(f));
     }
 
+    /// Re-target with a mapper that also gets an ID: `f(id, msg)`. The Sub
+    /// counterpart of Cmd::map_with — a stream's mapper runs on the stream's
+    /// own thread and so can't capture, but it can carry a Sendable id by
+    /// value. That's what lets a keyed list of children subscribe
+    /// (core/children.hpp).
+    template <class Id, class F>
+        requires std::invocable<F, const Id&, Msg>
+    [[nodiscard]] auto map_with(Id id, F f) &&
+        -> Sub<std::invoke_result_t<F, const Id&, Msg>, row_type> {
+        using To = Sub<std::invoke_result_t<F, const Id&, Msg>, row_type>;
+        return std::visit([&]<class X>(X&& x) -> To {
+            using U = std::remove_cvref_t<X>;
+            if constexpr (std::same_as<U, None>) {
+                return To{};
+            } else if constexpr (std::same_as<U, Batch>) {
+                typename To::Batch b;
+                b.subs.reserve(x.subs.size());
+                for (auto& s : x.subs) b.subs.push_back(std::move(s).map_with(id, f));
+                To t;
+                t.inner = std::move(b);
+                return t;
+            } else {
+                To out;
+                ([&] {
+                    if constexpr (std::same_as<U, payload_t<Ds, Msg>>) {
+                        static_assert(
+                            requires { Ds::fmap_with(id, f, std::forward<X>(x)); },
+                            "jaal: this source has no fmap_with, so it can't be mapped "
+                            "with an id; add fmap_with(id, f, payload) next to its fmap");
+                        out = To(Ds::fmap_with(id, f, std::forward<X>(x)));
+                    }
+                }(), ...);
+                return out;
+            }
+        }, std::move(inner));
+    }
+
     [[nodiscard]] bool is_none() const noexcept {
         return std::holds_alternative<None>(inner);
     }
@@ -315,6 +352,11 @@ struct every {
     template <class F, class M>
     static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
         return {e.interval, std::invoke(std::forward<F>(f), std::move(e.msg))};
+    }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, type<M> e)
+        -> type<std::invoke_result_t<F, const Id&, M>> {
+        return {e.interval, std::invoke(std::forward<F>(f), id, std::move(e.msg))};
     }
 
     struct key_type {

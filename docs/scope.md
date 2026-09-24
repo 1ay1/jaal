@@ -62,12 +62,16 @@ subscription lifecycle. Everything else is a library on top of `task` and
 
 | name | kind | what it does |
 |---|---|---|
-| `quit(code)` | effect | stop after the current message |
+| `quit(code)` | effect | stop after the current batch |
+| `send(msg)` | effect | a message straight back into the loop, folded this step |
 | `after(d, msg)` | effect | one-shot timer |
 | `task(body, args...)` | effect | run once on the worker pool, result as a Msg |
 | `task(isolated, body, args...)` | effect | same, on its own thread (for work that may hang) |
 | `now(f)` | effect | the kernel's clock as a Msg (simulated in tests) |
 | `random(f)` | effect | draws from the kernel's seeded generator as a Msg (reproducible) |
+| `child<C, Msg, Wrap>` | composition | one child program in a fixed slot |
+| `children<C, Msg, Wrap>` | composition | a keyed LIST of child programs; stream keys are per child |
+| `debounce<T>` / `throttle` | model values | "settle before acting" and "at most once per interval" |
 | `every(d, msg)` | source | repeating timer; keeps its phase across model changes |
 | `stream(key, body, args...)` | source | long-running work; runs while subscribed, cancelled when not |
 | `on_signal(set, f)` | router | Ctrl+C, terminate, hangup, resize, child as messages |

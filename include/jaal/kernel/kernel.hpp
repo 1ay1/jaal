@@ -580,6 +580,10 @@ private:
                 }
             } else if constexpr (std::same_as<U, payload_t<fx::quit, msg_type>>) {
                 if (!exit_) exit_ = x.code;
+            } else if constexpr (std::same_as<U, payload_t<fx::send, msg_type>>) {
+                // Straight onto the pending queue: folded in this step, in
+                // the order the effects were returned. No timer involved.
+                pending_.push_back(std::move(x.msg));
             } else if constexpr (std::same_as<U, payload_t<fx::after, msg_type>>) {
                 timers_.after(clock_.now(), x.delay, std::move(x.msg));
             } else if constexpr (std::same_as<U, payload_t<fx::task, msg_type>>) {

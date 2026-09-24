@@ -266,6 +266,9 @@ private:
             } else if constexpr (in_row<fx::random, typename cmd_type::row_type>
                                  && std::same_as<U, payload_t<fx::random, msg_type>>) {
                 produced.push_back(x.to_msg(rng_));
+            } else if constexpr (in_row<fx::send, typename cmd_type::row_type>
+                                 && std::same_as<U, payload_t<fx::send, msg_type>>) {
+                produced.push_back(std::move(x.msg));
             }
         }, std::move(c.inner));
     }

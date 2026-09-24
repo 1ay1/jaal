@@ -74,6 +74,15 @@ public:
         return task_thunk<To>::from_mapped(std::move(*this), f);
     }
 
+    /// Re-target with an ID carried by value: `f(id, msg)`. This is how a
+    /// LIST of children maps its messages (core/children.hpp) without a
+    /// capture. The id is owned and Sendable, so the worker thread gets its
+    /// own copy and nothing is borrowed from the loop.
+    template <class To, class Id>
+    auto map_with(Id id, To (*f)(const Id&, Msg)) && -> task_thunk<To> {
+        return task_thunk<To>::from_mapped_with(std::move(*this), std::move(id), f);
+    }
+
 private:
     template <class> friend class task_thunk;
 
@@ -122,6 +131,36 @@ private:
         return task_thunk(std::make_unique<mapped>(std::move(inner), f));
     }
 
+    // Same, with an owned id passed to every mapping call. The id lives in
+    // the thunk (not in a capture), so it crosses to the worker thread by
+    // value like any task argument.
+    template <class From, class Id>
+    static task_thunk from_mapped_with(task_thunk<From> inner, Id id,
+                                       Msg (*f)(const Id&, From)) {
+        struct mapped final : base {
+            task_thunk<From> inner;
+            Id               id;
+            Msg (*f)(const Id&, From);
+            mapped(task_thunk<From> i, Id k, Msg (*g)(const Id&, From))
+                : inner(std::move(i)), id(std::move(k)), f(g) {}
+            void invoke(Sink<Msg> out, std::stop_token st) && override {
+                struct fwd final : mailbox_iface<From> {
+                    Sink<Msg> out;
+                    Id        id;
+                    Msg (*f)(const Id&, From);
+                    fwd(Sink<Msg> o, Id k, Msg (*g)(const Id&, From))
+                        : out(std::move(o)), id(std::move(k)), f(g) {}
+                    bool post(From m) override { return out.send(f(id, std::move(m))); }
+                };
+                auto box = std::make_shared<fwd>(std::move(out), std::move(id), f);
+                auto s   = sink_access::make<From>(
+                    std::weak_ptr<mailbox_iface<From>>(box));
+                std::move(inner).run(std::move(s), std::move(st));
+            }
+        };
+        return task_thunk(std::make_unique<mapped>(std::move(inner), std::move(id), f));
+    }
+
     std::unique_ptr<base> body_;
 };
 
@@ -138,9 +177,49 @@ struct quit {
     };
     template <class F, class M>
     static auto fmap(F&&, type<M> e) -> type<std::invoke_result_t<F, M>> { return {e.code}; }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id&, F&&, type<M> e)
+        -> type<std::invoke_result_t<F, const Id&, M>> { return {e.code}; }
 
     template <class Self, class Msg> struct ctors {
         [[nodiscard]] static Self quit(int code = 0) { return Self(type<Msg>{code}); }
+    };
+};
+
+/// Feed a message straight back into the loop.
+///
+/// The composition primitive: one update path reuses another without
+/// calling it directly, so every state change still goes through the fold
+/// (and so replay, tracing and `given` all see it).
+///
+///   return {m, Cmd::send(Msg{Refresh{}})};      // "and now also refresh"
+///
+/// Folded in the SAME step as the message that returned it, after the
+/// current batch's effects are interpreted, in the order they were
+/// returned. It is not a timer: `after(0ms, m)` goes through the timer heap
+/// and doesn't arrive until the next step, which makes a UI feel a frame
+/// late and makes tests sleep for no reason.
+///
+/// A program that sends itself a message on every fold never lets the loop
+/// idle; the fold budget (options::fold_budget) keeps that from starving
+/// the host, but it's still a bug.
+struct send {
+    static constexpr std::string_view name = "send";
+    template <class Msg> struct type {
+        Msg msg;
+    };
+    template <class F, class M>
+    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
+        return {std::invoke(std::forward<F>(f), std::move(e.msg))};
+    }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, type<M> e)
+        -> type<std::invoke_result_t<F, const Id&, M>> {
+        return {std::invoke(std::forward<F>(f), id, std::move(e.msg))};
+    }
+
+    template <class Self, class Msg> struct ctors {
+        [[nodiscard]] static Self send(Msg m) { return Self(type<Msg>{std::move(m)}); }
     };
 };
 
@@ -154,6 +233,11 @@ struct after {
     template <class F, class M>
     static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
         return {e.delay, std::invoke(std::forward<F>(f), std::move(e.msg))};
+    }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, type<M> e)
+        -> type<std::invoke_result_t<F, const Id&, M>> {
+        return {e.delay, std::invoke(std::forward<F>(f), id, std::move(e.msg))};
     }
 
     template <class Self, class Msg> struct ctors {
@@ -198,6 +282,19 @@ struct task {
                       "captureless mapper (it runs on the worker thread)");
         To (*fp)(M) = f;
         return {std::move(e.thunk).map(fp), e.where};
+    }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, type<M> e)
+        -> type<std::invoke_result_t<F, const Id&, M>> {
+        using To = std::invoke_result_t<F, const Id&, M>;
+        static_assert(std::is_convertible_v<std::remove_cvref_t<F>, To (*)(const Id&, M)>,
+                      "jaal: mapping a Cmd that holds a task needs a captureless "
+                      "mapper (it runs on the worker thread)");
+        static_assert(Sendable<Id>,
+                      "jaal: the id a task's mapper carries crosses to the worker "
+                      "thread, so it must be Sendable");
+        To (*fp)(const Id&, M) = f;
+        return {std::move(e.thunk).template map_with<To, Id>(id, fp), e.where};
     }
     template <class Self, class Msg> struct ctors {
         template <class Body, class... Args>
@@ -270,6 +367,15 @@ struct now {
             return f(g(t));
         }};
     }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, type<M> e)
+        -> type<std::invoke_result_t<F, const Id&, M>> {
+        using To = std::invoke_result_t<F, const Id&, M>;
+        // Runs on the loop thread, so this one may capture the id.
+        return {[g = std::move(e.to_msg), f = std::forward<F>(f), id](time_point t) -> To {
+            return f(id, g(t));
+        }};
+    }
     template <class Self, class Msg> struct ctors {
         template <class F>
             requires std::is_invocable_r_v<Msg, F&, time_point>
@@ -303,6 +409,14 @@ struct random {
         using To = std::invoke_result_t<F, M>;
         return {[g = std::move(e.to_msg), f = std::forward<F>(f)](rng& r) -> To {
             return f(g(r));
+        }};
+    }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, type<M> e)
+        -> type<std::invoke_result_t<F, const Id&, M>> {
+        using To = std::invoke_result_t<F, const Id&, M>;
+        return {[g = std::move(e.to_msg), f = std::forward<F>(f), id](rng& r) -> To {
+            return f(id, g(r));
         }};
     }
     template <class Self, class Msg> struct ctors {

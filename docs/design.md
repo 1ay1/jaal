@@ -884,99 +884,125 @@ an include-graph test (section 9).
 ```
 jaal/
 ├── CMakeLists.txt
-├── CMakePresets.json             dev, release, asan, tsan, sim, mingw-cross
-├── design.md                     this file
-├── concurrency.md                memory and concurrency safety, from maya's code up
+├── CMakePresets.json             dev, release, ci, asan, tsan, clang, mingw
 ├── README.md
 ├── LICENSE                       MIT
 ├── cmake/
 │   ├── jaal-config.cmake.in
-│   ├── warnings.cmake
-│   └── compile_fail.cmake        negative-compile test harness
+│   ├── JaalWarnings.cmake
+│   ├── JaalFastBuild.cmake       ccache, fast linker, split DWARF, unity
+│   ├── JaalCompileFail.cmake     negative-compile test harness
+│   └── toolchains/llvm-mingw.cmake
+│
+├── docs/
+│   ├── design.md                 this file
+│   ├── decisions.md              every decision, and why
+│   ├── scope.md                  what's offered, what isn't, what's planned
+│   ├── concurrency.md            the memory and concurrency model
+│   └── hosts.md                  how to write a host (maya, a GUI, a server)
 │
 ├── include/jaal/
-│   ├── jaal.hpp                  umbrella: core + kernel + native platform
+│   ├── jaal.hpp                  everything: core + kernel + native platform
+│   ├── meta.hpp   core.hpp   kernel.hpp   platform.hpp   host.hpp
+│   │                             one umbrella per layer; include the layer
+│   │                             you need, or jaal.hpp for all of it
 │   │
 │   ├── meta/                     no dependencies at all
 │   │   ├── list.hpp              list, member_of, subset_of, unique, index_of
 │   │   ├── algo.hpp              concat, dedup, minus, map, filter
+│   │   ├── fields.hpp            field types of an aggregate (binding packs)
 │   │   ├── fixed_string.hpp      NTTP strings for effect names
+│   │   ├── type_name.hpp         readable type names for diagnostics
 │   │   └── diagnose.hpp          named static_assert helpers
 │   │
 │   ├── core/                     the types apps write against
 │   │   ├── program.hpp           Program, Viewable, Subscribing, fx_of, src_of
+│   │   ├── program_base.hpp      program<Model, Msg, fx_list, src_list>
 │   │   ├── effect.hpp            Effect concept, pure_fx
-│   │   ├── row.hpp               row, subrow_of, row_union_t
-│   │   ├── cmd.hpp               Cmd<Msg, Row>
-│   │   ├── sub.hpp               Sub<Msg, Row>, Router, Source, any_key
+│   │   ├── row.hpp               row, subrow_of, row_union
+│   │   ├── cmd.hpp               Cmd<Msg, Row>, map, map_with
+│   │   ├── sub.hpp               Sub<Msg, Row>, every, routers
+│   │   ├── fx.hpp                quit, send, after, task, now, random
+│   │   ├── core_fx.hpp           core_fx / core_src, CoreCmd / CoreSub
+│   │   ├── stream.hpp            the stream source
 │   │   ├── sink.hpp              Sink<Msg>
-│   │   ├── sendable.hpp          deep Sendable (structured binding packs), opt-in
-│   │   ├── frozen.hpp            Frozen, shared<T>
-│   │   ├── error.hpp             error, result<T>
-│   │   └── fx/                   the core effect and source descriptors
-│   │       ├── quit.hpp
-│   │       ├── after.hpp
-│   │       ├── task.hpp          task, isolated_task
-│   │       └── every.hpp
+│   │   ├── child.hpp             one child program in a fixed slot
+│   │   ├── children.hpp          a keyed LIST of child programs
+│   │   ├── debounce.hpp          debounce<T>, throttle
+│   │   ├── rng.hpp               the portable generator behind fx::random
+│   │   ├── sendable.hpp          deep Sendable (binding packs), opt-in
+│   │   ├── frozen.hpp            Frozen
+│   │   ├── shared.hpp            shared<T>: shared, immutable, Sendable
+│   │   ├── diff.hpp              structural diff, for timeline
+│   │   ├── walk.hpp  stdshape.hpp  the shared type-walking machinery
+│   │   ├── overload.hpp          the std::visit helper
+│   │   └── error.hpp             error, result<T>
 │   │
 │   ├── kernel/
-│   │   ├── kernel.hpp            kernel<P, Pl>
-│   │   ├── fold.hpp              the Msg fold, budgets
-│   │   ├── interpret.hpp         effect dispatch, handles, HostFor
+│   │   ├── kernel.hpp            kernel<P, Event, Clock>: fold + interpret
+│   │   ├── run.hpp               run<P>(host), host_context, on_signal
 │   │   ├── reconcile.hpp         keyed source diffing
 │   │   ├── timer_heap.hpp        4-ary heap with stable handles
 │   │   ├── mailbox.hpp           MPSC queue + waker protocol
-│   │   ├── pool.hpp              worker pool, stop tokens
+│   │   ├── pool.hpp  executor.hpp  worker pool, stop tokens, placement
 │   │   ├── loop.hpp              loop_token, loop_bound<T>
 │   │   ├── scope.hpp             scope + nursery (structured concurrency)
 │   │   ├── guarded.hpp           guarded<T>
-│   │   └── run.hpp               the generic run<P>(host) loop
+│   │   ├── fault.hpp             fault_policy, fault_site, handlers
+│   │   ├── trace.hpp             trace_hook, trace_event
+│   │   ├── replay.hpp            recorder, replay, replay_each
+│   │   └── timeline.hpp          step through a recorded run
 │   │
-│   ├── platform/
-│   │   ├── concepts.hpp          Platform, Clock, Reactor, Waker, SignalSource, ThreadSpawner
-│   │   ├── handle.hpp            unique_handle, handle_ref, traits
-│   │   ├── deadline.hpp          deadline<Clock>, ceil rounding
+│   ├── platform/                 NO OS headers anywhere in this tree
+│   │   ├── concepts.hpp          Reactor, interest, readiness, wait_result
+│   │   ├── clock.hpp             steady_clock, sim_clock
 │   │   ├── signal.hpp            portable signal enum, signal_set
-│   │   ├── restore_guard.hpp
-│   │   ├── select.hpp            native_platform, the only #if chain
-│   │   ├── linux/                epoll_reactor, eventfd_waker, signalfd_signals
-│   │   ├── darwin/               kqueue_reactor, kqueue_user_waker, kqueue_signals
-│   │   ├── posix/                poll_reactor, pipe_waker, self_pipe_signals, std_threads
-│   │   ├── windows/              wait_reactor, event_waker, console_ctrl_signals
-│   │   └── sim/                  sim_clock, sim_reactor, sim_waker, sim_signals, sim_threads
+│   │   ├── select.hpp            native_reactor, the only #if chain
+│   │   ├── linux/                epoll_reactor
+│   │   ├── darwin/               kqueue_reactor
+│   │   ├── posix/                poll_reactor, posix_signals
+│   │   └── windows/              wait_reactor, console_signals
 │   │
 │   └── host/
-│       ├── concepts.hpp          HostFor, handles_all
-│       └── headless.hpp          recording host on sim_platform
+│       ├── given.hpp             update tested as data, no kernel
+│       ├── headless.hpp          a real kernel, a fake clock, effects recorded
+│       └── sim.hpp               a whole run from one seed, explore()
 │
 ├── src/
-│   └── platform/                 one .cpp per backend; OS headers live only here
-│       ├── linux/
-│       ├── darwin/
-│       ├── posix/
-│       └── windows/
+│   └── platform/                 one .cpp per backend; OS headers ONLY here
+│       ├── posix/                poll_reactor.cpp, signals.cpp
+│       ├── linux/                epoll_reactor.cpp
+│       ├── darwin/               kqueue_reactor.cpp
+│       └── windows/              wait_reactor.cpp, console_signals.cpp
 │
 ├── tests/
 │   ├── meta/                     static_assert tests: compiling = passing
-│   ├── core/                     Cmd/Sub laws, row widening, Sendable
+│   ├── core/                     Cmd/Sub laws, rows, Sendable, children, rng
 │   ├── kernel/                   the carried-over maya bugs (section 9.2)
 │   ├── platform/
 │   │   ├── conformance.cpp       one template, run against every backend
-│   │   └── sim_faults.cpp
+│   │   └── signals_test.cpp
 │   ├── compile_fail/             programs that must NOT compile
-│   └── layering/                 include-graph check
+│   ├── layering/                 include-graph check
+│   └── lint/                     raw-concurrency banlist + allowlist
 │
 ├── examples/
-│   ├── counter.cpp               headless counter
-│   ├── ticker.cpp                every + after, real clock
-│   └── embed.cpp                 driving the kernel from someone else's loop
+│   ├── ticker.cpp                every + after + a signal, on the real clock
+│   └── host.cpp                  a complete host: events, router, effect, draw
 │
 └── bench/
-    ├── fold.cpp                  Msgs per second through update
-    └── wake.cpp                  cross-thread wake latency
+    └── bench.cpp                 fold, cross-thread wake, reconcile, sim
 ```
 
 Notes:
+
+- **Each layer has an umbrella header next to its directory**, so
+  `<jaal/core.hpp>` is the layer and `jaal/core/` is its parts. That's why
+  `meta.hpp` sits beside `meta/` rather than inside it: a directory can't be
+  a header, and putting `meta/meta.hpp` inside would make the include read
+  `<jaal/meta/meta.hpp>`. Depend on the narrowest one that covers you — a
+  library of effect descriptors needs only `<jaal/core.hpp>` and will never
+  pull in a thread or an OS handle; an application uses `<jaal/jaal.hpp>`.
 
 - **Headers declare, `src/` implements, for platform code.** OS headers
   (`<sys/epoll.h>`, `<windows.h>`) are included only in `src/platform/`, so

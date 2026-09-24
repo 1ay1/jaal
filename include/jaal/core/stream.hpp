@@ -80,6 +80,14 @@ public:
         return stream_factory<To>::from_mapped(*this, g);
     }
 
+    /// Re-target with an ID carried by value: `g(id, msg)`. For a keyed list
+    /// of children (core/children.hpp), where the mapper must know WHICH
+    /// child a message came from but still can't capture.
+    template <class To, class Id>
+    stream_factory<To> map_with(Id id, To (*g)(const Id&, Msg)) const {
+        return stream_factory<To>::from_mapped_with(*this, std::move(id), g);
+    }
+
 private:
     template <class> friend class stream_factory;
 
@@ -120,6 +128,33 @@ private:
         return stream_factory(std::make_shared<mapped>(std::move(inner), g));
     }
 
+    // Same, with an owned id handed to every mapping call.
+    template <class From, class Id>
+    static stream_factory from_mapped_with(stream_factory<From> inner, Id id,
+                                           Msg (*g)(const Id&, From)) {
+        struct mapped final : base {
+            stream_factory<From> inner;
+            Id                   id;
+            Msg (*g)(const Id&, From);
+            mapped(stream_factory<From> i, Id k, Msg (*h)(const Id&, From))
+                : inner(std::move(i)), id(std::move(k)), g(h) {}
+            void invoke(Sink<Msg> out, std::stop_token st) const override {
+                struct fwd final : mailbox_iface<From> {
+                    Sink<Msg> out;
+                    Id        id;
+                    Msg (*g)(const Id&, From);
+                    fwd(Sink<Msg> o, Id k, Msg (*h)(const Id&, From))
+                        : out(std::move(o)), id(std::move(k)), g(h) {}
+                    bool post(From m) override { return out.send(g(id, std::move(m))); }
+                };
+                auto box = std::make_shared<fwd>(std::move(out), id, g);
+                inner.run(sink_access::make<From>(std::weak_ptr<mailbox_iface<From>>(box)),
+                          std::move(st));
+            }
+        };
+        return stream_factory(std::make_shared<mapped>(std::move(inner), std::move(id), g));
+    }
+
     explicit stream_factory(std::shared_ptr<const base> f) noexcept : f_(std::move(f)) {}
     std::shared_ptr<const base> f_;       // immutable, shared across keeps
 };
@@ -144,6 +179,19 @@ struct stream {
                       "mapper (it runs on the stream's thread)");
         To (*fp)(M) = f;
         return {std::move(e.key), e.body.map(fp)};
+    }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, type<M> e)
+        -> type<std::invoke_result_t<F, const Id&, M>> {
+        using To = std::invoke_result_t<F, const Id&, M>;
+        static_assert(std::is_convertible_v<std::remove_cvref_t<F>, To (*)(const Id&, M)>,
+                      "jaal: mapping a Sub that holds a stream needs a captureless "
+                      "mapper (it runs on the stream's thread)");
+        static_assert(Sendable<Id>,
+                      "jaal: the id a stream's mapper carries crosses to the stream "
+                      "thread, so it must be Sendable");
+        To (*fp)(const Id&, M) = f;
+        return {std::move(e.key), e.body.template map_with<To, Id>(id, fp)};
     }
 
     // Source: identity is the key.

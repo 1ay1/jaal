@@ -12,8 +12,10 @@
 // Docs: docs/scope.md (what's offered), docs/decisions.md (why).
 
 #include "core/child.hpp"
+#include "core/children.hpp"
 #include "core/cmd.hpp"
 #include "core/core_fx.hpp"
+#include "core/debounce.hpp"
 #include "core/diff.hpp"
 #include "core/effect.hpp"
 #include "core/frozen.hpp"

@@ -183,6 +183,37 @@ public:
         return Cmd(*this).map(std::move(f));
     }
 
+    /// Re-target every effect with a mapper that also gets an ID: `f(id, msg)`.
+    ///
+    /// This is what map() can't do for background work. A task's or stream's
+    /// mapper runs on another thread, so it must be captureless — which means
+    /// a plain map() can never tell the mapper WHICH of several children a
+    /// message belongs to. Here the id travels in the effect by value
+    /// (Sendable, like any task argument) instead of in a capture, so a keyed
+    /// LIST of children works for every effect, tasks and streams included
+    /// (core/children.hpp).
+    template <class Id, class F>
+        requires std::invocable<F, const Id&, Msg>
+    [[nodiscard]] auto map_with(Id id, F f) &&
+        -> Cmd<std::invoke_result_t<F, const Id&, Msg>, row_type> {
+        using To = Cmd<std::invoke_result_t<F, const Id&, Msg>, row_type>;
+        return std::visit([&]<class X>(X&& x) -> To {
+            using U = std::remove_cvref_t<X>;
+            if constexpr (std::same_as<U, None>) {
+                return To{};
+            } else if constexpr (std::same_as<U, Batch>) {
+                typename To::Batch b;
+                b.cmds.reserve(x.cmds.size());
+                for (auto& c : x.cmds) b.cmds.push_back(std::move(c).map_with(id, f));
+                To t;
+                t.inner = std::move(b);
+                return t;
+            } else {
+                return map_payload_with<To>(id, f, std::forward<X>(x));
+            }
+        }, std::move(inner));
+    }
+
     // ── queries ─────────────────────────────────────────────────────────
     [[nodiscard]] bool is_none() const noexcept {
         return std::holds_alternative<None>(inner);
@@ -221,6 +252,25 @@ private:
             }
         }(), ...);
         (void)done;
+        return out;
+    }
+
+    // Same, through fmap_with, so the mapper is handed the id. An effect
+    // that carries a Msg must provide fmap_with to be usable here; the
+    // static_assert says so instead of failing deep inside the pack.
+    template <class To, class Id, class F, class P>
+    static To map_payload_with(const Id& id, F& f, P&& p) {
+        using U = std::remove_cvref_t<P>;
+        To out;
+        ([&] {
+            if constexpr (std::same_as<U, payload_t<Ds, Msg>>) {
+                static_assert(
+                    requires { Ds::fmap_with(id, f, std::forward<P>(p)); },
+                    "jaal: this effect has no fmap_with, so it can't be mapped with "
+                    "an id; add fmap_with(id, f, payload) next to its fmap");
+                out = To(Ds::fmap_with(id, f, std::forward<P>(p)));
+            }
+        }(), ...);
         return out;
     }
 

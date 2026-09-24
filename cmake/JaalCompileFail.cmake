@@ -43,7 +43,24 @@ function(jaal_compile_fail)
     if(JAAL_STD_FLAG)
         set(_std "${JAAL_STD_FLAG}")
     endif()
+    # These tests build the compiler command line by hand, so the bits CMake
+    # normally adds for us have to be added here too. On macOS that's the
+    # SDK: without -isysroot the compiler can't even find <concepts>, and
+    # every case would "fail" for the wrong reason (a missing header instead
+    # of the diagnostic under test) — which a PASS_REGULAR_EXPRESSION check
+    # reports as a failure, correctly but confusingly.
+    set(_sysroot "")
+    if(APPLE AND CMAKE_OSX_SYSROOT)
+        list(APPEND _sysroot -isysroot "${CMAKE_OSX_SYSROOT}")
+    endif()
+    foreach(_arch IN LISTS CMAKE_OSX_ARCHITECTURES)
+        list(APPEND _sysroot -arch "${_arch}")
+    endforeach()
+    if(CMAKE_SYSROOT AND NOT APPLE)
+        list(APPEND _sysroot "--sysroot=${CMAKE_SYSROOT}")
+    endif()
     set(_cmd ${CMAKE_CXX_COMPILER} ${CMAKE_CXX_COMPILER_ARG1} ${_flags} ${_std}
+             ${_sysroot}
              "-I${PROJECT_SOURCE_DIR}/include")
     if(DEFINED ARG_CASE)
         list(APPEND _cmd "-DJAAL_CASE=${ARG_CASE}")

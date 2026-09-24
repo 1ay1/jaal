@@ -285,8 +285,8 @@ failure.
 
 **Decision.** An effect or source is built in only if it can't be written
 outside jaal, because it needs the kernel's clock, worker pool, fold or
-subscription lifecycle. The core is: `quit`, `after`, `task` (pool or
-isolated), `now`, `random`, `every`, `stream`, plus `on_signal` from
+subscription lifecycle. The core is: `quit`, `send`, `after`, `task` (pool
+or isolated), `now`, `random`, `every`, `stream`, plus `on_signal` from
 `run()`.
 
 **Alternatives.** Ship common effects (HTTP, files, processes, logging) in
@@ -302,6 +302,15 @@ only in which thread runs it. `now` was added because a task reading
 generator isn't reproducible, so a sim seed wouldn't reproduce a run and a
 bug found by `explore()` couldn't be replayed. The kernel owns the stream
 and reports the seed it used (`seed_used()`), so a real crash comes back.
+`send` was added because the fold is the kernel's: the alternative,
+`after(0ms, m)`, goes through the timer heap and doesn't arrive until the
+next step, so every "and also do this" cost a frame and made tests wait on a
+clock for something that isn't about time.
+
+By the same rule, `debounce<T>`, `throttle`, `child<>` and `children<>` are
+NOT effects. They need no clock, thread or subscription of their own, so
+they're plain values and type aliases in `core/` — which means they replay,
+fold under `given`, and cost nothing at runtime.
 
 ## D26. Invalid states are unrepresentable
 
@@ -365,3 +374,39 @@ default path is still the pool and nothing in `options` changed.
 
 **Measured.** A full run (kernel start, 3 inputs, 3 tasks, 2 invariants,
 shutdown) is ~1.1 us: about 900k seeds a second on one core.
+
+## D29. Composition carries the id by value, not in a capture
+
+**Decision.** `Cmd::map` and `Sub::map` take a mapper that must be a plain
+function pointer whenever the effect holds background work, because that
+mapper runs on the worker or stream thread. To make a keyed LIST of children
+possible, `map_with(id, f)` calls `f(id, msg)` with an owned, `Sendable` id
+stored in the effect. `children<Child, ParentMsg, Wrap>` is built on it.
+
+**Alternatives.**
+- Let `map` capture. That's the obvious fix and it's wrong: the capture
+  would have to cross a thread, and `Sendable` exists precisely to stop
+  that. A captured `this` or a reference into the model is a use-after-free
+  the moment the child is removed.
+- Make the id part of `Child::Msg`, so the child stamps its own id. Then
+  every child has to know its position in its parent, which is backwards,
+  and a child reused in two places needs two Msg types.
+- Type-erase the mapper into a `std::function`. Allocates per effect, and
+  still permits a capture that isn't `Sendable`.
+
+**Why.** The id is data, so it can travel like data: by value, as a task
+argument does. That keeps one rule ("nothing crosses a thread unless it's
+`Sendable`") instead of carving an exception into it. The check is local: an
+effect provides `fmap_with` or it can't be mapped with an id, and the error
+says which effect is missing it.
+
+**Cost.** Every effect that carries a `Msg` now needs `fmap_with` beside its
+`fmap` — five lines for a data effect, and for `task`/`stream` a second
+`static_assert` pair. A host adding its own effect only needs it if that
+effect should work inside a `children<>` list.
+
+**The bug it prevents.** Two children subscribing to the same stream key.
+The reconciler keys streams by string, so unprefixed they reconcile to ONE
+subscription: one child's feed silently drives the other, and closing either
+stops both. `children<>` prefixes each child's keys with its id, so they
+stay distinct and stop independently (`tests/core/children_test.cpp`).
