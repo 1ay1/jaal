@@ -1,5 +1,5 @@
 // tests/kernel/features_test.cpp — streams, now, tracing, replay,
-// program<>/router<>/step, and turn's exit representation.
+// router<> with the program shape, and turn's exit representation.
 
 #include <jaal/jaal.hpp>
 
@@ -22,21 +22,16 @@ struct Streamer {
     struct Model { bool on = true; int got = 0; int epoch = 0; };
     struct Item { int epoch; }; struct Toggle {}; struct Rekey {};
     using Msg = std::variant<Item, Toggle, Rekey>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::CoreSub<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* i = std::get_if<Item>(&msg)) {
-            // A stale stream's message must never arrive here.
-            if (i->epoch != m.epoch) std::abort();
-            ++m.got;
-        } else if (std::holds_alternative<Toggle>(msg)) {
-            m.on = !m.on;
-        } else {
-            ++m.epoch;                                // new key: new run
-        }
-        return {m, Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    static Cmd update(Model& m, Item i) {
+        // A stale stream's message must never arrive here.
+        if (i.epoch != m.epoch) std::abort();
+        ++m.got;
+        return {};
     }
+    static Cmd update(Model& m, Toggle) { m.on = !m.on; return {}; }
+    static Cmd update(Model& m, Rekey)  { ++m.epoch; return {}; }   // new key: new run
     static Sub subscribe(const Model& m) {
         if (!m.on) return Sub::none();
         return Sub::stream("s" + std::to_string(m.epoch),
@@ -75,14 +70,11 @@ struct Clocked {
     struct Model { std::chrono::nanoseconds seen{-1}; };
     struct Ask {}; struct At { std::chrono::steady_clock::time_point t; };
     using Msg = std::variant<Ask, At>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Ask>(msg))
-            return {m, Cmd::now([](auto t) { return Msg{At{t}}; })};
-        m.seen = std::get<At>(msg).t.time_since_epoch();
-        return {m, Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, Ask) {
+        return Cmd::now([](auto t) { return Msg{At{t}}; });
     }
+    static Cmd update(Model& m, At a) { m.seen = a.t.time_since_epoch(); return {}; }
 };
 
 int now_uses_kernel_clock() {
@@ -101,13 +93,9 @@ struct Traced {
     struct Model { int n = 0; };
     struct A {}; struct B {};
     using Msg = std::variant<A, B>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        ++m.n;
-        if (std::holds_alternative<B>(msg)) return {m, Cmd::after(1h, A{})};
-        return {m, Cmd::none()};
-    }
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, A) { ++m.n; return {}; }
+    static Cmd update(Model& m, B) { ++m.n; return Cmd::after(1h, A{}); }
 };
 
 int tracing() {
@@ -143,13 +131,12 @@ struct Ledger {
     };
     struct Add { int v; }; struct Work {};
     using Msg = std::variant<Add, Work>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* a = std::get_if<Add>(&msg)) { m.log.push_back(a->v); return {m, Cmd::none()}; }
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Add a) { m.log.push_back(a.v); return {}; }
+    static Cmd update(Model&, Work) {
         // an effect whose RESULT comes back as a message: replay must not
         // re-run it, the recorded Add already holds what it produced
-        return {m, Cmd::task([](Sink<Msg> out, std::stop_token) { out.send(Add{42}); })};
+        return Cmd::task([](Sink<Msg> out, std::stop_token) { out.send(Add{42}); });
     }
 };
 
@@ -171,19 +158,19 @@ int replay() {
     return 0;
 }
 
-// ── program<> / router<> / step ─────────────────────────────────────────
+// ── router<> in a program's Sub ─────────────────────────────────────────
 struct Key { char c; };
 using on_key = jaal::router<Key, "on_key">;
 
-struct KModel { std::string typed; };
-using KMsg = std::variant<Key>;
-
-struct Typist : jaal::program<KModel, KMsg, jaal::fx_list<>, jaal::src_list<on_key>> {
-    static Model init() { return {}; }
-    static step update(Model m, Msg msg) {
-        m.typed += std::get<Key>(msg).c;
-        if (m.typed == "quit") return {m, Cmd::quit(9)};
-        return m;                                     // a Model alone: no effects
+struct Typist {
+    struct Model { std::string typed; };
+    using Msg = std::variant<Key>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg, on_key>;
+    static Cmd update(Model& m, Key k) {
+        m.typed += k.c;
+        if (m.typed == "quit") return Cmd::quit(9);
+        return {};                                    // no effects
     }
     static Sub subscribe(const Model&) {
         return Sub::on(on_key{}, [](const Key& k) { return Msg{k}; });

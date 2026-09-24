@@ -1,13 +1,15 @@
 #pragma once
 // jaal::kernel faults — what happens when program code throws.
 //
-// update() takes the model BY VALUE and moves it in. If it throws, the
-// model it was given is gone: measured, a 3-element model came back with 0.
-// So "just catch it" isn't enough; the kernel has to decide, per program,
-// whether it can keep the last good model.
+// update() changes the model in place. If it throws halfway, the model is
+// half-changed: whatever update did before the throw stays done. So "just
+// catch it" isn't enough; the kernel has to decide, per program, whether
+// it can put back the last good model.
 //
-//   fault_policy::stop      (default) report the fault, keep the last good
-//                           model if it has one, and quit with exit code 70.
+//   fault_policy::stop      (default) report the fault and quit with exit
+//                           code 70. The model is left as update left it
+//                           (possibly half-changed): it's only read for
+//                           the final report, never folded into again.
 //                           The safe default: a program that threw is in a
 //                           state its author didn't plan for.
 //   fault_policy::skip      report the fault, drop the message that caused
@@ -19,10 +21,9 @@
 // that costs every message. It's only paid when it buys something:
 //   * copyable model + policy skip:  copy before each update; on a throw,
 //     restore it. Strong guarantee: the model is exactly as before.
-//   * move-only model, or policy stop: no copy. On a throw under skip, a
-//     move-only model can't be restored, so the kernel stops instead and
-//     says why. (`skip` with a move-only model is rejected at compile time
-//     rather than silently weakened: see kernel::options.)
+//   * move-only model, or policy stop: no copy. A move-only model can't be
+//     restored, so `skip` with one becomes `stop`, reported once at start
+//     (see kernel::options) rather than silently weakened.
 //
 // Faults from subscribe() and from effects run on the loop are handled the
 // same way. Faults from TASKS (worker threads) are reported separately (see

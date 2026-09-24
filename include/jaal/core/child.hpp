@@ -1,46 +1,43 @@
 #pragma once
-// jaal::child<Child, ParentMsg, Wrap> — embed one program inside another.
+// jaal::child<Child, Parent, Wrap> — embed one program inside another.
 //
-// The Elm way to compose: the parent keeps the child's Model as a field,
-// wraps the child's Msg in one of its own, and maps the child's Cmd and Sub
-// so their messages come back wrapped. Done by hand that's the same
-// boilerplate every time; child<> is that boilerplate, typed.
+// The parent keeps the child's Model as a field and gives the child's Msg a
+// case of its own. child<> is the wiring between them, typed:
 //
-//   struct Left  { Counter::Msg msg; };           // parent Msg alternatives
+//   struct Left  { Counter::Msg msg; };           // a case of the parent's Msg
 //   struct Right { Counter::Msg msg; };
 //   using Msg = std::variant<Left, Right, Reset>;
-//   using L = jaal::child<Counter, Msg, Left>;
-//   using R = jaal::child<Counter, Msg, Right>;
+//   using L = jaal::child<Counter, App, Left>;
+//   using R = jaal::child<Counter, App, Right>;
 //
-//   struct Model { Counter::Model left = L::model(), right = R::model(); };
-//   static std::pair<Model, Cmd> init() {
-//       auto [l, lc] = L::init();  auto [r, rc] = R::init();
-//       return {{l, r}, Cmd::batch(lc, rc)};
-//   }
-//   static std::pair<Model, Cmd> update(Model m, Msg msg) {
-//       if (auto* c = L::match(msg)) return {m, L::update(m.left, *c)};
-//       if (auto* c = R::match(msg)) return {m, R::update(m.right, *c)};
-//       ...
-//   }
+//   struct Model { Counter::Model left, right; };
+//   static Cmd init(Model& m) { return Cmd::batch(L::init(m.left), R::init(m.right)); }
+//   static Cmd update(Model& m, Left l)  { return L::update(m.left, l); }
+//   static Cmd update(Model& m, Right r) { return R::update(m.right, r); }
 //   static Sub subscribe(const Model& m) {
 //       return Sub::batch(L::subscribe(m.left, "left"), R::subscribe(m.right, "right"));
 //   }
 //
+// A child's messages reach the parent as an ordinary case, so routing them
+// is an ordinary update overload: no matching, no unwrapping.
+//
 // Rules, all checked by the compiler:
-//   * Wrap is an alternative of ParentMsg and is built from a Child::Msg
-//     (an aggregate `struct Wrap { Child::Msg msg; }` is the usual shape).
-//   * The child's Cmd/Sub rows must fit in the parent's: the returned Cmd
-//     has the CHILD's row and converts to the parent's only if every effect
-//     is allowed there (the usual widening rule). A child that needs an
-//     effect the parent doesn't list doesn't compile.
+//   * Wrap is a case of Parent::Msg and holds exactly one field, the
+//     child's Msg (`struct Wrap { Child::Msg msg; }`).
+//   * The child's effects must fit in the parent's: the returned Cmd has
+//     the CHILD's row and converts to the parent's only if every effect is
+//     allowed there. A child that needs an effect the parent doesn't list
+//     doesn't compile.
 //   * Stream keys get the given prefix ("left/feed"), so two copies of the
 //     same child don't fight over one key. `every` needs no prefix: equal
 //     timers already get separate ordinals.
 //
 // The wrapper is a captureless function, so it's allowed on task and stream
-// threads (Cmd::map / Sub::map require that). That's also why one child<>
-// is one fixed slot: a LIST of children (each with an id) needs the id in
-// the mapper, and that isn't supported yet.
+// threads (Cmd::map / Sub::map require that). For a variable number of
+// children, each with an id, see children<> (children.hpp).
+//
+// `Parent` is used only for its Msg, and only inside member functions, so
+// `using L = jaal::child<Counter, App, Left>;` may appear inside App itself.
 
 #include <string>
 #include <string_view>
@@ -48,7 +45,6 @@
 #include <utility>
 #include <variant>
 
-#include "../meta/list.hpp"
 #include "program.hpp"
 #include "stream.hpp"
 #include "sub.hpp"
@@ -76,67 +72,52 @@ void prefix_streams(S& s, std::string_view prefix) {
     }, s.inner);
 }
 
+// The child's Msg inside a one-field wrapper case.
+template <class Wrap>
+decltype(auto) inner(Wrap&& w) noexcept {
+    auto&& [msg] = std::forward<Wrap>(w);
+    return std::forward<decltype(msg)>(msg);
+}
+
 }  // namespace detail::childx
 
-template <Program Child, class ParentMsg, class Wrap>
+template <Program Child, class Parent, class Wrap>
 struct child {
     using model_type = typename Child::Model;
     using msg_type   = typename Child::Msg;
-    using cmd_type   = decltype(std::declval<cmd_of<Child>>().map(
-                           std::declval<ParentMsg (*)(msg_type)>()));
 
-    static_assert(detail::childx::is_alt<ParentMsg, Wrap>::value,
-                  "jaal::child<Child, ParentMsg, Wrap>: Wrap must be one of ParentMsg's "
-                  "alternatives");
-    static_assert(std::is_constructible_v<Wrap, msg_type>
-                      || requires(msg_type m) { Wrap{std::move(m)}; },
-                  "jaal::child<Child, ParentMsg, Wrap>: Wrap must be buildable from the "
-                  "child's Msg, e.g. struct Wrap { Child::Msg msg; }");
-
-    /// Child::Msg → ParentMsg. Captureless, so it may run on task threads.
-    static ParentMsg wrap(msg_type m) { return ParentMsg{Wrap{std::move(m)}}; }
-
-    /// The child's message inside `m`, or null when `m` isn't for this child.
-    [[nodiscard]] static const msg_type* match(const ParentMsg& m) noexcept {
-        if (auto* w = std::get_if<Wrap>(&m)) return &unwrap(*w);
-        return nullptr;
+    /// Child::Msg → Parent::Msg. Captureless, so it may run on task threads.
+    template <class PM = typename Parent::Msg>
+    static PM wrap(msg_type m) {
+        static_assert(detail::childx::is_alt<PM, Wrap>::value,
+                      "jaal::child<Child, Parent, Wrap>: Wrap must be a case of Parent::Msg");
+        return PM{Wrap{std::move(m)}};
     }
 
-    /// The child's initial model and its init Cmd, mapped.
-    [[nodiscard]] static std::pair<model_type, cmd_type> init() {
-        auto [m, c] = run_init<Child>();
-        return {std::move(m), std::move(c).map(&wrap)};
+    /// Set up the child's model (its init) and return its first Cmd, mapped.
+    [[nodiscard]] static auto init(model_type& slot) {
+        auto [m, c] = prog::init<Child>();
+        slot = std::move(m);
+        return std::move(c).map(&wrap<>);
     }
 
-    /// The child's initial model alone (its init Cmd is dropped).
-    [[nodiscard]] static model_type model() { return run_init<Child>().first; }
-
-    /// Run the child's update on `slot` in place; return its Cmd, mapped.
-    [[nodiscard]] static cmd_type update(model_type& slot, msg_type msg) {
-        auto [next, cmd] = detail::prog::split(Child::update(std::move(slot), std::move(msg)));
-        slot = std::move(next);
-        return std::move(cmd).map(&wrap);
+    /// Run the child's update on `slot`, in place; return its Cmd, mapped.
+    template <class W>
+        requires std::same_as<std::remove_cvref_t<W>, Wrap>
+    [[nodiscard]] static auto update(model_type& slot, W&& w) {
+        return prog::update<Child>(slot, msg_type(detail::childx::inner(std::forward<W>(w))))
+            .map(&wrap<>);
     }
 
-    /// The child's subscriptions, mapped, with stream keys prefixed.
+    /// The child's subscriptions, mapped, with stream keys under `prefix/`.
     [[nodiscard]] static auto subscribe(const model_type& m, std::string_view prefix) {
-        auto s = std::move(run_subscribe<Child>(m)).map(&wrap);
+        auto s = prog::subscribe<Child>(m);
         if (!prefix.empty()) {
             std::string p(prefix);
             p += '/';
             detail::childx::prefix_streams(s, p);
         }
-        return s;
-    }
-
-private:
-    static const msg_type& unwrap(const Wrap& w) noexcept {
-        if constexpr (std::is_convertible_v<const Wrap&, const msg_type&>) return w;
-        else {
-            // The aggregate shape: one field holding the child's Msg.
-            const auto& [inner] = w;
-            return inner;
-        }
+        return std::move(s).map(&wrap<>);
     }
 };
 

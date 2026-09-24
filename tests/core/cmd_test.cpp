@@ -16,7 +16,7 @@
 #include <vector>
 
 using namespace std::chrono_literals;
-using jaal::Cmd;
+using jaal::basic_cmd;
 using jaal::make_row;
 using jaal::row;
 using jaal::row_union;
@@ -60,23 +60,27 @@ static_assert(!valid_row<fx::quit, fx::quit>);    // duplicate
 // ── Cmd ─────────────────────────────────────────────────────────────────
 struct Msg { int v; };
 using App = row_union<jaal::core_fx, make_row<beep, title>>;
-using C   = Cmd<Msg, App>;
+using C   = basic_cmd<Msg, App>;
 
 static_assert(std::is_constructible_v<C, Beep>);
 static_assert(std::is_constructible_v<C, fx::after::type<Msg>>);
-static_assert(!std::is_constructible_v<Cmd<Msg, jaal::core_fx>, Beep>);   // not in row
+static_assert(!std::is_constructible_v<basic_cmd<Msg, jaal::core_fx>, Beep>);   // not in row
 
 // factories exist exactly when the effect is in the row
 template <class X> concept has_after = requires { X::after(1ms, Msg{0}); };
 template <class X> concept has_quit  = requires { X::quit(); };
 static_assert(has_after<C> && has_quit<C>);
-static_assert(!has_after<Cmd<Msg, make_row<fx::quit>>>);
-static_assert(has_quit<Cmd<Msg, make_row<fx::quit>>>);
+static_assert(!has_after<basic_cmd<Msg, make_row<fx::quit>>>);
+static_assert(has_quit<basic_cmd<Msg, make_row<fx::quit>>>);
 
 // widening yes, narrowing no
-using Small = Cmd<Msg, make_row<fx::after>>;
+using Small = basic_cmd<Msg, make_row<fx::after>>;
 static_assert(std::is_convertible_v<Small, C>);
 static_assert(!std::is_constructible_v<Small, C>);
+
+// the program-facing alias always unions in core_fx
+static_assert(std::is_same_v<jaal::Cmd<Msg>, basic_cmd<Msg, jaal::core_fx>>);
+static_assert(std::is_same_v<jaal::Cmd<Msg, beep, title>, C>);
 
 // ── tasks: the lifetime rules ────────────────────────────────────────────
 // C::task(bad...) is DECLARED (so it can explain itself in a static_assert),
@@ -135,8 +139,8 @@ int main() {
     if (!b.contains<beep>() || !b.contains<fx::quit>() || b.contains<fx::after>()) return 4;
 
     // map + widen: a child's after(...) lands in the parent's row
-    Cmd<Child, make_row<fx::after>> child = Cmd<Child, make_row<fx::after>>::after(5ms, Child{9});
-    Cmd<Parent, App> parent = std::move(child).map([](Child c) { return Parent{c}; });
+    basic_cmd<Child, make_row<fx::after>> child = basic_cmd<Child, make_row<fx::after>>::after(5ms, Child{9});
+    basic_cmd<Parent, App> parent = std::move(child).map([](Child c) { return Parent{c}; });
     auto* a = std::get_if<fx::after::type<Parent>>(&parent.inner);
     if (!a || a->msg.c.n != 9 || a->delay != 5ms) return 5;
 
@@ -151,7 +155,7 @@ int main() {
     if (box->got.size() != 1 || box->got[0].v != 5) return 7;
 
     // task map: child task's Msg is mapped on the way out
-    using CC = Cmd<Child, jaal::core_fx>;
+    using CC = basic_cmd<Child, jaal::core_fx>;
     auto ct = CC::task([](Sink<Child> out, std::stop_token, int k) { out.send(Child{k}); }, 42);
     struct pcollect final : jaal::detail::mailbox_iface<Parent> {
         std::vector<Parent> got;

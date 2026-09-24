@@ -83,24 +83,21 @@ struct Counter {
     struct Quit {};
     using Msg = std::variant<Typed, Ring, Quit>;
 
-    // The row says what this program uses: core effects plus ring_bell, and
-    // core sources plus on_key. A host that can't do these won't compile.
-    using Cmd = jaal::Cmd<Msg, jaal::row_union<jaal::core_fx, jaal::make_row<ring_bell>>>;
-    using Sub = jaal::Sub<Msg, jaal::row_union<jaal::core_src,
-                                               jaal::make_row<on_key, jaal::fx::on_signal>>>;
+    // Core effects and sources are always in; list only what this program
+    // adds. A host that can't do these won't compile.
+    using Cmd = jaal::Cmd<Msg, ring_bell>;
+    using Sub = jaal::Sub<Msg, on_key, jaal::fx::on_signal>;
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Quit>(msg)) return {m, Cmd::quit(0)};
-        if (std::holds_alternative<Ring>(msg)) {
-            m.bell = true;
-            return {m, Cmd::batch(Cmd(Bell{}), Cmd::send(Msg{Typed{}}))};
-        }
+    static Cmd update(Model& m, Typed) {
         ++m.typed;
         m.bell = false;
-        return {m, Cmd::none()};
+        return {};
     }
+    static Cmd update(Model& m, Ring) {
+        m.bell = true;
+        return Cmd::batch(Bell{}, Cmd::send(Typed{}));
+    }
+    static Cmd update(Model&, Quit) { return Cmd::quit(0); }
 
     static Sub subscribe(const Model&) {
         return Sub::batch(

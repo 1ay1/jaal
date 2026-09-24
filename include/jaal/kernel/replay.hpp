@@ -66,7 +66,7 @@ template <Program P>
 /// no effects run. Returns the final model.
 template <Program P>
 [[nodiscard]] typename P::Model replay(const std::vector<typename P::Msg>& msgs) {
-    auto [model, init_cmd] = run_init<P>();
+    auto [model, init_cmd] = prog::init<P>();
     (void)init_cmd;                          // effects are outputs: not re-run
     return replay_from<P>(std::move(model), msgs);
 }
@@ -78,9 +78,7 @@ template <Program P>
 [[nodiscard]] typename P::Model replay_from(typename P::Model model,
                                             const std::vector<typename P::Msg>& msgs) {
     for (const auto& m : msgs) {
-        auto [next, cmd] = detail::prog::split(P::update(std::move(model), m));
-        model = std::move(next);
-        (void)cmd;
+        (void)prog::update<P>(model, m);
     }
     return model;
 }
@@ -90,13 +88,11 @@ template <Program P>
 template <Program P, class F>
     requires std::invocable<F&, std::size_t, const typename P::Model&>
 void replay_each(const std::vector<typename P::Msg>& msgs, F&& on_model) {
-    auto [model, init_cmd] = run_init<P>();
+    auto [model, init_cmd] = prog::init<P>();
     (void)init_cmd;
     on_model(std::size_t{0}, std::as_const(model));
     for (std::size_t i = 0; i < msgs.size(); ++i) {
-        auto [next, cmd] = detail::prog::split(P::update(std::move(model), msgs[i]));
-        model = std::move(next);
-        (void)cmd;
+        (void)prog::update<P>(model, msgs[i]);
         on_model(i + 1, std::as_const(model));
     }
 }

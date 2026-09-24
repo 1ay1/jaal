@@ -46,21 +46,16 @@ struct Ledger {
     struct Close {};
     struct Beat {};
     using Msg = std::variant<Deposit, Close, Beat>;
-    using Cmd = jaal::Cmd<Msg, jaal::row_union<jaal::core_fx, jaal::make_row<hello>>>;
-    using Sub = jaal::Sub<Msg, jaal::core_src>;
+    using Cmd = jaal::Cmd<Msg, hello>;
+    using Sub = jaal::Sub<Msg>;
 
-    static std::pair<Model, Cmd> init() {
+    static Cmd init(Model&) {
         ++init_calls;
-        return {Model{}, Cmd(Hello{1})};
+        return Cmd(Hello{1});
     }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        std::visit(jaal::overload{
-            [&](Deposit d) { m.balance += d.amount; },
-            [&](Close)     { m.open = false; },
-            [&](Beat)      { ++m.beats; },
-        }, msg);
-        return {m, Cmd::none()};
-    }
+    static Cmd update(Model& m, Deposit d) { m.balance += d.amount; return {}; }
+    static Cmd update(Model& m, Close)     { m.open = false;        return {}; }
+    static Cmd update(Model& m, Beat)      { ++m.beats;             return {}; }
     static Sub subscribe(const Model& m) {
         return m.open ? Sub::every(10ms, Beat{}) : Sub::none();
     }

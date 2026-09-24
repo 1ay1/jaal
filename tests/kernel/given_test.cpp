@@ -35,34 +35,30 @@ struct Search {
     struct Close {};
     struct Boom {};
     using Msg = std::variant<Type, Results, Stamp, Close, Boom>;
-    using Cmd = jaal::CoreCmd<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
 
-    static std::pair<Model, Cmd> init() {
-        return {Model{}, Cmd::now([](jaal::fx::now::time_point t) -> Msg {
-                    return Stamp{static_cast<long>(t.time_since_epoch().count())};
-                })};
+    static Cmd init(Model&) {
+        return Cmd::now([](jaal::fx::now::time_point t) -> Msg {
+            return Stamp{static_cast<long>(t.time_since_epoch().count())};
+        });
     }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        return std::visit(jaal::overload{
-            [&](Type t) -> std::pair<Model, Cmd> {
-                m.query = t.q;
-                ++m.fetches;
-                return {m, Cmd::task([](Sink<Msg> out, std::stop_token, int q) {
-                                         out.send(Results{q * 10});
-                                     }, t.q)};
-            },
-            [&](Results r) -> std::pair<Model, Cmd> {
-                if (r.q == m.query * 10) m.shown = r.q;
-                return {m, Cmd::none()};
-            },
-            [&](Stamp s) -> std::pair<Model, Cmd> { m.stamp = s.t; return {m, Cmd::none()}; },
-            [&](Close) -> std::pair<Model, Cmd> {
-                m.closing = true;
-                return {m, Cmd::batch(Cmd::after(500ms, Msg{Close{}}), Cmd::quit(4))};
-            },
-            [&](Boom) -> std::pair<Model, Cmd> { throw std::runtime_error("kaboom"); },
-        }, std::move(msg));
+    static Cmd update(Model& m, Type t) {
+        m.query = t.q;
+        ++m.fetches;
+        return Cmd::task([](Sink<Msg> out, std::stop_token, int q) {
+                             out.send(Results{q * 10});
+                         }, t.q);
     }
+    static Cmd update(Model& m, Results r) {
+        if (r.q == m.query * 10) m.shown = r.q;
+        return {};
+    }
+    static Cmd update(Model& m, Stamp s) { m.stamp = s.t; return {}; }
+    static Cmd update(Model& m, Close) {
+        m.closing = true;
+        return Cmd::batch(Cmd::after(500ms, Msg{Close{}}), Cmd::quit(4));
+    }
+    static Cmd update(Model&, Boom) { throw std::runtime_error("kaboom"); }
 };
 
 int basics() {
@@ -123,11 +119,10 @@ struct Forever {
     struct Model { int n = 0; };
     struct Go {};
     using Msg = std::variant<Go>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) {
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Go) {
         ++m.n;
-        return {m, Cmd::task([](Sink<Msg> out, std::stop_token) { out.send(Go{}); })};
+        return Cmd::task([](Sink<Msg> out, std::stop_token) { out.send(Go{}); });
     }
 };
 

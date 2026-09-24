@@ -16,15 +16,13 @@
 //   struct Typed { std::string text; };
 //   struct Fire  { std::uint64_t token; };     // carries the token back
 //
-//   static std::pair<Model, Cmd> update(Model m, Msg msg) {
-//       if (auto* t = std::get_if<Typed>(&msg)) {
-//           auto tok = m.query.set(t->text);            // newest wins
-//           return {m, Cmd::after(200ms, Msg{Fire{tok}})};
-//       }
-//       if (auto* f = std::get_if<Fire>(&msg)) {
-//           if (!m.query.ready(f->token)) return {m, Cmd::none()};  // superseded
-//           return {m, search(m.query.value())};        // fires once
-//       }
+//   static Cmd update(Model& m, Typed t) {
+//       auto tok = m.query.set(t.text);                 // newest wins
+//       return Cmd::after(200ms, Fire{tok});
+//   }
+//   static Cmd update(Model& m, Fire f) {
+//       if (!m.query.ready(f.token)) return {};         // superseded
+//       return search(m.query.value());                 // fires once
 //   }
 //
 // The token is what makes it correct. Every keystroke invalidates the timers
@@ -36,12 +34,13 @@
 // The same token guards the RESULT of slow work, which is the other half of
 // the bug (D23's "stale results" case):
 //
-//   return {m, Cmd::task([](Sink<Msg> s, std::stop_token, std::string q,
-//                           std::uint64_t tok) {
-//                  s.send(Results{tok, run_query(q)});
-//              }, m.query.value(), tok)};
+//   return Cmd::task([](Sink<Msg> s, std::stop_token, std::string q,
+//                       std::uint64_t tok) {
+//              s.send(Results{tok, run_query(q)});
+//          }, m.query.value(), tok);
 //   ...
-//   if (!m.query.ready(r->token)) return {m, Cmd::none()};   // an old answer
+//   static Cmd update(Model& m, Results r) {
+//       if (!m.query.ready(r.token)) return {};           // an old answer
 
 #include <chrono>
 #include <cstdint>

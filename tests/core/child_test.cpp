@@ -28,24 +28,20 @@ struct Counter {
     struct Inc {}; struct Double {}; struct Set { int n; }; struct Tick {}; struct Fed {};
     struct Stop {};
     using Msg = std::variant<Inc, Double, Set, Tick, Fed, Stop>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::CoreSub<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
 
-    static std::pair<Model, Cmd> init() { return {Model{}, Cmd::after(1ms, Msg{Inc{}})}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        return std::visit(jaal::overload{
-            [&](Inc)    -> std::pair<Model, Cmd> { ++m.n; return {m, Cmd::none()}; },
-            [&](Double) -> std::pair<Model, Cmd> {
-                return {m, Cmd::task([](Sink<Msg> out, std::stop_token, int n) {
-                                         out.send(Set{n * 2});
-                                     }, m.n)};
-            },
-            [&](Set s)  -> std::pair<Model, Cmd> { m.n = s.n; return {m, Cmd::none()}; },
-            [&](Tick)   -> std::pair<Model, Cmd> { m.n += 100; return {m, Cmd::none()}; },
-            [&](Fed)    -> std::pair<Model, Cmd> { m.n += 1000; return {m, Cmd::none()}; },
-            [&](Stop)   -> std::pair<Model, Cmd> { m.live = false; return {m, Cmd::none()}; },
-        }, std::move(msg));
+    static Cmd init(Model&) { return Cmd::after(1ms, Msg{Inc{}}); }
+    static Cmd update(Model& m, Inc)   { ++m.n; return {}; }
+    static Cmd update(Model& m, Double) {
+        return Cmd::task([](Sink<Msg> out, std::stop_token, int n) {
+                             out.send(Set{n * 2});
+                         }, m.n);
     }
+    static Cmd update(Model& m, Set s) { m.n = s.n; return {}; }
+    static Cmd update(Model& m, Tick)  { m.n += 100; return {}; }
+    static Cmd update(Model& m, Fed)   { m.n += 1000; return {}; }
+    static Cmd update(Model& m, Stop)  { m.live = false; return {}; }
     static Sub subscribe(const Model& m) {
         if (!m.live) return Sub::none();
         return Sub::batch(Sub::every(10ms, Msg{Tick{}}),
@@ -59,28 +55,25 @@ struct Pair {
     struct Right { Counter::Msg msg; };
     struct Reset {};
     using Msg = std::variant<Left, Right, Reset>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::CoreSub<Msg>;
-    using L = jaal::child<Counter, Msg, Left>;
-    using R = jaal::child<Counter, Msg, Right>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    using L = jaal::child<Counter, Pair, Left>;
+    using R = jaal::child<Counter, Pair, Right>;
 
     struct Model {
-        Counter::Model left = L::model(), right = R::model();
+        Counter::Model left, right;
         int resets = 0;
     };
 
-    static std::pair<Model, Cmd> init() {
-        auto [l, lc] = L::init();
-        auto [r, rc] = R::init();
-        return {Model{l, r, 0}, Cmd::batch(std::move(lc), std::move(rc))};
-    }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* c = L::match(msg)) { auto cmd = L::update(m.left, *c);  return {m, std::move(cmd)}; }
-        if (auto* c = R::match(msg)) { auto cmd = R::update(m.right, *c); return {m, std::move(cmd)}; }
-        m.left = L::model();
-        m.right = R::model();
+    static Cmd init(Model& m) { return Cmd::batch(L::init(m.left), R::init(m.right)); }
+    // Routing is just an overload per Wrap case.
+    static Cmd update(Model& m, Left l)  { return L::update(m.left, l); }
+    static Cmd update(Model& m, Right r) { return R::update(m.right, r); }
+    static Cmd update(Model& m, Reset) {
+        m.left  = Counter::Model{};
+        m.right = Counter::Model{};
         ++m.resets;
-        return {m, Cmd::none()};
+        return {};
     }
     static Sub subscribe(const Model& m) {
         return Sub::batch(L::subscribe(m.left, "left"), R::subscribe(m.right, "right"));
@@ -106,6 +99,25 @@ int routing_with_given() {
     t.expect("reset", [](auto& m) { return m.left.n == 0 && m.resets == 1; });
     CHECK(t.ok());
     if (!t.ok()) std::puts(t.report().c_str());
+    return 0;
+}
+
+int child_api_direct() {
+    // init(slot) fills the slot and returns the child's Cmd mapped to the parent.
+    Counter::Model slot;
+    auto ic = Pair::L::init(slot);
+    CHECK(!ic.is_none());
+    // update(slot, Wrap) routes the Wrap case straight into the child.
+    auto uc = Pair::L::update(slot, Pair::Left{Counter::Inc{}});
+    CHECK(slot.n == 1);
+    CHECK(uc.is_none());
+    // wrap<> builds the parent's Msg from a child Msg.
+    Pair::Msg w = Pair::R::wrap<>(Counter::Msg{Counter::Inc{}});
+    CHECK(std::holds_alternative<Pair::Right>(w));
+    // And the parent's update overload for a Wrap case is the router.
+    Pair::Model m;
+    (void)jaal::prog::update<Pair>(m, Pair::Msg{Pair::Right{Counter::Inc{}}});
+    CHECK(m.left.n == 0 && m.right.n == 1);
     return 0;
 }
 
@@ -165,6 +177,7 @@ int streams_are_separate() {
 
 int main() {
     if (int r = routing_with_given())            return r;
+    if (int r = child_api_direct())              return r;
     if (int r = subs_are_mapped_and_prefixed())  return r;
     if (int r = runs_in_the_sim())               return r;
     if (int r = streams_are_separate())          return r;

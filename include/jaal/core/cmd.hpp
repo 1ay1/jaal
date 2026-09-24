@@ -1,25 +1,29 @@
 #pragma once
-// jaal::Cmd<Msg, Row> — effects as data, with the allowed set in the type.
+// jaal::basic_cmd<Msg, Row> — effects as data, with the allowed set in the type.
 //
-// Row says which effects this Cmd may contain. Cmd::inner is a plain
+// Apps don't name this: they write jaal::Cmd<Msg, extra...> (program.hpp),
+// which always includes the core effects. basic_cmd takes an exact row and
+// is what the kernel, hosts and composition helpers work with.
+//
+// Row says which effects a Cmd may contain. basic_cmd::inner is a plain
 // std::variant over exactly those effects (plus None and Batch), so tests
 // and hosts use std::get_if / std::visit on it like on any variant.
 //
 // Three rules the types enforce:
 //
 //   1. An effect converts into a Cmd only if it's in the row.
-//        Cmd<M, make_row<fx::after>> c = Beep{};   // error: not in the row
+//        jaal::Cmd<Msg> c = Beep{};              // error: beep not in the row
 //
-//   2. Row widening. Cmd<M, A> converts to Cmd<M, B> when A ⊆ B. So a
-//      child that only uses `after` fits into a parent that allows more,
-//      and never the other way round.
+//   2. Row widening. A Cmd over row A converts to one over B when A ⊆ B. So
+//      a child that only uses core effects fits into a parent that allows
+//      more, and never the other way round.
 //
 //   3. map(f) re-targets every effect at a new Msg type through each
 //      effect's fmap. Effects must provide it (Effect concept), so an effect
 //      that carries a Msg can't be forgotten by map.
 //
 // Factory functions come from the effects themselves: if an effect
-// descriptor has `ctors<Self, Msg>`, Cmd inherits it. So Cmd::after(...)
+// descriptor has `ctors<Self, Msg>`, the Cmd inherits it. So Cmd::after(...)
 // exists only on a Cmd whose row has `after`, and maya can add
 // Cmd::commit_scrollback(...) without jaal knowing it exists.
 
@@ -36,7 +40,7 @@
 
 namespace jaal {
 
-template <class Msg, Row R> class Cmd;
+template <class Msg, Row R> class basic_cmd;
 
 namespace detail::cmd {
 
@@ -47,31 +51,31 @@ template <class D, class Self, class Msg>
 struct ctors_of<D, Self, Msg> : D::template ctors<Self, Msg> {};
 
 template <class T> inline constexpr bool is_cmd_v = false;
-template <class M, class R> inline constexpr bool is_cmd_v<Cmd<M, R>> = true;
+template <class M, class R> inline constexpr bool is_cmd_v<basic_cmd<M, R>> = true;
 
 }  // namespace detail::cmd
 
 template <class Msg, Effect... Ds>
-class Cmd<Msg, row<Ds...>>
-    : public detail::cmd::ctors_of<Ds, Cmd<Msg, row<Ds...>>, Msg>... {
+class basic_cmd<Msg, row<Ds...>>
+    : public detail::cmd::ctors_of<Ds, basic_cmd<Msg, row<Ds...>>, Msg>... {
 public:
     using msg_type = Msg;
     using row_type = row<Ds...>;
 
     struct None {};
-    struct Batch { std::vector<Cmd> cmds; };
+    struct Batch { std::vector<basic_cmd> cmds; };
 
     using variant = std::variant<None, Batch, payload_t<Ds, Msg>...>;
     variant inner;
 
     // ── construction ────────────────────────────────────────────────────
-    Cmd() noexcept : inner(None{}) {}
+    basic_cmd() noexcept : inner(None{}) {}
 
     /// Any effect payload in the row.
     template <class E>
         requires meta::member_of<std::remove_cvref_t<E>,
                                  meta::list<payload_t<Ds, Msg>...>>
-    Cmd(E&& e) : inner(std::forward<E>(e)) {}          // NOLINT: implicit on purpose
+    basic_cmd(E&& e) : inner(std::forward<E>(e)) {}          // NOLINT: implicit on purpose
 
     /// An effect payload NOT in the row: rejected with a reason, rather than
     /// "no viable conversion".
@@ -82,17 +86,17 @@ public:
               && (!std::same_as<std::remove_cvref_t<E>, None>)
               && (!std::same_as<std::remove_cvref_t<E>, Batch>)
 #if defined(__cpp_deleted_function) && __cpp_deleted_function >= 202403L
-    Cmd(E&&) = delete("jaal: this effect is not in the Cmd's row; add it to the row "
-                      "(make_row / row_union) or use a Cmd type that allows it");
+    basic_cmd(E&&) = delete("jaal: this effect is not in the Cmd's row; add it to the row "
+                      "(jaal::Cmd<Msg, ..., this_effect>)");
 #else
-    Cmd(E&&) = delete;
+    basic_cmd(E&&) = delete;
 #endif
 
-    /// Row widening: a Cmd allowed fewer effects fits where more are allowed.
+    /// Row widening: a basic_cmd allowed fewer effects fits where more are allowed.
     template <class R>
         requires subrow_of<R, row_type> && (!std::same_as<R, row_type>)
-    Cmd(Cmd<Msg, R> narrow) : inner(None{}) {        // NOLINT: implicit on purpose
-        using N = Cmd<Msg, R>;
+    basic_cmd(basic_cmd<Msg, R> narrow) : inner(None{}) {        // NOLINT: implicit on purpose
+        using N = basic_cmd<Msg, R>;
         std::visit([this]<class X>(X&& x) {
             using U = std::remove_cvref_t<X>;
             if constexpr (std::same_as<U, typename N::None>) {
@@ -100,7 +104,7 @@ public:
             } else if constexpr (std::same_as<U, typename N::Batch>) {
                 Batch b;
                 b.cmds.reserve(x.cmds.size());
-                for (auto& c : x.cmds) b.cmds.emplace_back(Cmd(std::move(c)));
+                for (auto& c : x.cmds) b.cmds.emplace_back(basic_cmd(std::move(c)));
                 inner = std::move(b);
             } else {
                 inner = std::forward<X>(x);          // same payload type in both rows
@@ -112,23 +116,23 @@ public:
     template <class R>
         requires (!subrow_of<R, row_type>)
 #if defined(__cpp_deleted_function) && __cpp_deleted_function >= 202403L
-    Cmd(Cmd<Msg, R>) = delete("jaal: can't convert to a Cmd with fewer effects "
+    basic_cmd(basic_cmd<Msg, R>) = delete("jaal: can't convert to a Cmd with fewer effects "
                               "(only widening is allowed)");
 #else
-    Cmd(Cmd<Msg, R>) = delete;
+    basic_cmd(basic_cmd<Msg, R>) = delete;
 #endif
 
-    Cmd(const Cmd&)            = default;
-    Cmd(Cmd&&) noexcept        = default;
-    Cmd& operator=(const Cmd&) = default;
-    Cmd& operator=(Cmd&&) noexcept = default;
+    basic_cmd(const basic_cmd&)            = default;
+    basic_cmd(basic_cmd&&) noexcept        = default;
+    basic_cmd& operator=(const basic_cmd&) = default;
+    basic_cmd& operator=(basic_cmd&&) noexcept = default;
 
     // ── building ────────────────────────────────────────────────────────
-    [[nodiscard]] static Cmd none() noexcept { return Cmd{}; }
+    [[nodiscard]] static basic_cmd none() noexcept { return basic_cmd{}; }
 
     /// Batch, flattening nested batches and dropping Nones. Batch of one is
     /// that one; batch of nothing is none().
-    [[nodiscard]] static Cmd batch(std::vector<Cmd> cmds) {
+    [[nodiscard]] static basic_cmd batch(std::vector<basic_cmd> cmds) {
         Batch out;
         for (auto& c : cmds) {
             if (auto* b = std::get_if<Batch>(&c.inner)) {
@@ -139,26 +143,26 @@ public:
         }
         if (out.cmds.empty()) return none();
         if (out.cmds.size() == 1) return std::move(out.cmds.front());
-        Cmd r;
+        basic_cmd r;
         r.inner = std::move(out);
         return r;
     }
 
     template <class... Cs>
-        requires (sizeof...(Cs) > 0) && (std::convertible_to<Cs, Cmd> && ...)
-    [[nodiscard]] static Cmd batch(Cs&&... cs) {
-        std::vector<Cmd> v;
+        requires (sizeof...(Cs) > 0) && (std::convertible_to<Cs, basic_cmd> && ...)
+    [[nodiscard]] static basic_cmd batch(Cs&&... cs) {
+        std::vector<basic_cmd> v;
         v.reserve(sizeof...(Cs));
-        (v.emplace_back(Cmd(std::forward<Cs>(cs))), ...);
+        (v.emplace_back(basic_cmd(std::forward<Cs>(cs))), ...);
         return batch(std::move(v));
     }
 
     // ── functor ─────────────────────────────────────────────────────────
     /// Re-target every effect at another Msg type. F must be callable with
-    /// Msg; what it returns is the new Msg type. Consumes the Cmd.
+    /// Msg; what it returns is the new Msg type. Consumes the basic_cmd.
     template <std::invocable<Msg> F>
-    [[nodiscard]] auto map(F f) && -> Cmd<std::invoke_result_t<F, Msg>, row_type> {
-        using To = Cmd<std::invoke_result_t<F, Msg>, row_type>;
+    [[nodiscard]] auto map(F f) && -> basic_cmd<std::invoke_result_t<F, Msg>, row_type> {
+        using To = basic_cmd<std::invoke_result_t<F, Msg>, row_type>;
         return std::visit([&]<class X>(X&& x) -> To {
             using U = std::remove_cvref_t<X>;
             if constexpr (std::same_as<U, None>) {
@@ -177,10 +181,10 @@ public:
     }
 
     template <std::invocable<Msg> F>
-    [[nodiscard]] auto map(F f) const& -> Cmd<std::invoke_result_t<F, Msg>, row_type>
-        requires std::copyable<Cmd>
+    [[nodiscard]] auto map(F f) const& -> basic_cmd<std::invoke_result_t<F, Msg>, row_type>
+        requires std::copyable<basic_cmd>
     {
-        return Cmd(*this).map(std::move(f));
+        return basic_cmd(*this).map(std::move(f));
     }
 
     /// Re-target every effect with a mapper that also gets an ID: `f(id, msg)`.
@@ -195,8 +199,8 @@ public:
     template <class Id, class F>
         requires std::invocable<F, const Id&, Msg>
     [[nodiscard]] auto map_with(Id id, F f) &&
-        -> Cmd<std::invoke_result_t<F, const Id&, Msg>, row_type> {
-        using To = Cmd<std::invoke_result_t<F, const Id&, Msg>, row_type>;
+        -> basic_cmd<std::invoke_result_t<F, const Id&, Msg>, row_type> {
+        using To = basic_cmd<std::invoke_result_t<F, const Id&, Msg>, row_type>;
         return std::visit([&]<class X>(X&& x) -> To {
             using U = std::remove_cvref_t<X>;
             if constexpr (std::same_as<U, None>) {
@@ -219,7 +223,7 @@ public:
         return std::holds_alternative<None>(inner);
     }
 
-    /// Does this Cmd (including inside batches) contain an effect of kind D?
+    /// Does this basic_cmd (including inside batches) contain an effect of kind D?
     template <Effect D>
         requires in_row<D, row_type>
     [[nodiscard]] bool contains() const {
@@ -282,9 +286,9 @@ private:
                   "give each effect its own payload struct");
 };
 
-// ── deduce a program's Cmd row ───────────────────────────────────────────
+// ── deduce a program's basic_cmd row ───────────────────────────────────────────
 template <class C> struct cmd_traits;
-template <class M, class R> struct cmd_traits<Cmd<M, R>> {
+template <class M, class R> struct cmd_traits<basic_cmd<M, R>> {
     using msg_type = M;
     using row_type = R;
 };

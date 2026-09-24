@@ -77,6 +77,8 @@ struct pure_fx {
     // No Msg inside, so mapping is the identity on the payload.
     template <class F>
     static T fmap(F&&, T e) { return e; }
+    template <class Id, class F>
+    static T fmap_with(const Id&, F&&, T e) { return e; }
 };
 
 // ── diagnostics ──────────────────────────────────────────────────────────

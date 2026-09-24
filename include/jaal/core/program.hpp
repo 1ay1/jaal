@@ -1,125 +1,109 @@
 #pragma once
-// jaal::Program — the contract an app writes against.
+// jaal::Program — the one shape an app is written in.
 //
 //   struct Counter {
 //       struct Model { int n = 0; };
-//       using Msg = std::variant<Tick, Quit>;
+//       struct Inc {};
+//       struct Reset {};
+//       using Msg = std::variant<Inc, Reset>;
+//       using Cmd = jaal::Cmd<Msg>;                    // + extra effects: Cmd<Msg, beep>
+//       using Sub = jaal::Sub<Msg>;                    // optional; + extra sources
 //
-//       static Model init();                              // or {Model, Cmd}
-//       static std::pair<Model, Cmd> update(Model, Msg);   // required
-//       static Element view(const Model&);                 // optional, host-defined
-//       static Sub subscribe(const Model&);                // optional
+//       static Cmd init(Model& m);                     // optional
+//       static Cmd update(Model& m, Inc);              // one per Msg case
+//       static Cmd update(Model& m, Reset);
+//       static Sub subscribe(const Model& m);          // optional
 //   };
 //
-// The EFFECT SET is deduced, not declared: whatever row the Cmd returned by
-// update carries is the program's row (fx_of<P>). Same for subscribe
-// (src_of<P>). So a program never writes its row twice, and a host can
-// check "can I run everything this program asks for?" from the type alone.
+// That's the whole contract, and there is no second way to write it:
 //
-// view is deliberately NOT part of Program: a server program has none, and
-// a host that draws asks for Viewable<P, ItsOutput> instead.
+//   * Msg is a std::variant. The kernel dispatches each alternative to the
+//     update overload for it, so there's no std::visit to write, and a
+//     case with no update is a compile error that NAMES the case and the
+//     line to add. Overload resolution does the matching, so one generic
+//     overload (`template <class M> static Cmd update(Model&, M)`) can
+//     handle a family of cases.
+//   * update takes the Model BY REFERENCE and returns only the Cmd. The
+//     model is changed in place; there is no pair to build and nothing to
+//     forget to return. `return {};` means "no effects".
+//   * init is optional: without it the Model is value-initialised. With it,
+//     init sets the model up and returns its first Cmd.
+//   * Cmd is DECLARED, not deduced from what update happens to return, so
+//     the program's effect set is one line you can read.
 //
-// What C++ can't check: that update and view are PURE. jaal can't stop
-// update from calling printf. The headless host makes violations easy to
-// spot (an effect done by hand won't appear in the recorded list).
+// view is deliberately NOT part of Program: a server has none, and a host
+// that draws asks for Viewable<P, ItsOutput> instead.
+//
+// What C++ can't check: that update is PURE apart from the model it's
+// given. jaal can't stop update from calling printf. The headless host
+// makes violations easy to spot (an effect done by hand won't appear in the
+// recorded list), and replay makes them reproducible.
+//
+// Everything that runs a program (kernel, given, replay, timeline, child,
+// children) goes through prog::init / prog::update / prog::subscribe below:
+// ONE place knows how a program is called.
 
 #include <concepts>
-#include <tuple>
+#include <cstdint>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
+#include "../meta/diagnose.hpp"
+#include "../meta/type_name.hpp"
 #include "cmd.hpp"
-#include "overload.hpp"
+#include "core_fx.hpp"
 #include "sendable.hpp"
 #include "sub.hpp"
 
 namespace jaal {
 
-template <class Model, class C> struct step;   // program_base.hpp
-
 namespace detail::prog {
 
-template <class P>
-using step_t = decltype(P::update(std::declval<typename P::Model>(),
-                                  std::declval<typename P::Msg>()));
+template <class T> inline constexpr bool is_variant_v = false;
+template <class... Ts> inline constexpr bool is_variant_v<std::variant<Ts...>> = true;
 
-template <class S> struct step_parts;
-template <class M, class C> struct step_parts<std::pair<M, C>> {
-    using model = M;
-    using cmd   = C;
-};
-// jaal::step<Model, Cmd> (program_base.hpp): what update() returns when a
-// program uses jaal::program<>. Same parts as the pair.
-template <class M, class C>
-struct step_parts<::jaal::step<M, C>> {
-    using model = M;
-    using cmd   = C;
+/// Does P have an update for message case C?
+template <class P, class C>
+concept updates_case = requires(typename P::Model& m, C&& c) {
+    { P::update(m, std::move(c)) } -> std::convertible_to<typename P::Cmd>;
 };
 
-/// Split whatever update()/init() returned into (model, cmd).
-template <class S>
-auto split(S&& s) {
-    if constexpr (requires { s.model; s.cmd; })
-        return std::pair{std::move(s.model), std::move(s.cmd)};
-    else
-        return std::pair{std::move(s.first), std::move(s.second)};
+// Checked one case at a time so a failure names the case (and, on C++26,
+// the line to add). Returns true so it can sit in a fold expression.
+template <class P, class C>
+consteval bool check_case() {
+    if constexpr (!updates_case<P, C>) {
+#if defined(__cpp_static_assert) && __cpp_static_assert >= 202306L
+        static_assert(updates_case<P, C>,
+                      meta::cat<512>("jaal: '", meta::type_name<P>(),
+                                     "' has no update for message '", meta::type_name<C>(),
+                                     "'; add: static Cmd update(Model&, ",
+                                     meta::type_name<C>(), ")"));
+#else
+        static_assert(updates_case<P, C>,
+                      "jaal: a Msg case has no update(Model&, Case) returning Cmd");
+#endif
+    }
+    return true;
 }
 
-template <class P> using cmd_t = typename step_parts<step_t<P>>::cmd;
+template <class P, class V> inline constexpr bool updates_every_case = false;
+template <class P, class... Cs>
+inline constexpr bool updates_every_case<P, std::variant<Cs...>> = (check_case<P, Cs>() && ...);
 
 template <class P>
-concept well_formed_step = requires {
-    typename step_t<P>;
-    typename step_parts<step_t<P>>::model;
-    typename step_parts<step_t<P>>::cmd;
-} && std::same_as<typename step_parts<step_t<P>>::model, typename P::Model>
-  && detail::cmd::is_cmd_v<cmd_t<P>>
-  && std::same_as<typename cmd_t<P>::msg_type, typename P::Msg>;
+concept has_init = requires(typename P::Model& m) {
+    { P::init(m) } -> std::convertible_to<typename P::Cmd>;
+};
 
-template <class P> using sub_t = decltype(P::subscribe(std::declval<const typename P::Model&>()));
+template <class P>
+concept has_subscribe = requires(const typename P::Model& m) {
+    typename P::Sub;
+    { P::subscribe(m) } -> std::same_as<typename P::Sub>;
+};
 
 }  // namespace detail::prog
-
-/// The effect row a program's update can return.
-template <class P>
-using fx_of = typename detail::prog::cmd_t<P>::row_type;
-
-/// The program's Cmd type.
-template <class P>
-using cmd_of = detail::prog::cmd_t<P>;
-
-/// Does P define subscribe?
-template <class P>
-concept Subscribing = requires {
-    typename detail::prog::sub_t<P>;
-} && detail::sub::is_sub_v<detail::prog::sub_t<P>>
-  && std::same_as<typename detail::prog::sub_t<P>::msg_type, typename P::Msg>;
-
-/// The subscription row a program asks for (empty when it has no subscribe).
-template <class P>
-struct src_of_impl { using type = row<>; };
-template <Subscribing P>
-struct src_of_impl<P> { using type = typename detail::prog::sub_t<P>::row_type; };
-template <class P> using src_of = typename src_of_impl<P>::type;
-
-template <class P> using sub_of = typename detail::prog::sub_t<P>;
-
-// ── init, in two shapes ──────────────────────────────────────────────────
-template <class P>
-concept HasPlainInit = requires {
-    { P::init() } -> std::same_as<typename P::Model>;
-};
-
-template <class P>
-concept HasCmdInit = requires {
-    { P::init() } -> std::same_as<std::pair<typename P::Model, cmd_of<P>>>;
-} || requires {
-    // init() returning jaal::step<Model, Cmd> (program_base.hpp)
-    requires std::same_as<typename detail::prog::step_parts<
-                              decltype(P::init())>::model, typename P::Model>;
-    requires std::same_as<typename detail::prog::step_parts<
-                              decltype(P::init())>::cmd, cmd_of<P>>;
-};
 
 // ── the concept ──────────────────────────────────────────────────────────
 template <class P>
@@ -127,11 +111,33 @@ concept Program =
     requires {
         typename P::Model;
         typename P::Msg;
+        typename P::Cmd;
     }
     && std::movable<typename P::Model>
+    && std::default_initializable<typename P::Model>
+    && detail::prog::is_variant_v<typename P::Msg>
     && Sendable<typename P::Msg>
-    && detail::prog::well_formed_step<P>
-    && (HasPlainInit<P> || HasCmdInit<P>);
+    && detail::cmd::is_cmd_v<typename P::Cmd>
+    && std::same_as<typename P::Cmd::msg_type, typename P::Msg>
+    && detail::prog::updates_every_case<P, typename P::Msg>;
+
+/// Does P subscribe to anything?
+template <class P>
+concept Subscribing = Program<P> && detail::prog::has_subscribe<P>;
+
+/// The program's Cmd type, and the effect row it may return.
+template <Program P> using cmd_of = typename P::Cmd;
+template <Program P> using fx_of  = typename P::Cmd::row_type;
+
+namespace detail::prog {
+template <class P> struct sub_impl { using type = basic_sub<typename P::Msg, row<>>; };
+template <Subscribing P> struct sub_impl<P> { using type = typename P::Sub; };
+}  // namespace detail::prog
+
+/// The program's Sub type (an empty-row Sub when it doesn't subscribe), and
+/// the source row it may ask for.
+template <Program P> using sub_of = typename detail::prog::sub_impl<P>::type;
+template <Program P> using src_of = typename sub_of<P>::row_type;
 
 /// P produces Out from its model (a host that draws requires this).
 template <class P, class Out>
@@ -151,18 +157,43 @@ concept HasNeedsWarmup = requires(const typename P::Model& m) {
     { P::needs_warmup(m) } -> std::convertible_to<bool>;
 };
 
-// ── running a program's init, either shape ───────────────────────────────
+// ── calling a program: the only place that does ──────────────────────────
+namespace prog {
+
+/// A fresh model and its first Cmd (init, or a value-initialised Model).
 template <Program P>
-[[nodiscard]] auto run_init() -> std::pair<typename P::Model, cmd_of<P>> {
-    if constexpr (HasCmdInit<P>) return detail::prog::split(P::init());
-    else                         return {P::init(), cmd_of<P>::none()};
+[[nodiscard]] std::pair<typename P::Model, typename P::Cmd> init() {
+    typename P::Model m{};
+    if constexpr (detail::prog::has_init<P>) {
+        typename P::Cmd c = P::init(m);
+        return {std::move(m), std::move(c)};
+    } else {
+        return {std::move(m), typename P::Cmd{}};
+    }
+}
+
+/// Fold one message into the model, in place; return its Cmd.
+template <Program P>
+[[nodiscard]] typename P::Cmd update(typename P::Model& m, typename P::Msg msg) {
+    return std::visit(
+        [&]<class C>(C&& c) -> typename P::Cmd {
+            // Always true for a Program; the check keeps a missing case to
+            // ONE error (check_case's) instead of a second from this call.
+            if constexpr (detail::prog::updates_case<P, std::remove_cvref_t<C>>)
+                return P::update(m, std::forward<C>(c));
+            else
+                return {};
+        },
+        std::move(msg));
 }
 
 /// The subscriptions for a model (none when the program has no subscribe).
 template <Program P>
-[[nodiscard]] auto run_subscribe(const typename P::Model& m) {
+[[nodiscard]] sub_of<P> subscribe(const typename P::Model& m) {
     if constexpr (Subscribing<P>) return P::subscribe(m);
-    else                          return Sub<typename P::Msg, row<>>{};
+    else                          return sub_of<P>{};
 }
+
+}  // namespace prog
 
 }  // namespace jaal

@@ -23,25 +23,25 @@ using jaal::signal_set;
 using clk = std::chrono::steady_clock;
 
 template <class Msg>
-using SigSub = jaal::Sub<Msg, jaal::row_union<jaal::core_src, jaal::make_row<jaal::fx::on_signal>>>;
+using SigSub = jaal::Sub<Msg, jaal::fx::on_signal>;
 
 // ── 1. timers, a task, and quit with a code, for real ───────────────────
 struct Ticker {
     struct Model { int ticks = 0; int task = 0; };
     struct Tick {}; struct Done { int v; };
     using Msg = std::variant<Tick, Done>;
-    using Cmd = jaal::CoreCmd<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
     using Sub = SigSub<Msg>;
-    static std::pair<Model, Cmd> init() {
-        return {{}, Cmd::task([](jaal::Sink<Msg> out, std::stop_token, int x) {
+    static Cmd init(Model&) {
+        return Cmd::task([](jaal::Sink<Msg> out, std::stop_token, int x) {
             out.send(Done{x * 2});
-        }, 21)};
+        }, 21);
     }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* d = std::get_if<Done>(&msg)) { m.task = d->v; return {m, Cmd::none()}; }
+    static Cmd update(Model& m, Done d) { m.task = d.v; return {}; }
+    static Cmd update(Model& m, Tick) {
         ++m.ticks;
-        if (m.ticks == 3) return {m, Cmd::quit(m.task == 42 ? 7 : 99)};
-        return {m, Cmd::none()};
+        if (m.ticks == 3) return Cmd::quit(m.task == 42 ? 7 : 99);
+        return {};
     }
     static Sub subscribe(const Model&) { return Sub::every(30ms, Tick{}); }
 };
@@ -64,9 +64,9 @@ struct Idle {
     struct Model {};
     struct Wake {};
     using Msg = std::variant<Wake>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static std::pair<Model, Cmd> init() { return {{}, Cmd::after(400ms, Wake{})}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) { return {m, Cmd::quit(0)}; }
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd init(Model&) { return Cmd::after(400ms, Wake{}); }
+    static Cmd update(Model&, Wake) { return Cmd::quit(0); }
 };
 
 #if !defined(_WIN32)
@@ -101,17 +101,16 @@ struct Handles {
     struct Model { bool got_int = false; };
     struct Sig { sig s; }; struct Ready {};
     using Msg = std::variant<Sig, Ready>;
-    using Cmd = jaal::CoreCmd<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
     using Sub = SigSub<Msg>;
-    static std::pair<Model, Cmd> init() { return {{}, Cmd::after(20ms, Ready{})}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Ready>(msg)) {
-            ::raise(SIGINT);                         // arrives through the reactor
-            return {m, Cmd::none()};
-        }
-        const auto s = std::get<Sig>(msg).s;
-        if (s == sig::interrupt) return {m, Cmd::quit(11)};   // handled: our code
-        return {m, Cmd::none()};
+    static Cmd init(Model&) { return Cmd::after(20ms, Ready{}); }
+    static Cmd update(Model&, Ready) {
+        ::raise(SIGINT);                             // arrives through the reactor
+        return {};
+    }
+    static Cmd update(Model&, Sig s) {
+        if (s.s == sig::interrupt) return Cmd::quit(11);      // handled: our code
+        return {};
     }
     static Sub subscribe(const Model&) {
         return Sub::on_signal({sig::interrupt}, [](sig s) { return Msg{Sig{s}}; });
@@ -128,14 +127,12 @@ struct Ignores {
     struct Model {};
     struct Ready {}; struct Never {};
     using Msg = std::variant<Ready, Never>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static std::pair<Model, Cmd> init() {
-        return {{}, Cmd::batch(Cmd::after(20ms, Ready{}), Cmd::after(5s, Never{}))};
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd init(Model&) {
+        return Cmd::batch(Cmd::after(20ms, Ready{}), Cmd::after(5s, Never{}));
     }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Ready>(msg)) ::raise(SIGINT);
-        return {m, Cmd::none()};
-    }
+    static Cmd update(Model&, Ready) { ::raise(SIGINT); return {}; }
+    static Cmd update(Model&, Never) { return {}; }
 };
 
 static int default_signal_exit() {
@@ -147,12 +144,10 @@ static int default_signal_exit() {
     jaal::run_options opt;
     opt.default_signal_exit = false;
     struct Ignores2 : Ignores {
-        static std::pair<Model, Cmd> update(Model m, Msg msg) {
-            if (std::holds_alternative<Ready>(msg)) ::raise(SIGINT);
-            return {m, std::holds_alternative<Never>(msg) ? Cmd::quit(0) : Cmd::none()};
-        }
-        static std::pair<Model, Cmd> init() {
-            return {{}, Cmd::batch(Cmd::after(20ms, Ready{}), Cmd::after(150ms, Never{}))};
+        static Cmd update(Model&, Ready) { ::raise(SIGINT); return {}; }
+        static Cmd update(Model&, Never) { return Cmd::quit(0); }
+        static Cmd init(Model&) {
+            return Cmd::batch(Cmd::after(20ms, Ready{}), Cmd::after(150ms, Never{}));
         }
     };
     if (jaal::run<Ignores2>(opt) != 0) return 403;   // survived the Ctrl+C
@@ -165,8 +160,8 @@ struct Busy {
     struct Model {};
     struct Go {}; struct Late {};
     using Msg = std::variant<Go, Late>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static std::pair<Model, Cmd> init() {
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd init(Model&) {
         Cmd work = Cmd::batch(
             Cmd::task(jaal::fx::isolated, [](jaal::Sink<Msg> out, std::stop_token) {
                 std::this_thread::sleep_for(150ms);     // still running at shutdown
@@ -176,12 +171,10 @@ struct Busy {
                 while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
                 out.send(Late{});
             }));
-        return {{}, Cmd::batch(std::move(work), Cmd::after(20ms, Go{}))};
+        return Cmd::batch(std::move(work), Cmd::after(20ms, Go{}));
     }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Go>(msg)) return {m, Cmd::quit(5)};
-        return {m, Cmd::none()};
-    }
+    static Cmd update(Model&, Go)   { return Cmd::quit(5); }
+    static Cmd update(Model&, Late) { return {}; }
 };
 
 static int shutdown_with_live_tasks() {

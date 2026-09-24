@@ -93,10 +93,13 @@ struct on_key {
 ```
 
 Now a program writes `Sub::on_key(...)` and it only compiles on a host that
-produces `Key` events. The program declares the source in its row:
+produces `Key` events. The program lists the source in its `Sub`:
 
 ```cpp
-struct App : jaal::program<Model, Msg, jaal::fx_list<>, jaal::src_list<on_key>> {
+struct App {
+    // ... Model, Msg, Cmd, update ...
+    using Sub = jaal::Sub<Msg, on_key>;            // core sources + on_key
+
     static Sub subscribe(const Model&) {
         return Sub::on_key([](Key k) -> std::optional<Msg> {
             if (k.ch == 'q') return Msg{Quit{}};
@@ -106,13 +109,8 @@ struct App : jaal::program<Model, Msg, jaal::fx_list<>, jaal::src_list<on_key>> 
 };
 ```
 
-If you spell the rows by hand rather than with `program<>`, remember that
-`on_signal` is a source like any other and has to be in the row too:
-
-```cpp
-using Sub = jaal::Sub<Msg, jaal::row_union<jaal::core_src,
-                                           jaal::make_row<on_key, jaal::fx::on_signal>>>;
-```
+`on_signal` is a source like any other, so a program that also wants
+signals lists it too: `jaal::Sub<Msg, on_key, jaal::fx::on_signal>`.
 
 Routers are rebuilt on every `subscribe()`, so they may capture the model
 freely ([D13](decisions.md#d13-re-subscribe-between-events)). They run on the

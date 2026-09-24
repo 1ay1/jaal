@@ -35,10 +35,9 @@ struct App {
     struct Model {};
     struct S {};
     using Msg = std::variant<S>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::Sub<Msg, jaal::make_row<on_scroll>>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) { return {m, Cmd::none()}; }
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg, on_scroll>;
+    static Cmd update(Model&, S) { return {}; }
     static Sub subscribe(const Model&) {
         return Sub(on_scroll::type<Msg>{[](const Scroll&) -> std::optional<Msg> { return S{}; }});
     }
@@ -52,20 +51,46 @@ jaal::headless<App, std::variant<Key, Click>> h;
 // timeline over it would show the wrong past
 struct Shared {
     struct Doc { int words = 0; };
-    struct Model { std::shared_ptr<Doc> doc; };
+    struct Model { std::shared_ptr<Doc> doc = std::make_shared<Doc>(); };
     struct Edit {};
     using Msg = std::variant<Edit>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {std::make_shared<Doc>()}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) { ++m.doc->words; return {m, Cmd::none()}; }
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Edit) { ++m.doc->words; return {}; }
 };
 jaal::timeline<Shared> t({});
 #elif JAAL_CASE == 3
-// Wrap isn't one of the parent's Msg alternatives: the child's messages
-// would have nowhere to go
+// Wrap isn't a case of the parent's Msg: the child's messages would have
+// nowhere to go
 struct Stray { App::Msg msg; };
-using Parent = std::variant<int>;
-jaal::child<App, Parent, Stray> c;
+struct Parent {
+    struct Model { App::Model child; };
+    using Msg = std::variant<int>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, int) { return {}; }
+};
+auto c = jaal::child<App, Parent, Stray>::init(*new App::Model);
+#elif JAAL_CASE == 4
+// a Msg case with no update: the error names the case and the line to add
+struct Counter {
+    struct Model { int n = 0; };
+    struct Inc {};
+    struct Reset {};
+    using Msg = std::variant<Inc, Reset>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Inc) { ++m.n; return {}; }
+};
+jaal::headless<Counter> h;
+#elif JAAL_CASE == 5
+// update returns an effect the program's Cmd doesn't list
+struct Beep {};
+using beep = jaal::pure_fx<Beep, "beep">;
+struct Noisy {
+    struct Model {};
+    struct Go {};
+    using Msg = std::variant<Go>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, Go) { return Beep{}; }
+};
 #else
 #  error "unknown JAAL_CASE"
 #endif

@@ -30,15 +30,11 @@ struct Fragile {
     struct Model { std::vector<std::string> lines{"a", "b", "c"}; };
     struct Add { std::string s; }; struct Boom {};
     using Msg = std::variant<Add, Boom>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Boom>(msg)) {
-            m.lines.push_back("half-done");        // partially mutated...
-            throw std::runtime_error("update failed");
-        }
-        m.lines.push_back(std::get<Add>(msg).s);
-        return {std::move(m), Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Add a) { m.lines.push_back(a.s); return {}; }
+    static Cmd update(Model& m, Boom) {
+        m.lines.push_back("half-done");            // partially mutated...
+        throw std::runtime_error("update failed");
     }
 };
 
@@ -50,9 +46,9 @@ struct recorded {
 };
 
 // ── 1. skip: the model is EXACTLY as before the throwing message ─────────
-// update() takes the model by value and moves it in. Without a copy taken
-// first, the throw leaves the kernel's model moved-from (measured: a
-// 3-line model came back with 0 lines).
+// update() mutates the model in place. Under skip the kernel copies the
+// (copyable) model first and restores it on a throw, so the "half-done"
+// line pushed before the throw must NOT survive.
 int skip_keeps_model() {
     recorded rec;
     jaal::kernel::options opt;
@@ -92,16 +88,13 @@ struct TaskThrows {
     struct Model { int done = 0; };
     struct Go {}; struct Done {};
     using Msg = std::variant<Go, Done>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Go>(msg))
-            return {m, Cmd::batch(
-                Cmd::task([](Sink<Msg>, std::stop_token) { throw std::logic_error("task failed"); }),
-                Cmd::task([](Sink<Msg> out, std::stop_token) { out.send(Done{}); }))};
-        ++m.done;
-        return {m, Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, Go) {
+        return Cmd::batch(
+            Cmd::task([](Sink<Msg>, std::stop_token) { throw std::logic_error("task failed"); }),
+            Cmd::task([](Sink<Msg> out, std::stop_token) { out.send(Done{}); }));
     }
+    static Cmd update(Model& m, Done) { ++m.done; return {}; }
 };
 
 int task_fault_reported() {
@@ -138,14 +131,10 @@ struct SubThrows {
     struct Model { int ticks = 0; bool bad = false; };
     struct Tick {}; struct Break {};
     using Msg = std::variant<Tick, Break>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::Sub<Msg, jaal::core_src>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Break>(msg)) m.bad = true;
-        else ++m.ticks;
-        return {m, Cmd::none()};
-    }
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    static Cmd update(Model& m, Tick)  { ++m.ticks; return {}; }
+    static Cmd update(Model& m, Break) { m.bad = true; return {}; }
     static Sub subscribe(const Model& m) {
         if (m.bad) throw std::runtime_error("subscribe failed");
         return Sub::every(10ms, Tick{});
@@ -173,13 +162,12 @@ struct Stubborn {
     struct Model {};
     struct Go {};
     using Msg = std::variant<Go>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) {
-        return {m, Cmd::task([](Sink<Msg>, std::stop_token) {
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, Go) {
+        return Cmd::task([](Sink<Msg>, std::stop_token) {
             // ignores the stop token: a stuck syscall, a bad loop
             std::this_thread::sleep_for(1500ms);
-        })};
+        });
     }
 };
 

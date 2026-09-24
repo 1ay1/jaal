@@ -11,7 +11,7 @@
 #include <vector>
 
 using namespace std::chrono_literals;
-using jaal::Sub;
+using jaal::basic_sub;
 using jaal::make_row;
 namespace fx = jaal::fx;
 
@@ -62,21 +62,26 @@ static_assert(!jaal::RouterDescriptor<fx::every>);
 
 struct Msg { int v; bool operator==(const Msg&) const = default; };
 using R = make_row<on_key, fx::every, watch>;
-using S = Sub<Msg, R>;
+using S = basic_sub<Msg, R>;
 
 // keys of different source kinds live in a sum type
 using K = jaal::source_key_t<R>;
 static_assert(std::variant_size_v<K> == 2);   // every + watch, not on_key
 
 // widening / narrowing, like Cmd
-static_assert(std::is_convertible_v<Sub<Msg, make_row<fx::every>>, S>);
-static_assert(!std::is_constructible_v<Sub<Msg, make_row<fx::every>>, S>);
+static_assert(std::is_convertible_v<basic_sub<Msg, make_row<fx::every>>, S>);
+static_assert(!std::is_constructible_v<basic_sub<Msg, make_row<fx::every>>, S>);
 // core_src (every + stream) is NOT a subrow of R: R has no stream
-static_assert(!std::is_convertible_v<Sub<Msg, jaal::core_src>, S>);
+static_assert(!std::is_convertible_v<basic_sub<Msg, jaal::core_src>, S>);
 
 template <class X> concept has_every = requires { X::every(1ms, Msg{0}); };
 static_assert(has_every<S>);
-static_assert(!has_every<Sub<Msg, make_row<on_key>>>);
+static_assert(!has_every<basic_sub<Msg, make_row<on_key>>>);
+
+// the program-facing alias always unions in core_src
+static_assert(std::is_same_v<jaal::Sub<Msg>, basic_sub<Msg, jaal::core_src>>);
+static_assert(std::is_same_v<jaal::Sub<Msg, on_key>,
+                             basic_sub<Msg, jaal::row_union<jaal::core_src, make_row<on_key>>>>);
 
 // ── runtime ──────────────────────────────────────────────────────────────
 using jaal::running_sources;

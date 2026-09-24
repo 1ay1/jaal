@@ -10,7 +10,6 @@
 #include <string_view>
 
 using namespace std::chrono_literals;
-using jaal::Cmd;
 using jaal::Sink;
 using jaal::make_row;
 namespace fx = jaal::fx;
@@ -18,14 +17,14 @@ namespace fx = jaal::fx;
 struct Msg { int v; };
 struct Beep {};
 using beep = jaal::pure_fx<Beep, "beep">;
-using C = jaal::CoreCmd<Msg>;
+using C = jaal::Cmd<Msg>;
 
 #if JAAL_CASE == 1
 // an effect that's not in the row
 C c = Beep{};
 #elif JAAL_CASE == 2
-// narrowing a Cmd to fewer effects
-Cmd<Msg, make_row<fx::after>> small = C::quit();
+// narrowing a Cmd to fewer effects (exact rows: basic_cmd)
+jaal::basic_cmd<Msg, make_row<fx::after>> small = C::quit();
 #elif JAAL_CASE == 3
 // a task body that captures by reference
 void f() {

@@ -104,7 +104,7 @@ public:
     /// plan it returns refers to storage owned here and is valid until the
     /// next reconcile().
     template <class RouterSink>
-    const plan& reconcile(const Sub<Msg, row_type>& next, RouterSink&& routers) {
+    const plan& reconcile(const basic_sub<Msg, row_type>& next, RouterSink&& routers) {
         want_.clear();
         ordinals_.clear();
         plan_.clear();

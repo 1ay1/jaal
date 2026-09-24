@@ -53,7 +53,7 @@ public:
 
     explicit timeline(std::vector<msg_type> msgs, std::size_t stride = 64)
         : msgs_(std::move(msgs)), stride_(stride ? stride : 1) {
-        auto [m, c] = run_init<P>();
+        auto [m, c] = prog::init<P>();
         (void)c;
         // Build every snapshot up front: one pass over the run. After this,
         // at() never folds more than stride-1 messages.
@@ -136,9 +136,8 @@ public:
 
 private:
     static model_type fold(model_type m, const msg_type& msg) {
-        auto [next, cmd] = detail::prog::split(P::update(std::move(m), msg));
-        (void)cmd;
-        return std::move(next);
+        (void)prog::update<P>(m, msg);
+        return m;
     }
 
     std::vector<msg_type>                         msgs_;

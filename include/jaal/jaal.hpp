@@ -4,10 +4,12 @@
 //   #include <jaal/jaal.hpp>
 //
 // is everything an application needs: Program, Cmd/Sub, the core effects
-// and sources (quit, after, task, now, every, stream), routers, program<>
-// aliases, the kernel, run<P>(), the headless test host, faults, tracing
-// and replay. Platform backends come in through run.hpp; nothing here names
-// an OS.
+// and sources (quit, send, after, task, now, random, every, stream),
+// routers, composition (child, children), the kernel, run<P>(), the test
+// hosts, faults, tracing, replay and resume. Platform backends come in
+// through run.hpp; nothing here names an OS.
+//
+// The shape of a program is in core/program.hpp.
 //
 // Docs: docs/scope.md (what's offered), docs/decisions.md (why).
 
@@ -20,9 +22,7 @@
 #include "core/effect.hpp"
 #include "core/frozen.hpp"
 #include "core/fx.hpp"
-#include "core/overload.hpp"
 #include "core/program.hpp"
-#include "core/program_base.hpp"
 #include "core/rng.hpp"
 #include "core/router.hpp"
 #include "core/row.hpp"

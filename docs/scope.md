@@ -44,14 +44,13 @@ background work, or effects that run during replay.
 
 | | |
 |---|---|
-| `Program` concept | `Model`, `Msg`, `init`, `update`; `subscribe` and `view` optional |
-| `Cmd<Msg, Row>` | effects as data; the row (set of allowed effects) is in the type |
-| `Sub<Msg, Row>` | subscriptions as data; diffed by key against what's running |
+| `Program` concept | one shape: `Model`, `Msg` (a variant), `Cmd`, one `update(Model&, Case)` per case; `init`, `Sub`/`subscribe` and `view` optional. A missing case is a compile error naming the case |
+| `Cmd<Msg, extra...>` | effects as data; core effects always in, the extras listed. `basic_cmd<Msg, Row>` takes an exact row (for generic code) |
+| `Sub<Msg, extra...>` | subscriptions as data, diffed by key against what's running; core sources always in. `basic_sub<Msg, Row>` for exact rows |
 | row subtyping | a `Cmd` with fewer effects converts to one with more, never back |
-| `map` | re-target a child's `Cmd`/`Sub` at the parent's `Msg` (components) |
-| `child<C, ParentMsg, Wrap>` | embed program `C` in a parent: `match`, `update` in place, mapped `init`/`subscribe`, stream keys prefixed so two copies don't clash. One fixed slot per `child<>`; lists of children aren't supported yet |
-| `jaal::program<>` | declare effects once, get `Cmd`, `Sub`, `step` aliases |
-| `step` | `update` can return just a model, meaning "no effects" |
+| `map` / `map_with` | re-target a child's `Cmd`/`Sub` at the parent's `Msg` (components) |
+| `child<C, Parent, Wrap>` | embed program `C` in a fixed slot: `init`/`update` in place, mapped `subscribe`, stream keys prefixed so two copies don't clash. Its messages arrive as the parent's `Wrap` case |
+| `children<C, Parent, Wrap>` | a keyed list of `C`: add, remove, route by id, per-child stream keys |
 
 ### Built-in effects and sources (no host code needed)
 
@@ -69,8 +68,8 @@ subscription lifecycle. Everything else is a library on top of `task` and
 | `task(isolated, body, args...)` | effect | same, on its own thread (for work that may hang) |
 | `now(f)` | effect | the kernel's clock as a Msg (simulated in tests) |
 | `random(f)` | effect | draws from the kernel's seeded generator as a Msg (reproducible) |
-| `child<C, Msg, Wrap>` | composition | one child program in a fixed slot |
-| `children<C, Msg, Wrap>` | composition | a keyed LIST of child programs; stream keys are per child |
+| `child<C, Parent, Wrap>` | composition | one child program in a fixed slot |
+| `children<C, Parent, Wrap>` | composition | a keyed LIST of child programs; stream keys are per child |
 | `debounce<T>` / `throttle` | model values | "settle before acting" and "at most once per interval" |
 | `every(d, msg)` | source | repeating timer; keeps its phase across model changes |
 | `stream(key, body, args...)` | source | long-running work; runs while subscribed, cancelled when not |

@@ -50,35 +50,25 @@ struct Tab {
     struct Tick {};
     struct Watch {};
     using Msg = std::variant<Bump, Load, Loaded, Tick, Watch>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::CoreSub<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Bump>(msg)) {
-            ++m.n;
-            return {m, Cmd::none()};
-        }
-        if (std::holds_alternative<Load>(msg)) {
-            m.loading = true;
-            // A task: its mapper must be captureless, which is exactly what
-            // makes a keyed list hard without map_with.
-            return {m, Cmd::task([](Sink<Msg> s, std::stop_token, int v) {
-                           s.send(Loaded{v});
-                       }, 7)};
-        }
-        if (auto* l = std::get_if<Loaded>(&msg)) {
-            m.loading = false;
-            m.n += l->v;
-            return {m, Cmd::none()};
-        }
-        if (std::holds_alternative<Tick>(msg)) {
-            ++m.ticks;
-            return {m, Cmd::none()};
-        }
-        return {m, Cmd::none()};              // Watch: only a marker
+    static Cmd update(Model& m, Bump) { ++m.n; return {}; }
+    static Cmd update(Model& m, Load) {
+        m.loading = true;
+        // A task: its mapper must be captureless, which is exactly what
+        // makes a keyed list hard without map_with.
+        return Cmd::task([](Sink<Msg> s, std::stop_token, int v) {
+                   s.send(Loaded{v});
+               }, 7);
     }
+    static Cmd update(Model& m, Loaded l) {
+        m.loading = false;
+        m.n += l.v;
+        return {};
+    }
+    static Cmd update(Model& m, Tick) { ++m.ticks; return {}; }
+    static Cmd update(Model&, Watch) { return {}; }   // only a marker
 
     // Every tab asks for the SAME stream key. Unprefixed, they'd collide.
     static Sub subscribe(const Model& m) {
@@ -97,39 +87,26 @@ struct BumpAll {};
 
 struct App {
     using Msg  = std::variant<ToTab, NewTab, CloseTab, BumpAll>;
-    using Tabs = jaal::children<Tab, Msg, ToTab>;
-    using Cmd  = jaal::CoreCmd<Msg>;
-    using Sub  = jaal::CoreSub<Msg>;
+    using Tabs = jaal::children<Tab, App, ToTab>;
+    using Cmd  = jaal::Cmd<Msg>;
+    using Sub  = jaal::Sub<Msg>;
 
     struct Model { Tabs::map tabs; };
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto r = Tabs::match(msg)) return {std::move(m), fold_child(m, *r)};
-        if (std::holds_alternative<NewTab>(msg)) {
-            auto [id, cmd] = Tabs::add(m.tabs);
-            (void)id;
-            return {std::move(m), std::move(cmd)};
-        }
-        if (auto* c = std::get_if<CloseTab>(&msg)) {
-            Tabs::remove(m.tabs, c->id);
-            return {std::move(m), Cmd::none()};
-        }
-        // BumpAll: reuse the per-tab path instead of duplicating it. This is
-        // what Cmd::send is for.
+    // Routing to a tab is just the overload for the Wrap case.
+    static Cmd update(Model& m, ToTab t)    { return Tabs::update(m.tabs, t); }
+    static Cmd update(Model& m, NewTab)     { return Tabs::add(m.tabs).second; }
+    static Cmd update(Model& m, CloseTab c) { Tabs::remove(m.tabs, c.id); return {}; }
+    // BumpAll: reuse the per-tab path instead of duplicating it. This is
+    // what Cmd::send is for.
+    static Cmd update(Model& m, BumpAll) {
         std::vector<Cmd> cs;
         for (const auto& [id, model] : m.tabs)
             cs.push_back(Cmd::send(Msg{ToTab{id, Tab::Bump{}}}));
-        return {std::move(m), Cmd::batch(std::move(cs))};
+        return Cmd::batch(std::move(cs));
     }
 
     static Sub subscribe(const Model& m) { return Tabs::subscribe(m.tabs); }
-
-private:
-    static Cmd fold_child(Model& m, const Tabs::routed& r) {
-        return Tabs::update(m.tabs, r);
-    }
 };
 
 using H = jaal::headless<App>;
@@ -257,22 +234,14 @@ struct Chain {
     struct Model { std::vector<int> seen; };
     struct A {}; struct B {}; struct C {};
     using Msg = std::variant<A, B, C>;
-    using Cmd = jaal::CoreCmd<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<A>(msg)) {
-            m.seen.push_back(1);
-            return {m, Cmd::batch(Cmd::send(Msg{B{}}), Cmd::send(Msg{C{}}))};
-        }
-        if (std::holds_alternative<B>(msg)) {
-            m.seen.push_back(2);
-            return {m, Cmd::none()};
-        }
-        m.seen.push_back(3);
-        return {m, Cmd::none()};
+    static Cmd update(Model& m, A) {
+        m.seen.push_back(1);
+        return Cmd::batch(Cmd::send(Msg{B{}}), Cmd::send(Msg{C{}}));
     }
+    static Cmd update(Model& m, B) { m.seen.push_back(2); return {}; }
+    static Cmd update(Model& m, C) { m.seen.push_back(3); return {}; }
 };
 
 int send_folds_in_order_without_the_clock() {

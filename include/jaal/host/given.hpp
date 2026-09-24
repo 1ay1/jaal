@@ -73,7 +73,7 @@ public:
 
     /// Start from init() (its Cmd is the last Cmd, so settle() runs it).
     given() {
-        auto [m, c] = run_init<P>();
+        auto [m, c] = prog::init<P>();
         model_.emplace(std::move(m));
         last_ = std::move(c);
     }
@@ -86,9 +86,7 @@ public:
         if (!model_) return *this;          // an earlier update threw: nothing to fold into
         before_ = *model_;
         try {
-            auto [next, cmd] = detail::prog::split(P::update(std::move(*model_), std::move(msg)));
-            model_.emplace(std::move(next));
-            last_ = std::move(cmd);
+            last_ = prog::update<P>(*model_, std::move(msg));
             ++folds_;
             note(last_);
         } catch (const std::exception& e) {
@@ -156,7 +154,7 @@ public:
     [[nodiscard]] std::optional<int> quit() const noexcept { return quit_; }
 
     /// The subscriptions for the current model.
-    [[nodiscard]] auto subs() const { return run_subscribe<P>(*model_); }
+    [[nodiscard]] auto subs() const { return prog::subscribe<P>(*model_); }
 
     // ── expecting ───────────────────────────────────────────────────────
     template <class F>

@@ -142,18 +142,14 @@ struct Dice {
     struct Roll {};
     struct Rolled { int face; };
     using Msg = std::variant<Roll, Rolled>;
-    using Cmd = jaal::CoreCmd<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Roll>(msg))
-            return {m, Cmd::random([](jaal::rng& r) -> Msg {
-                        return Rolled{static_cast<int>(r.in(1, 6))};
-                    })};
-        m.rolls.push_back(std::get<Rolled>(msg).face);
-        return {m, Cmd::none()};
+    static Cmd update(Model&, Roll) {
+        return Cmd::random([](jaal::rng& r) -> Msg {
+            return Rolled{static_cast<int>(r.in(1, 6))};
+        });
     }
+    static Cmd update(Model& m, Rolled r) { m.rolls.push_back(r.face); return {}; }
 };
 
 std::vector<int> roll_with_seed(std::uint64_t seed, int times) {
@@ -230,10 +226,10 @@ int map_carries_the_draw() {
     // Cmd::map re-targets a random effect: the child's roll arrives wrapped.
     struct Wrapped { Dice::Msg inner; };
     using Parent = std::variant<Wrapped>;
-    using PCmd = jaal::CoreCmd<Parent>;
+    using PCmd = jaal::Cmd<Parent>;
 
-    auto [m, c] = Dice::update(Dice::Model{}, Dice::Roll{});
-    (void)m;
+    Dice::Model m;
+    auto c = Dice::update(m, Dice::Roll{});
     PCmd p = std::move(c).map([](Dice::Msg d) -> Parent { return Wrapped{d}; });
     auto* r = std::get_if<jaal::fx::random::type<Parent>>(&p.inner);
     CHECK(r != nullptr);

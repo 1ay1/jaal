@@ -4,61 +4,59 @@
 //   runs a pretend download on a background stream while ticking, then
 //   quits. Ctrl+C at any point prints "bye" and quits.
 //
-// Shows: program<> aliases, update returning just a model, a timer, a keyed
-// stream (cancelled the moment the program stops subscribing), a signal as
-// a message, and quit.
+// Shows the whole shape of a program: one update per message, a timer, a
+// keyed stream (cancelled the moment the program stops subscribing), a
+// signal as a message, an effect of the program's own (`say`), and quit.
 
 #include <jaal/jaal.hpp>
 
 #include <cstdio>
+#include <string>
 #include <thread>
 #include <variant>
 
 using namespace std::chrono_literals;
 
-namespace msg {
-struct Tick {};
-struct Progress { int percent; };
-struct Done {};
-struct Interrupted {};
-}  // namespace msg
+// update is pure: it never prints. It returns a `say` effect instead, and
+// the host prints it. That keeps the program replayable and testable
+// (headless records every line it would have printed).
+struct Say { std::string text; };
+using say = jaal::pure_fx<Say, "say">;
 
-struct Model {
-    int  ticks    = 0;
-    int  percent  = 0;
-    bool fetching = true;
-};
+struct Ticker {
+    struct Model {
+        int  ticks    = 0;
+        int  percent  = 0;
+        bool fetching = true;
+    };
 
-using Msg = std::variant<msg::Tick, msg::Progress, msg::Done, msg::Interrupted>;
+    struct Tick {};
+    struct Progress { int percent; };
+    struct Done {};
+    struct Interrupted {};
+    using Msg = std::variant<Tick, Progress, Done, Interrupted>;
 
-// Core effects and sources come for free; this program adds signals.
-struct Ticker : jaal::program<Model, Msg, jaal::fx_list<>, jaal::src_list<jaal::fx::on_signal>> {
-    static Model init() { return {}; }
+    using Cmd = jaal::Cmd<Msg, say>;                   // core effects + say
+    using Sub = jaal::Sub<Msg, jaal::fx::on_signal>;   // core sources + signals
 
-    static step update(Model m, Msg in) {
-        return std::visit(jaal::overload{
-            [&](msg::Tick) -> step {
-                ++m.ticks;
-                std::printf("tick %d  (%d%%)\n", m.ticks, m.percent);
-                return m;                                    // no effects
-            },
-            [&](msg::Progress p) -> step { m.percent = p.percent; return m; },
-            [&](msg::Done) -> step {
-                std::printf("done after %d ticks\n", m.ticks);
-                m.fetching = false;
-                return {m, Cmd::quit(0)};
-            },
-            [&](msg::Interrupted) -> step {
-                std::printf("bye\n");
-                return {m, Cmd::quit(0)};
-            },
-        }, in);
+    static Cmd update(Model& m, Tick) {
+        ++m.ticks;
+        return Say{"tick " + std::to_string(m.ticks) + "  (" + std::to_string(m.percent) + "%)"};
     }
+    static Cmd update(Model& m, Progress p) {
+        m.percent = p.percent;
+        return {};
+    }
+    static Cmd update(Model& m, Done) {
+        m.fetching = false;
+        return Cmd::batch(Say{"done after " + std::to_string(m.ticks) + " ticks"}, Cmd::quit(0));
+    }
+    static Cmd update(Model&, Interrupted) { return Cmd::batch(Say{"bye"}, Cmd::quit(0)); }
 
     static Sub subscribe(const Model& m) {
         auto always = Sub::batch(
-            Sub::every(250ms, msg::Tick{}),
-            Sub::on_signal({jaal::sig::interrupt}, [](jaal::sig) { return Msg{msg::Interrupted{}}; }));
+            Sub::every(250ms, Tick{}),
+            Sub::on_signal({jaal::sig::interrupt}, [](jaal::sig) { return Msg{Interrupted{}}; }));
         if (!m.fetching) return always;
         // A stream lives exactly as long as this subscription does. When
         // `fetching` goes false, its stop_token fires and anything it still
@@ -67,11 +65,21 @@ struct Ticker : jaal::program<Model, Msg, jaal::fx_list<>, jaal::src_list<jaal::
             Sub::stream("fetch", [](jaal::Sink<Msg> out, std::stop_token st, int steps) {
                 for (int i = 1; i <= steps && !st.stop_requested(); ++i) {
                     std::this_thread::sleep_for(100ms);      // pretend network
-                    out.send(msg::Progress{i * 100 / steps});
+                    out.send(Progress{i * 100 / steps});
                 }
-                out.send(msg::Done{});
+                out.send(Done{});
             }, 10));
     }
 };
 
-int main() { return jaal::run<Ticker>(); }
+// The host: runs `say` by printing. That's all a host has to be for a
+// program with one effect of its own.
+struct console {
+    using event_type = jaal::kernel::no_events;
+    void handle(Say s) { std::printf("%s\n", s.text.c_str()); }
+};
+
+int main() {
+    console c;
+    return jaal::run<Ticker>(c);
+}

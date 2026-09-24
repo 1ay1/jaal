@@ -28,20 +28,19 @@ handle.
 ```cpp
 struct Ticker {
     struct Model { int ticks = 0; };
-    struct Tick {}; struct Interrupted {};
+
+    struct Tick {};
+    struct Interrupted {};
     using Msg = std::variant<Tick, Interrupted>;
 
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::Sub<Msg, jaal::row_union<jaal::core_src,
-                                               jaal::make_row<jaal::fx::on_signal>>>;
+    using Cmd = jaal::Cmd<Msg>;                        // core effects
+    using Sub = jaal::Sub<Msg, jaal::fx::on_signal>;   // core sources + signals
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Interrupted>(msg)) return {m, Cmd::quit(0)};
+    static Cmd update(Model& m, Tick) {
         ++m.ticks;
-        return {m, m.ticks == 5 ? Cmd::quit(0) : Cmd::none()};
+        return m.ticks == 5 ? Cmd::quit(0) : Cmd{};
     }
+    static Cmd update(Model&, Interrupted) { return Cmd::quit(0); }
 
     static Sub subscribe(const Model&) {
         return Sub::batch(Sub::every(500ms, Tick{}),
@@ -53,8 +52,22 @@ struct Ticker {
 int main() { return jaal::run<Ticker>(); }
 ```
 
-- The `Cmd` type says which effects `update` can ask for. A host must be
-  able to run every one of them, or it won't compile.
+That's the whole shape, and there's only one way to write it:
+
+| member | what it is |
+|---|---|
+| `Model` | the state; default-constructible |
+| `Msg` | a `std::variant` of message structs |
+| `Cmd` | `jaal::Cmd<Msg, extra effects...>`: the core effects are always in |
+| `update(Model&, Case)` | one per message case; changes the model in place, returns a `Cmd` (`{}` for none) |
+| `init(Model&)` | optional: set up the model, return the first `Cmd` |
+| `Sub`, `subscribe(const Model&)` | optional: what the program wants to hear about |
+
+- Forget an `update` for a case and it won't compile, with a message that
+  names the case and the line to add:
+  `'Counter' has no update for message 'Counter::Reset'; add: static Cmd update(Model&, Counter::Reset)`.
+- The `Cmd` type says which effects `update` can ask for. Returning one it
+  doesn't list, or running on a host that can't do one, won't compile.
 - Signals arrive as messages on the loop thread. A program that doesn't
   subscribe to Ctrl+C still stops on it (exit code 130), like any process.
 - The same program runs on the real platform (`jaal::run`), or on a
@@ -105,12 +118,10 @@ chasing never comes back. So drawing is an effect, and the kernel owns the
 stream (Elm's `Random.generate`):
 
 ```cpp
-static std::pair<Model, Cmd> update(Model m, Msg msg) {
-    if (std::holds_alternative<Roll>(msg))
-        return {m, Cmd::random([](jaal::rng& r) -> Msg {
-                       return Rolled{r.in(1, 6)};       // or shuffle a deck
-                   })};
-    ...
+static Cmd update(Model&, Roll) {
+    return Cmd::random([](jaal::rng& r) -> Msg {
+        return Rolled{r.in(1, 6)};                      // or shuffle a deck
+    });
 }
 ```
 
@@ -141,14 +152,17 @@ its own model, timers and streams, and messages routed back to the right one.
 
 ```cpp
 struct ToTab { int id; Tab::Msg msg; };
-using Tabs = jaal::children<Tab, Msg, ToTab>;
+using Tabs = jaal::children<Tab, App, ToTab>;    // App is the parent program
 
-struct Model { Tabs::map tabs; };            // id -> Tab::Model
+struct Model { Tabs::map tabs; };                // id -> Tab::Model
 
-if (auto r = Tabs::match(msg)) return {m, Tabs::update(m.tabs, *r)};
-auto [id, cmd] = Tabs::add(m.tabs);          // runs the new tab's init()
-Tabs::remove(m.tabs, id);                    // and its streams stop
+static Cmd update(Model& m, ToTab t)  { return Tabs::update(m.tabs, t); }  // routed to that tab
+static Cmd update(Model& m, NewTab)   { return Tabs::add(m.tabs).second; } // runs its init()
+static Cmd update(Model& m, Close c)  { Tabs::remove(m.tabs, c.id); return {}; }  // its streams stop
 ```
+
+A child's messages come back as an ordinary case of the parent's `Msg`, so
+routing them is just another `update` overload.
 
 The part that's easy to get wrong: two tabs both subscribing to stream key
 `"fetch"` would reconcile to **one** subscription, so one tab's feed would
@@ -163,12 +177,13 @@ one.
 ```cpp
 struct Model { jaal::debounce<std::string> query; };
 
-// on each keystroke: newest wins
-auto tok = m.query.set(text);
-return {m, Cmd::after(200ms, Msg{Fire{tok}})};
-
-// when a timer or a result arrives
-if (!m.query.ready(tok)) return {m, Cmd::none()};    // superseded: drop it
+static Cmd update(Model& m, Typed t) {           // each keystroke: newest wins
+    return Cmd::after(200ms, Fire{m.query.set(t.text)});
+}
+static Cmd update(Model& m, Fire f) {            // a timer (or a result) arrives
+    if (!m.query.ready(f.token)) return {};      // superseded: drop it
+    return search(m.query.value());
+}
 ```
 
 The token is what makes it correct. Guarding on the text instead looks
@@ -178,7 +193,7 @@ matches again. `jaal::throttle` is the by-time sibling, for redraws.
 **A message back into the loop**, so one update path can reuse another:
 
 ```cpp
-return {m, Cmd::send(Msg{Refresh{}})};       // folded in this step
+return Cmd::send(Refresh{});                 // folded in this step
 ```
 
 Not `after(0ms, ...)`: that goes through the timer heap and arrives a step

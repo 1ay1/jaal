@@ -1,5 +1,8 @@
 #pragma once
-// jaal::Sub<Msg, Row> — what a program wants to hear about, as data.
+// jaal::basic_sub<Msg, Row> — what a program wants to hear about, as data.
+//
+// Apps write jaal::Sub<Msg, extra...> (program.hpp), which always includes
+// the core sources (every, stream). basic_sub takes an exact row.
 //
 // subscribe(model) returns a Sub. The kernel diffs it against what's
 // running and starts/stops things to match. Like Cmd, the Row says what
@@ -76,8 +79,8 @@ concept SourceDescriptor = Effect<D> && requires {
 template <class D>
 concept SubDescriptor = RouterDescriptor<D> || SourceDescriptor<D>;
 
-// ── Sub ─────────────────────────────────────────────────────────────────
-template <class Msg, Row R> class Sub;
+// ── basic_sub ─────────────────────────────────────────────────────────────────
+template <class Msg, Row R> class basic_sub;
 
 namespace detail::sub {
 template <class D, class Self, class Msg> struct ctors_of {};
@@ -87,28 +90,28 @@ template <class D, class Self, class Msg>
 struct ctors_of<D, Self, Msg> : D::template ctors<Self, Msg> {};
 
 template <class T> inline constexpr bool is_sub_v = false;
-template <class M, class R> inline constexpr bool is_sub_v<Sub<M, R>> = true;
+template <class M, class R> inline constexpr bool is_sub_v<basic_sub<M, R>> = true;
 }  // namespace detail::sub
 
 template <class Msg, SubDescriptor... Ds>
-class Sub<Msg, row<Ds...>>
-    : public detail::sub::ctors_of<Ds, Sub<Msg, row<Ds...>>, Msg>... {
+class basic_sub<Msg, row<Ds...>>
+    : public detail::sub::ctors_of<Ds, basic_sub<Msg, row<Ds...>>, Msg>... {
 public:
     using msg_type = Msg;
     using row_type = row<Ds...>;
 
     struct None {};
-    struct Batch { std::vector<Sub> subs; };
+    struct Batch { std::vector<basic_sub> subs; };
 
     using variant = std::variant<None, Batch, payload_t<Ds, Msg>...>;
     variant inner;
 
-    Sub() noexcept : inner(None{}) {}
+    basic_sub() noexcept : inner(None{}) {}
 
     template <class E>
         requires meta::member_of<std::remove_cvref_t<E>,
                                  meta::list<payload_t<Ds, Msg>...>>
-    Sub(E&& e) : inner(std::forward<E>(e)) {}           // NOLINT: implicit on purpose
+    basic_sub(E&& e) : inner(std::forward<E>(e)) {}           // NOLINT: implicit on purpose
 
     template <class E>
         requires (!meta::member_of<std::remove_cvref_t<E>,
@@ -117,16 +120,16 @@ public:
               && (!std::same_as<std::remove_cvref_t<E>, None>)
               && (!std::same_as<std::remove_cvref_t<E>, Batch>)
 #if defined(__cpp_deleted_function) && __cpp_deleted_function >= 202403L
-    Sub(E&&) = delete("jaal: this subscription is not in the Sub's row");
+    basic_sub(E&&) = delete("jaal: this subscription is not in the Sub's row; add it: jaal::Sub<Msg, ..., this_kind>");
 #else
-    Sub(E&&) = delete;
+    basic_sub(E&&) = delete;
 #endif
 
     /// Row widening, like Cmd.
     template <class R>
         requires subrow_of<R, row_type> && (!std::same_as<R, row_type>)
-    Sub(Sub<Msg, R> narrow) : inner(None{}) {           // NOLINT: implicit on purpose
-        using N = Sub<Msg, R>;
+    basic_sub(basic_sub<Msg, R> narrow) : inner(None{}) {           // NOLINT: implicit on purpose
+        using N = basic_sub<Msg, R>;
         std::visit([this]<class X>(X&& x) {
             using U = std::remove_cvref_t<X>;
             if constexpr (std::same_as<U, typename N::None>) {
@@ -134,7 +137,7 @@ public:
             } else if constexpr (std::same_as<U, typename N::Batch>) {
                 Batch b;
                 b.subs.reserve(x.subs.size());
-                for (auto& s : x.subs) b.subs.emplace_back(Sub(std::move(s)));
+                for (auto& s : x.subs) b.subs.emplace_back(basic_sub(std::move(s)));
                 inner = std::move(b);
             } else {
                 inner = std::forward<X>(x);
@@ -145,38 +148,38 @@ public:
     template <class R>
         requires (!subrow_of<R, row_type>)
 #if defined(__cpp_deleted_function) && __cpp_deleted_function >= 202403L
-    Sub(Sub<Msg, R>) = delete("jaal: can't convert to a Sub with fewer kinds "
+    basic_sub(basic_sub<Msg, R>) = delete("jaal: can't convert to a Sub with fewer kinds "
                               "(only widening is allowed)");
 #else
-    Sub(Sub<Msg, R>) = delete;
+    basic_sub(basic_sub<Msg, R>) = delete;
 #endif
 
-    Sub(const Sub&)                = default;
-    Sub(Sub&&) noexcept            = default;
-    Sub& operator=(const Sub&)     = default;
-    Sub& operator=(Sub&&) noexcept = default;
+    basic_sub(const basic_sub&)                = default;
+    basic_sub(basic_sub&&) noexcept            = default;
+    basic_sub& operator=(const basic_sub&)     = default;
+    basic_sub& operator=(basic_sub&&) noexcept = default;
 
-    [[nodiscard]] static Sub none() noexcept { return Sub{}; }
+    [[nodiscard]] static basic_sub none() noexcept { return basic_sub{}; }
 
     /// Sub::on(tag{}, f): subscribe to the router kind named by `tag` (a
     /// jaal::router<Event, "name"> in this Sub's row). One name for every
     /// router kind, so two routers never collide on a factory name.
     template <class Tag, class F>
         requires meta::member_of<Tag, meta::list<Ds...>>
-              && requires { typename Tag::template ctors<Sub, Msg>; }
-    [[nodiscard]] static Sub on(Tag t, F&& f) {
-        return Tag::template ctors<Sub, Msg>::on(t, std::forward<F>(f));
+              && requires { typename Tag::template ctors<basic_sub, Msg>; }
+    [[nodiscard]] static basic_sub on(Tag t, F&& f) {
+        return Tag::template ctors<basic_sub, Msg>::on(t, std::forward<F>(f));
     }
     template <class Tag, class F>
         requires (!meta::member_of<Tag, meta::list<Ds...>>)
-    static Sub on(Tag, F&&) {
+    static basic_sub on(Tag, F&&) {
         static_assert(meta::member_of<Tag, meta::list<Ds...>>,
                       "jaal: Sub::on(tag, f): this router isn't in the Sub's row; "
-                      "add it with make_row / row_union");
-        return Sub{};
+                      "add it: jaal::Sub<Msg, ..., this_router>");
+        return basic_sub{};
     }
 
-    [[nodiscard]] static Sub batch(std::vector<Sub> subs) {
+    [[nodiscard]] static basic_sub batch(std::vector<basic_sub> subs) {
         Batch out;
         for (auto& s : subs) {
             if (auto* b = std::get_if<Batch>(&s.inner)) {
@@ -187,23 +190,23 @@ public:
         }
         if (out.subs.empty()) return none();
         if (out.subs.size() == 1) return std::move(out.subs.front());
-        Sub r;
+        basic_sub r;
         r.inner = std::move(out);
         return r;
     }
 
     template <class... Ss>
-        requires (sizeof...(Ss) > 0) && (std::convertible_to<Ss, Sub> && ...)
-    [[nodiscard]] static Sub batch(Ss&&... ss) {
-        std::vector<Sub> v;
+        requires (sizeof...(Ss) > 0) && (std::convertible_to<Ss, basic_sub> && ...)
+    [[nodiscard]] static basic_sub batch(Ss&&... ss) {
+        std::vector<basic_sub> v;
         v.reserve(sizeof...(Ss));
-        (v.emplace_back(Sub(std::forward<Ss>(ss))), ...);
+        (v.emplace_back(basic_sub(std::forward<Ss>(ss))), ...);
         return batch(std::move(v));
     }
 
     template <std::invocable<Msg> F>
-    [[nodiscard]] auto map(F f) && -> Sub<std::invoke_result_t<F, Msg>, row_type> {
-        using To = Sub<std::invoke_result_t<F, Msg>, row_type>;
+    [[nodiscard]] auto map(F f) && -> basic_sub<std::invoke_result_t<F, Msg>, row_type> {
+        using To = basic_sub<std::invoke_result_t<F, Msg>, row_type>;
         return std::visit([&]<class X>(X&& x) -> To {
             using U = std::remove_cvref_t<X>;
             if constexpr (std::same_as<U, None>) {
@@ -227,13 +230,13 @@ public:
     }
 
     template <std::invocable<Msg> F>
-    [[nodiscard]] auto map(F f) const& -> Sub<std::invoke_result_t<F, Msg>, row_type>
-        requires std::copyable<Sub>
+    [[nodiscard]] auto map(F f) const& -> basic_sub<std::invoke_result_t<F, Msg>, row_type>
+        requires std::copyable<basic_sub>
     {
-        return Sub(*this).map(std::move(f));
+        return basic_sub(*this).map(std::move(f));
     }
 
-    /// Re-target with a mapper that also gets an ID: `f(id, msg)`. The Sub
+    /// Re-target with a mapper that also gets an ID: `f(id, msg)`. The basic_sub
     /// counterpart of Cmd::map_with — a stream's mapper runs on the stream's
     /// own thread and so can't capture, but it can carry a Sendable id by
     /// value. That's what lets a keyed list of children subscribe
@@ -241,8 +244,8 @@ public:
     template <class Id, class F>
         requires std::invocable<F, const Id&, Msg>
     [[nodiscard]] auto map_with(Id id, F f) &&
-        -> Sub<std::invoke_result_t<F, const Id&, Msg>, row_type> {
-        using To = Sub<std::invoke_result_t<F, const Id&, Msg>, row_type>;
+        -> basic_sub<std::invoke_result_t<F, const Id&, Msg>, row_type> {
+        using To = basic_sub<std::invoke_result_t<F, const Id&, Msg>, row_type>;
         return std::visit([&]<class X>(X&& x) -> To {
             using U = std::remove_cvref_t<X>;
             if constexpr (std::same_as<U, None>) {

@@ -42,7 +42,7 @@ effects fail in production instead of at build time. Rows let each host
 bring its own effects, and let a component say "I only use `after`", which
 the compiler then holds it to.
 
-**Cost.** Longer types (mitigated by `jaal::program<>` aliases), and every
+**Cost.** Longer types (mitigated: `jaal::Cmd<Msg, extra...>` names only the extras), and every
 `Cmd` type is an instantiation. Rows are canonicalised (sorted by name,
 deduplicated) so spelling and order never create distinct types.
 
@@ -381,7 +381,7 @@ shutdown) is ~1.1 us: about 900k seeds a second on one core.
 function pointer whenever the effect holds background work, because that
 mapper runs on the worker or stream thread. To make a keyed LIST of children
 possible, `map_with(id, f)` calls `f(id, msg)` with an owned, `Sendable` id
-stored in the effect. `children<Child, ParentMsg, Wrap>` is built on it.
+stored in the effect. `children<Child, Parent, Wrap>` is built on it.
 
 **Alternatives.**
 - Let `map` capture. That's the obvious fix and it's wrong: the capture
@@ -433,3 +433,65 @@ not history. Work a restart must redo is explicit, in `resume_cmd`.
 **Not done.** No journal format, no serializer, no fsync policy. Those
 depend on the app's storage and its Msg, and a generic codec would have to
 guess at both. (`tests/kernel/resume_test.cpp`)
+
+## D31. One program shape: per-case update, in-place model, declared Cmd
+
+**Decision.** A program is written exactly one way:
+
+```cpp
+struct Model { ... };  using Msg = std::variant<A, B>;
+using Cmd = jaal::Cmd<Msg, extra...>;   using Sub = jaal::Sub<Msg, extra...>;   // Sub optional
+static Cmd init(Model&);                // optional
+static Cmd update(Model&, A);  static Cmd update(Model&, B);
+static Sub subscribe(const Model&);     // optional
+```
+
+Removed, because each was a second way to say the same thing:
+`jaal::program<Model, Msg, fx_list<>, src_list<>>` (a base class that
+generated the aliases), `step` (a second return type), by-value
+`std::pair<Model, Cmd> update(Model, Msg)`, two `init` signatures,
+`CoreCmd`/`CoreSub` (a third spelling of `Cmd<Msg, core_fx>`), row-taking
+`Cmd<Msg, row_union<core_fx, make_row<...>>>` in programs, `overload{}`,
+and `child::match` / `children::match` (routing is an update overload now).
+
+**Why.**
+- *Single source of truth.* The effect set is stated once, in `Cmd`.
+  Before, it was deduced from whatever `update` returned, so a program's
+  row lived in its return type and in `program<>`'s lists and in any
+  `row_union` a user spelled by hand; they could disagree.
+- *The compiler does the dispatch.* A `Msg` case is matched to its `update`
+  by overload resolution. The hand-written `std::visit` (or chain of
+  `get_if`) was the most repeated boilerplate in every program and the
+  place a case got silently dropped. Now a missing case is a compile error
+  that names it: `'Counter' has no update for message 'Counter::Reset';
+  add: static Cmd update(Model&, Counter::Reset)`.
+- *Nothing to forget to return.* With `pair<Model, Cmd>` by value, every
+  branch rebuilt `{m, cmd}`; returning a stale copy of the model was a
+  real bug class. In place, the model is simply what `update` left.
+- *Encapsulation.* One internal namespace, `prog::init/update/subscribe`,
+  is the only code that calls a program. Kernel, `given`, `replay`,
+  `timeline`, `child` and `children` all go through it, so the shape can't
+  drift between them. The class templates are `basic_cmd`/`basic_sub`
+  (exact row, for generic code); apps see only the `Cmd`/`Sub` aliases.
+
+**What in-place costs.** `update` taking `Model&` looks less functional.
+Purity in jaal was always "no effects except the returned Cmd", which is
+unchanged: `update` still can't reach the world, and replay/sim still
+reproduce a run exactly. What changed is fault handling: a throwing
+`update` may leave the model half-changed. `fault_policy::skip` already
+copied the model first and restores it; under `stop` the program is
+quitting anyway (kernel/fault.hpp). Measured by the existing fault tests,
+which pass unchanged.
+
+**Alternatives.**
+- Keep both shapes. Rejected: two ways to write a program means two ways
+  to read one, two sets of diagnostics, and docs that have to explain when
+  to use which.
+- `update(const Model&, Msg) -> pair<Model, Cmd>` (pure by signature).
+  Rejected: it keeps the copy-and-return ceremony and the stale-copy bug,
+  and C++ can't enforce purity through a signature anyway.
+- A single `update(Model&, Msg)` with the user visiting. Rejected: it's the
+  boilerplate this removes, and it can't name a missing case.
+
+(`tests/compile_fail/kernel.cpp` cases 4 and 5 pin the two diagnostics a
+newcomer hits first.)

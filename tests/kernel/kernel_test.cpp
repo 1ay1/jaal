@@ -18,8 +18,6 @@
 
 using namespace std::chrono_literals;
 using jaal::Sink;
-using jaal::make_row;
-using jaal::row_union;
 namespace fx = jaal::fx;
 
 // A router over a tiny "key" event, like maya's on_key.
@@ -54,13 +52,11 @@ struct QuitApp {
     struct Model { int seen = 0; };
     struct Go { int n; };
     using Msg = std::variant<Go>;
-    using Cmd = jaal::Cmd<Msg, row_union<jaal::core_fx, make_row<beep>>>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        auto g = std::get<Go>(msg);
+    using Cmd = jaal::Cmd<Msg, beep>;
+    static Cmd update(Model& m, Go g) {
         ++m.seen;
-        if (g.n == 2) return {m, Cmd::batch(Cmd(Beep{g.n}), Cmd::quit(3), Cmd(Beep{99}))};
-        return {m, Cmd(Beep{g.n})};
+        if (g.n == 2) return Cmd::batch(Cmd(Beep{g.n}), Cmd::quit(3), Cmd(Beep{99}));
+        return Beep{g.n};
     }
 };
 static_assert(jaal::Program<QuitApp>);
@@ -89,17 +85,11 @@ struct Picker {
     struct Model { bool picker = false; std::string editor, picked; };
     struct Open {}; struct EditorKey { char c; }; struct PickerKey { char c; };
     using Msg = std::variant<Open, EditorKey, PickerKey>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::Sub<Msg, make_row<on_key>>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        std::visit(jaal::overload{
-            [&](Open)        { m.picker = true; },
-            [&](EditorKey e) { m.editor += e.c; },
-            [&](PickerKey p) { m.picked += p.c; },
-        }, msg);
-        return {m, Cmd::none()};
-    }
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg, on_key>;
+    static Cmd update(Model& m, Open)        { m.picker = true; return {}; }
+    static Cmd update(Model& m, EditorKey e) { m.editor += e.c; return {}; }
+    static Cmd update(Model& m, PickerKey p) { m.picked += p.c; return {}; }
     static Sub subscribe(const Model& m) {
         if (m.picker)
             return Sub::on_key([](const Key& k) -> std::optional<Msg> { return PickerKey{k.c}; });
@@ -125,10 +115,9 @@ struct CountSubs {
     struct Model { int n = 0; };
     struct Inc {};
     using Msg = std::variant<Inc>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::Sub<Msg, jaal::core_src>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) { ++m.n; return {m, Cmd::none()}; }
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    static Cmd update(Model& m, Inc) { ++m.n; return {}; }
     static Sub subscribe(const Model&) { ++subscribe_calls; return Sub::none(); }
 };
 
@@ -149,17 +138,11 @@ struct Clocks {
     struct Model { int a = 0, b = 0, other = 0; bool second = true; };
     struct A {}; struct B {}; struct Other {};
     using Msg = std::variant<A, B, Other>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::Sub<Msg, jaal::core_src>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        std::visit(jaal::overload{
-            [&](A)     { ++m.a; },
-            [&](B)     { ++m.b; },
-            [&](Other) { ++m.other; },
-        }, msg);
-        return {m, Cmd::none()};
-    }
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    static Cmd update(Model& m, A)     { ++m.a; return {}; }
+    static Cmd update(Model& m, B)     { ++m.b; return {}; }
+    static Cmd update(Model& m, Other) { ++m.other; return {}; }
     static Sub subscribe(const Model& m) {
         // Two timers with the SAME interval. maya's interval-only key
         // starved the second one forever.
@@ -188,11 +171,11 @@ struct Never {
     struct Model { int fired = 0; };
     struct Tick {};
     using Msg = std::variant<Tick>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static std::pair<Model, Cmd> init() {
-        return {{}, Cmd::after(std::chrono::milliseconds::max(), Tick{})};
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd init(Model&) {
+        return Cmd::after(std::chrono::milliseconds::max(), Tick{});
     }
-    static std::pair<Model, Cmd> update(Model m, Msg) { ++m.fired; return {m, Cmd::none()}; }
+    static Cmd update(Model& m, Tick) { ++m.fired; return {}; }
 };
 
 static int rule5() {
@@ -207,9 +190,8 @@ struct Echo {
     struct Model { int got = 0; };
     struct Got { int v; };
     using Msg = std::variant<Got>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) { m.got += std::get<Got>(msg).v; return {m, Cmd::none()}; }
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Got g) { m.got += g.v; return {}; }
 };
 
 static int rule6() {
@@ -232,16 +214,13 @@ struct Worker {
     struct Model { std::vector<int> results; };
     struct Start { int n; }; struct Done { int v; };
     using Msg = std::variant<Start, Done>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* s = std::get_if<Start>(&msg))
-            return {m, Cmd::task([](Sink<Msg> out, std::stop_token, int n) {
-                out.send(Done{n * n});
-            }, s->n)};
-        m.results.push_back(std::get<Done>(msg).v);
-        return {m, Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, Start s) {
+        return Cmd::task([](Sink<Msg> out, std::stop_token, int n) {
+            out.send(Done{n * n});
+        }, s.n);
     }
+    static Cmd update(Model& m, Done d) { m.results.push_back(d.v); return {}; }
 };
 
 static int rule7() {
@@ -260,9 +239,8 @@ struct Storm {
     struct Model { int n = 0; };
     struct M {};
     using Msg = std::variant<M>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) { ++m.n; return {m, Cmd::none()}; }
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, M) { ++m.n; return {}; }
 };
 
 static int budget() {
@@ -309,18 +287,14 @@ struct TwoKinds {
     struct Model { std::string keys; int clicks = 0; bool clicks_off = false; };
     struct K { char c; }; struct C {};
     using Msg = std::variant<K, C>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::Sub<Msg, make_row<on_key, on_click>>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* k = std::get_if<K>(&msg)) {
-            m.keys += k->c;
-            if (k->c == 'x') m.clicks_off = true;          // stop listening to clicks
-        } else {
-            ++m.clicks;
-        }
-        return {m, Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg, on_key, on_click>;
+    static Cmd update(Model& m, K k) {
+        m.keys += k.c;
+        if (k.c == 'x') m.clicks_off = true;               // stop listening to clicks
+        return {};
     }
+    static Cmd update(Model& m, C) { ++m.clicks; return {}; }
     static Sub subscribe(const Model& m) {
         auto keys = Sub::on_key([](const Key& k) -> std::optional<Msg> { return K{k.c}; });
         if (m.clicks_off) return keys;

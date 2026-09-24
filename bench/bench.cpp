@@ -47,9 +47,8 @@ struct Counter {
     struct Model { std::uint64_t n = 0; };
     struct Inc {};
     using Msg = std::variant<Inc>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) { ++m.n; return {m, Cmd::none()}; }
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Inc) { ++m.n; return {}; }
 };
 
 void bench_fold() {
@@ -71,11 +70,10 @@ struct WithEffect {
     struct Model { std::uint64_t n = 0; };
     struct Inc {};
     using Msg = std::variant<Inc>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) {
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Inc) {
         ++m.n;
-        return {m, Cmd::after(1h, Inc{})};             // interpreted: a timer push
+        return Cmd::after(1h, Inc{});                  // interpreted: a timer push
     }
 };
 
@@ -126,10 +124,9 @@ struct Timers {
     struct Model { std::uint64_t n = 0; };
     struct Tick {}; struct Poke {};
     using Msg = std::variant<Tick, Poke>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::CoreSub<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) { ++m.n; return {m, Cmd::none()}; }
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    template <class M> static Cmd update(Model& m, M) { ++m.n; return {}; }
     static Sub subscribe(const Model&) {
         std::vector<Sub> v;
         for (int i = 1; i <= 8; ++i) v.push_back(Sub::every(std::chrono::milliseconds(100 * i), Tick{}));
@@ -158,17 +155,16 @@ struct Search {
     struct Model { int query = 0; int shown = 0; };
     struct Type { int q; }; struct Results { int q; };
     using Msg = std::variant<Type, Results>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* t = std::get_if<Type>(&msg)) {
-            m.query = t->q;
-            return {m, Cmd::task([](jaal::Sink<Msg> out, std::stop_token, int q) {
-                                     out.send(Results{q});
-                                 }, t->q)};
-        }
-        if (std::get<Results>(msg).q == m.query) m.shown = m.query;
-        return {m, Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Type t) {
+        m.query = t.q;
+        return Cmd::task([](jaal::Sink<Msg> out, std::stop_token, int q) {
+                             out.send(Results{q});
+                         }, t.q);
+    }
+    static Cmd update(Model& m, Results r) {
+        if (r.q == m.query) m.shown = m.query;
+        return {};
     }
 };
 

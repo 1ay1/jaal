@@ -88,24 +88,21 @@ struct Search {
     struct Fire    { std::uint64_t token; };
     struct Results { std::uint64_t token; std::string hit; };
     using Msg = std::variant<Typed, Fire, Results>;
-    using Cmd = jaal::CoreCmd<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* t = std::get_if<Typed>(&msg)) {
-            auto tok = m.query.set(t->text);
-            return {m, Cmd::after(200ms, Msg{Fire{tok}})};
-        }
-        if (auto* f = std::get_if<Fire>(&msg)) {
-            if (!m.query.ready(f->token)) return {m, Cmd::none()};   // superseded
-            m.searched.push_back(m.query.value());
-            return {m, Cmd::send(Msg{Results{f->token, m.query.value() + "!"}})};
-        }
-        auto* r = std::get_if<Results>(&msg);
-        if (!m.query.ready(r->token)) return {m, Cmd::none()};       // a late answer
-        m.shown = r->hit;
-        return {m, Cmd::none()};
+    static Cmd update(Model& m, Typed t) {
+        auto tok = m.query.set(t.text);
+        return Cmd::after(200ms, Msg{Fire{tok}});
+    }
+    static Cmd update(Model& m, Fire f) {
+        if (!m.query.ready(f.token)) return {};                     // superseded
+        m.searched.push_back(m.query.value());
+        return Cmd::send(Msg{Results{f.token, m.query.value() + "!"}});
+    }
+    static Cmd update(Model& m, Results r) {
+        if (!m.query.ready(r.token)) return {};                     // a late answer
+        m.shown = r.hit;
+        return {};
     }
 };
 

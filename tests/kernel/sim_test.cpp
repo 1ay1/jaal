@@ -42,21 +42,20 @@ struct Search {
     struct Type { int q; };
     struct Results { int q; };
     using Msg = std::variant<Type, Results>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::CoreSub<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
 
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* t = std::get_if<Type>(&msg)) {
-            m.query = t->q;
-            ++m.fetches;
-            return {m, Cmd::task([](Sink<Msg> out, std::stop_token, int q) {
-                                     out.send(Results{q});
-                                 }, t->q)};
-        }
-        const int q = std::get<Results>(msg).q;
+    static Cmd update(Model& m, Type t) {
+        m.query = t.q;
+        ++m.fetches;
+        return Cmd::task([](Sink<Msg> out, std::stop_token, int q) {
+                             out.send(Results{q});
+                         }, t.q);
+    }
+    static Cmd update(Model& m, Results r) {
+        const int q = r.q;
         if (!Fixed || q == m.query) m.shown = q;
-        return {m, Cmd::none()};
+        return {};
     }
 };
 
@@ -133,13 +132,12 @@ struct Clock {
     struct Model { int ticks = 0; };
     struct Tick {}; struct Stop {};
     using Msg = std::variant<Tick, Stop>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::CoreSub<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Stop>(msg)) return {m, Cmd::quit(3)};
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    static Cmd update(Model&, Stop) { return Cmd::quit(3); }
+    static Cmd update(Model& m, Tick) {
         ++m.ticks;
-        return {m, Cmd::none()};
+        return {};
     }
     static Sub subscribe(const Model&) { return Sub::every(1s, Tick{}); }
 };
@@ -180,15 +178,14 @@ struct Jobs {
     struct Model { int started = 0; int done = 0; };
     struct Go {}; struct Done {};
     using Msg = std::variant<Go, Done>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Go>(msg)) {
-            ++m.started;
-            return {m, Cmd::task([](Sink<Msg> out, std::stop_token) { out.send(Done{}); })};
-        }
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Go) {
+        ++m.started;
+        return Cmd::task([](Sink<Msg> out, std::stop_token) { out.send(Done{}); });
+    }
+    static Cmd update(Model& m, Done) {
         ++m.done;
-        return {m, Cmd::none()};
+        return {};
     }
 };
 
@@ -215,13 +212,15 @@ struct Feed {
     struct Model { bool on = true; int got = 0; };
     struct Item {}; struct Off {};
     using Msg = std::variant<Item, Off>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::CoreSub<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Off>(msg)) m.on = false;
-        else ++m.got;
-        return {m, Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    static Cmd update(Model& m, Off) {
+        m.on = false;
+        return {};
+    }
+    static Cmd update(Model& m, Item) {
+        ++m.got;
+        return {};
     }
     static Sub subscribe(const Model& m) {
         if (!m.on) return Sub::none();
@@ -268,17 +267,16 @@ struct Dice {
     struct Roll {};
     struct Rolled { int face; };
     using Msg = std::variant<Roll, Rolled>;
-    using Cmd = jaal::CoreCmd<Msg>;
+    using Cmd = jaal::Cmd<Msg>;
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (std::holds_alternative<Roll>(msg))
-            return {m, Cmd::random([](jaal::rng& r) -> Msg {
-                        return Rolled{static_cast<int>(r.in(1, 6))};
-                    })};
-        m.rolls.push_back(std::get<Rolled>(msg).face);
-        return {m, Cmd::none()};
+    static Cmd update(Model&, Roll) {
+        return Cmd::random([](jaal::rng& r) -> Msg {
+            return Rolled{static_cast<int>(r.in(1, 6))};
+        });
+    }
+    static Cmd update(Model& m, Rolled r) {
+        m.rolls.push_back(r.face);
+        return {};
     }
 };
 

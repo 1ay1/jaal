@@ -107,26 +107,46 @@ Rules:
 ### 3.1 Program
 
 ```cpp
+struct Counter {
+    struct Model { int n = 0; };
+    struct Inc {}; struct Reset {};
+    using Msg = std::variant<Inc, Reset>;
+    using Cmd = jaal::Cmd<Msg>;                  // + extras: Cmd<Msg, beep>
+    using Sub = jaal::Sub<Msg>;                  // optional
+
+    static Cmd init(Model&);                     // optional
+    static Cmd update(Model&, Inc);              // one per Msg case
+    static Cmd update(Model&, Reset);
+    static Sub subscribe(const Model&);          // optional
+};
+
 template <class P>
 concept Program =
-    requires { typename P::Model; typename P::Msg; }
-    && std::movable<typename P::Model>
-    && Sendable<typename P::Msg>
-    && (detail::has_init<P> || detail::has_init_cmd<P>)
-    && requires(typename P::Model m, typename P::Msg msg) {
-        { P::update(std::move(m), std::move(msg)) }
-            -> detail::step_of<typename P::Model, typename P::Msg>;
-    };
+    requires { typename P::Model; typename P::Msg; typename P::Cmd; }
+    && std::movable<typename P::Model> && std::default_initializable<typename P::Model>
+    && is_variant<typename P::Msg> && Sendable<typename P::Msg>
+    && is_cmd<typename P::Cmd> && same_as<typename P::Cmd::msg_type, typename P::Msg>
+    && updates_every_case<P, typename P::Msg>;   // each case checked on its own
 ```
 
-- `update` returns `std::pair<Model, Cmd<Msg, Row>>` for some row. The row
-  is deduced from the return type: `fx_of<P>`. The program never has to name
-  it separately.
+- There is ONE shape (D31). No base class, no alternative signatures, no
+  deduced rows: each thing is said once, in one place.
+- `Cmd` is declared, not deduced from `update`'s return type, so the
+  program's effect set is one line you can read. `jaal::Cmd<Msg, extra...>`
+  always includes the core effects; the program lists only what it adds.
+- The kernel dispatches each `Msg` alternative to its `update` overload.
+  Each case is checked separately, so a missing one fails with its NAME and
+  the line to add, not "constraints not satisfied".
+- `update` changes the model in place and returns only the `Cmd`. Nothing
+  to rebuild, nothing to forget to return. Purity means: no effects except
+  through the returned `Cmd`. A copy for fault recovery is taken only when
+  `fault_policy::skip` needs one (kernel/fault.hpp).
 - `view` and `subscribe` are optional hooks, found by concepts
   (`Viewable<P, Out>`, `Subscribing<P>`). A host that draws requires
   `Viewable<P, its output type>`. A headless host requires nothing.
-- `Model` is passed and returned by value, and moved. That's the functional
-  core: the new state is a value, not a mutation someone else can see.
+- Everything that runs a program (kernel, given, replay, timeline, child,
+  children) calls it through `prog::init / update / subscribe`, the single
+  place that knows the shape.
 
 What C++ can't prove: that `update` is pure. jaal can't stop it from calling
 `printf`. The convention is documented, and the headless host makes
@@ -916,14 +936,13 @@ jaal/
 │   │   └── diagnose.hpp          named static_assert helpers
 │   │
 │   ├── core/                     the types apps write against
-│   │   ├── program.hpp           Program, Viewable, Subscribing, fx_of, src_of
-│   │   ├── program_base.hpp      program<Model, Msg, fx_list, src_list>
+│   │   ├── program.hpp           Program (the one shape), prog::init/update/subscribe
 │   │   ├── effect.hpp            Effect concept, pure_fx
 │   │   ├── row.hpp               row, subrow_of, row_union
-│   │   ├── cmd.hpp               Cmd<Msg, Row>, map, map_with
-│   │   ├── sub.hpp               Sub<Msg, Row>, every, routers
+│   │   ├── cmd.hpp               basic_cmd<Msg, Row>, map, map_with
+│   │   ├── sub.hpp               basic_sub<Msg, Row>, every, routers
 │   │   ├── fx.hpp                quit, send, after, task, now, random
-│   │   ├── core_fx.hpp           core_fx / core_src, CoreCmd / CoreSub
+│   │   ├── core_fx.hpp           core_fx / core_src; Cmd<Msg, extra...>, Sub<Msg, extra...>
 │   │   ├── stream.hpp            the stream source
 │   │   ├── sink.hpp              Sink<Msg>
 │   │   ├── child.hpp             one child program in a fixed slot
@@ -935,7 +954,6 @@ jaal/
 │   │   ├── shared.hpp            shared<T>: shared, immutable, Sendable
 │   │   ├── diff.hpp              structural diff, for timeline
 │   │   ├── walk.hpp  stdshape.hpp  the shared type-walking machinery
-│   │   ├── overload.hpp          the std::visit helper
 │   │   └── error.hpp             error, result<T>
 │   │
 │   ├── kernel/

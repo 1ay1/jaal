@@ -32,8 +32,10 @@ static_assert(jaal::meta::list<int, char>::size == 2);
 
 // core: the types, the effects, the composition helpers, the model values
 struct Msg { int v; };
-using Cmd = jaal::CoreCmd<Msg>;
-using Sub = jaal::CoreSub<Msg>;
+using Cmd = jaal::Cmd<Msg>;
+using Sub = jaal::Sub<Msg>;
+static_assert(std::same_as<Cmd, jaal::basic_cmd<Msg, jaal::core_fx>>);   // basic_cmd exported
+static_assert(std::same_as<Sub, jaal::basic_sub<Msg, jaal::core_src>>);
 static_assert(jaal::core_fx::size == 6);          // quit send after task now random
 static_assert(jaal::Sendable<Msg>);
 static_assert(jaal::Frozen<Msg>);
@@ -41,23 +43,32 @@ static_assert(jaal::Sendable<jaal::debounce<std::string>>);
 static_assert(jaal::Frozen<jaal::throttle>);
 static_assert(std::same_as<jaal::rng::result_type, std::uint64_t>);
 
-// A program, so child<> and children<> are instantiable from the umbrella.
+// A program in the one shape, so child<> and children<> are instantiable
+// from the umbrella.
 struct Leaf {
     struct Model { int n = 0; };
-    using Msg = ::Msg;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg) { return {m, Cmd::none()}; }
+    struct Ping {};
+    using Msg = std::variant<Ping>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Ping) { ++m.n; return {}; }
 };
 static_assert(jaal::Program<Leaf>);
+static_assert(std::same_as<jaal::cmd_of<Leaf>, Leaf::Cmd>);
 
-struct ToLeaf { int id; Leaf::Msg msg; };
-struct One    { Leaf::Msg msg; };
-using Parent  = std::variant<ToLeaf, One>;
-using Kids    = jaal::children<Leaf, Parent, ToLeaf>;
-using Kid     = jaal::child<Leaf, Parent, One>;
-static_assert(std::same_as<Kids::id_type, int>);
-static_assert(std::same_as<Kid::model_type, Leaf::Model>);
+struct Parent {
+    struct ToLeaf { int id; Leaf::Msg msg; };
+    struct One    { Leaf::Msg msg; };
+    struct Model  { Leaf::Model one; };
+    using Msg  = std::variant<ToLeaf, One>;
+    using Cmd  = jaal::Cmd<Msg>;
+    using Kids = jaal::children<Leaf, Parent, ToLeaf>;
+    using Kid  = jaal::child<Leaf, Parent, One>;
+    static Cmd update(Model&, ToLeaf) { return {}; }
+    static Cmd update(Model& m, One o) { return Kid::update(m.one, o); }
+};
+static_assert(jaal::Program<Parent>);
+static_assert(std::same_as<Parent::Kids::id_type, int>);
+static_assert(std::same_as<Parent::Kid::model_type, Leaf::Model>);
 
 // platform
 static_assert(jaal::platform::Clock<jaal::platform::steady_clock>);

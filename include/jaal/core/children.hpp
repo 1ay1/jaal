@@ -1,5 +1,5 @@
 #pragma once
-// jaal::children<Child, ParentMsg, Wrap> — a keyed LIST of child programs.
+// jaal::children<Child, Parent, Wrap> — a keyed LIST of child programs.
 //
 // child<> (core/child.hpp) embeds ONE child in a fixed slot. Real apps hold
 // a variable number: agentty's sessions, a tab bar, an editor's open
@@ -9,26 +9,24 @@
 // The parent's Msg carries an id alongside the child's Msg:
 //
 //   struct ToTab { int id; Tab::Msg msg; };          // Wrap
+//   struct NewTab {};
+//   struct CloseTab { int id; };
 //   using Msg  = std::variant<ToTab, NewTab, CloseTab>;
-//   using Tabs = jaal::children<Tab, Msg, ToTab>;    // id type read from Wrap
+//   using Tabs = jaal::children<Tab, App, ToTab>;    // id type read from Wrap
 //
 //   struct Model { Tabs::map tabs; };                // id -> Tab::Model
 //
-//   static std::pair<Model, Cmd> update(Model m, Msg msg) {
-//       if (auto* c = Tabs::match(msg))              // {id, &child_msg}
-//           return {m, Tabs::update(m.tabs, *c)};    // routes to that child
-//       if (std::holds_alternative<NewTab>(msg)) {
-//           auto [id, cmd] = Tabs::add(m.tabs);      // init() for the new one
-//           return {m, cmd};
-//       }
-//       if (auto* c = std::get_if<CloseTab>(&msg)) {
-//           Tabs::remove(m.tabs, c->id);             // its subs stop; see below
-//           return {m, Cmd::none()};
-//       }
-//       ...
+//   static Cmd update(Model& m, ToTab t)   { return Tabs::update(m.tabs, t); }
+//   static Cmd update(Model& m, NewTab)    { return Tabs::add(m.tabs).second; }
+//   static Cmd update(Model& m, CloseTab c) {
+//       Tabs::remove(m.tabs, c.id);                  // its subs stop; see below
+//       return {};
 //   }
 //
 //   static Sub subscribe(const Model& m) { return Tabs::subscribe(m.tabs); }
+//
+// Like child<>, `Parent` is only used for its Msg inside member functions,
+// so the alias may appear inside the parent struct.
 //
 // What this gets right, and hand-rolled code usually doesn't:
 //
@@ -101,7 +99,7 @@ std::string key_of(const Id& id) {
 }  // namespace detail::kids
 
 /// A keyed list of child programs. See the header comment.
-template <Program Child, class ParentMsg, class Wrap>
+template <Program Child, class Parent, class Wrap>
     requires detail::kids::keyed_wrap<Wrap>
 class children {
 public:
@@ -117,55 +115,37 @@ public:
     static_assert(std::copyable<id_type>,
                   "jaal::children: the id is copied into each mapped effect");
 
-    /// The Cmd type this returns: the child's row, re-targeted at the
-    /// parent's Msg. Deduced, so the parent never repeats its row and can't
-    /// get it wrong. (The Sub type is deduced per call instead: a child with
-    /// no subscribe() has no Sub type to name.)
-    using cmd_type = decltype(std::declval<cmd_of<Child>>().map_with(
-        std::declval<id_type>(), std::declval<ParentMsg (*)(const id_type&, msg_type)>()));
-
     /// The parent's field: id -> child model. Ordered, so subscribe() and
     /// any view walk children in a stable order (a hash map would reshuffle
     /// them between frames, and a UI would jitter).
     using map = std::map<id_type, model_type>;
 
-    /// One routed message: which child, and what for it.
-    struct routed {
-        id_type         id;
-        const msg_type* msg;
-    };
-
-    // ── routing ─────────────────────────────────────────────────────────
-    /// The child message inside `m`, with its id, or null when `m` isn't for
-    /// a child. The returned pointer borrows from `m`.
-    [[nodiscard]] static std::optional<routed> match(const ParentMsg& m) noexcept {
-        if (const auto* w = std::get_if<Wrap>(&m)) return routed{w->id, &w->msg};
-        return std::nullopt;
-    }
-
-    /// Child::Msg from this child → ParentMsg. Captureless (it takes the id
+    /// Child::Msg from this child → Parent::Msg. Captureless (it takes the id
     /// as a value), so it may run on a worker thread.
-    static ParentMsg wrap(const id_type& id, msg_type m) {
-        return ParentMsg{Wrap{id, std::move(m)}};
+    template <class PM = typename Parent::Msg>
+    static PM wrap(const id_type& id, msg_type m) {
+        static_assert(detail::childx::is_alt<PM, Wrap>::value,
+                      "jaal::children<Child, Parent, Wrap>: Wrap must be a case of Parent::Msg");
+        return PM{Wrap{id, std::move(m)}};
     }
 
     // ── the list ────────────────────────────────────────────────────────
     /// Add a child under `id`, running its init(). Replaces any child
     /// already there (and so drops that one's subscriptions).
-    static cmd_type add(map& ms, id_type id) {
-        auto [model, cmd] = run_init<Child>();
+    static auto add(map& ms, id_type id) {
+        auto [model, cmd] = prog::init<Child>();
         ms.insert_or_assign(id, std::move(model));
-        return std::move(cmd).map_with(id, &wrap);
+        return std::move(cmd).map_with(id, &wrap<>);
     }
 
     /// Add under the next free integer id, and hand it back. Only for an
     /// integral id: `auto [id, cmd] = Tabs::add(m.tabs);`
-    static std::pair<id_type, cmd_type> add(map& ms)
+    static auto add(map& ms)
         requires std::is_integral_v<id_type>
     {
         const id_type id = ms.empty() ? id_type{0}
                                       : static_cast<id_type>(ms.rbegin()->first + 1);
-        return {id, add(ms, id)};
+        return std::pair{id, add(ms, id)};
     }
 
     /// Drop a child. Its streams stop at the next subscribe(), and its
@@ -186,33 +166,35 @@ public:
     }
 
     // ── the fold ────────────────────────────────────────────────────────
-    /// Fold one child's message into its model, in place, and return its Cmd
-    /// mapped into the parent. A message for a child that isn't there is
-    /// dropped (it was closed while its task was in flight — normal, not an
-    /// error).
-    static cmd_type update(map& ms, const routed& r) {
-        auto it = ms.find(r.id);
-        if (it == ms.end()) return cmd_type::none();
-        auto [next, cmd] = detail::prog::split(Child::update(std::move(it->second), *r.msg));
-        it->second = std::move(next);
-        return std::move(cmd).map_with(r.id, &wrap);
+    /// Fold one wrapped message into its child's model, in place, and return
+    /// the child's Cmd mapped into the parent. A message for a child that
+    /// isn't there is dropped (it was closed while its task was in flight —
+    /// normal, not an error).
+    template <class W>
+        requires std::same_as<std::remove_cvref_t<W>, Wrap>
+    static auto update(map& ms, W&& w) {
+        using out = decltype(prog::update<Child>(std::declval<model_type&>(), w.msg)
+                                 .map_with(w.id, &wrap<>));
+        auto it = ms.find(w.id);
+        if (it == ms.end()) return out::none();
+        return prog::update<Child>(it->second, std::forward<W>(w).msg).map_with(w.id, &wrap<>);
     }
 
     /// Every child's subscriptions, batched, each keyed under its own id so
     /// two children asking for the same stream key don't collide. A child
-    /// with no subscribe() yields an empty Sub, as run_subscribe defines.
+    /// with no subscribe() yields an empty Sub.
     [[nodiscard]] static auto subscribe(const map& ms) {
-        using sub_type = decltype(run_subscribe<Child>(std::declval<const model_type&>())
-                                      .map_with(std::declval<id_type>(), &wrap));
+        using sub_type = decltype(prog::subscribe<Child>(std::declval<const model_type&>())
+                                      .map_with(std::declval<id_type>(), &wrap<>));
         std::vector<sub_type> subs;
         subs.reserve(ms.size());
         for (const auto& [id, model] : ms) {
-            auto s = run_subscribe<Child>(model);
+            auto s = prog::subscribe<Child>(model);
             if (s.is_none()) continue;
             std::string prefix = detail::kids::key_of(id);
             prefix += '/';
             detail::childx::prefix_streams(s, prefix);
-            subs.push_back(std::move(s).map_with(id, &wrap));
+            subs.push_back(std::move(s).map_with(id, &wrap<>));
         }
         if (subs.empty()) return sub_type::none();
         return sub_type::batch(std::move(subs));

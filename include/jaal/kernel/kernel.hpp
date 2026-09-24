@@ -233,7 +233,7 @@ public:
     using msg_type   = typename P::Msg;
     using cmd_type   = cmd_of<P>;
     using sub_row    = src_of<P>;
-    using sub_type   = Sub<msg_type, sub_row>;
+    using sub_type   = sub_of<P>;
     using time_point = typename C::time_point;
 
     // Not copyable or movable. Tasks and sources hold Sinks into this
@@ -259,7 +259,7 @@ public:
                                       std::function<void()> wake = {},
                                       std::function<void(const msg_type&)> record = {}) {
         require_host_for<H, P>();
-        auto [m, c] = run_init<P>();
+        auto [m, c] = prog::init<P>();
         return kernel(host, std::move(m), std::move(c), std::move(clock), opt,
                       std::move(wake), std::move(record));
     }
@@ -486,11 +486,11 @@ private:
     // One message through update(), with fault containment. Returns false
     // when it faulted (and was reported).
     //
-    // The model is moved into update(). If update throws, that value is
-    // gone, so keeping the program's state means copying it FIRST. That
-    // copy is only made when it's needed: policy `skip` with a copyable
-    // model (the static_assert in the constructor rejects `skip` with a
-    // move-only model, where no copy is possible).
+    // update() changes the model in place. If it throws halfway, the model
+    // is half-changed, so keeping the program's state means copying it
+    // FIRST. That copy is only made when it's needed: policy `skip` with a
+    // copyable model (a move-only model can't be copied, so the constructor
+    // turns `skip` into `stop` for it and says so).
     template <class H>
     bool fold_one(msg_type msg, H& host) {
         std::optional<model_type> saved;
@@ -500,16 +500,13 @@ private:
         cmd_type c;
         const auto t0 = opt_.trace ? std::chrono::steady_clock::now()
                                    : std::chrono::steady_clock::time_point{};
-        std::size_t index = 0;
-        if constexpr (requires { msg.index(); }) index = msg.index();
+        const std::size_t index = msg.index();
         // Record BEFORE update consumes the message (kernel/replay.hpp).
         if (record_) {
             try { record_(msg); } catch (...) {}
         }
         try {
-            auto [m, cmd] = detail::prog::split(P::update(std::move(model_), std::move(msg)));
-            model_ = std::move(m);
-            c      = std::move(cmd);
+            c = prog::update<P>(model_, std::move(msg));
         } catch (...) {
             const bool kept = saved.has_value();
             if (kept) model_ = std::move(*saved);
@@ -665,7 +662,7 @@ private:
         // tearing them down on a bad model.
         std::optional<sub_type> widened;
         try {
-            widened.emplace(run_subscribe<P>(model_));
+            widened.emplace(prog::subscribe<P>(model_));
         } catch (...) {
             fault_raised(fault_site::subscribe, std::current_exception(), true);
             return;

@@ -78,13 +78,16 @@ struct Bank {
     struct Model { int balance = 0; int ops = 0; bool operator==(const Model&) const = default; };
     struct Deposit { int n; }; struct Withdraw { int n; };
     using Msg = std::variant<Deposit, Withdraw>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Deposit d) {
         ++m.ops;
-        if (auto* d = std::get_if<Deposit>(&msg)) m.balance += d->n;
-        else m.balance -= std::get<Withdraw>(msg).n;        // bug: no overdraft check
-        return {m, Cmd::none()};
+        m.balance += d.n;
+        return {};
+    }
+    static Cmd update(Model& m, Withdraw w) {
+        ++m.ops;
+        m.balance -= w.n;                                   // bug: no overdraft check
+        return {};
     }
 };
 
@@ -136,17 +139,16 @@ struct Race {
     struct Model { int query = 0; int shown = 0; };
     struct Type { int q; }; struct Results { int q; };
     using Msg = std::variant<Type, Results>;
-    using Cmd = jaal::CoreCmd<Msg>;
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
-        if (auto* t = std::get_if<Type>(&msg)) {
-            m.query = t->q;
-            return {m, Cmd::task([](Sink<Msg> out, std::stop_token, int q) {
-                                     out.send(Results{q});
-                                 }, t->q)};
-        }
-        m.shown = std::get<Results>(msg).q;
-        return {m, Cmd::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Type t) {
+        m.query = t.q;
+        return Cmd::task([](Sink<Msg> out, std::stop_token, int q) {
+                             out.send(Results{q});
+                         }, t.q);
+    }
+    static Cmd update(Model& m, Results r) {
+        m.shown = r.q;
+        return {};
     }
 };
 

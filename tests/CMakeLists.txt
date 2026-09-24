@@ -120,7 +120,12 @@ jaal_compile_fail(NAME router_event_not_produced SOURCE compile_fail/kernel.cpp 
 jaal_compile_fail(NAME timeline_needs_frozen_model SOURCE compile_fail/kernel.cpp CASE 2
                   MATCH "is not Frozen: it contains '[^']*shared_ptr[^']*', a pointer-like owner")
 jaal_compile_fail(NAME child_wrap_not_in_parent SOURCE compile_fail/kernel.cpp CASE 3
-                  MATCH "Wrap must be one of ParentMsg's alternatives")
+                  MATCH "Wrap must be a case of Parent::Msg")
+# the program shape: a missing case is named, with the line to add
+jaal_compile_fail(NAME program_missing_case SOURCE compile_fail/kernel.cpp CASE 4
+                  MATCH "has no update for message '[^']*Reset'; add: static Cmd update\\(Model&, [^)]*Reset\\)")
+jaal_compile_fail(NAME program_effect_not_declared SOURCE compile_fail/kernel.cpp CASE 5
+                  MATCH "jaal: this effect is not in the Cmd's row")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering
