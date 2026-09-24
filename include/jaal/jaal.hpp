@@ -36,6 +36,7 @@
 #include "kernel/scope.hpp"
 #include "kernel/timeline.hpp"
 #include "kernel/trace.hpp"
+#include "host/given.hpp"
 #include "host/headless.hpp"
 #include "host/sim.hpp"
 

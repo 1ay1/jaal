@@ -139,6 +139,12 @@ The conformance suite runs the same checks against every reactor backend.
 
 ### Testing
 
+- `given<P>`: test `update` with no kernel at all. `when(msg)` folds,
+  `expect(name, pred)` checks the model, `expect_effect<fx::task>(n)`
+  checks the returned Cmd as data (no mocks), `settle()` runs tasks and
+  `now` inline and folds what they send. `after`/`quit` are recorded, not
+  run. Failures are collected with a field diff of what the last message
+  changed, so one `report()` lists everything.
 - `headless<P>`: no screen, fake clock, records every effect instead of
   running it. Timers fire when a test says `advance()`.
 - `sim<P>`: deterministic simulation. One seed controls task latency,

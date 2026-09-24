@@ -43,6 +43,7 @@ jaal_test(kernel_mailbox_bound_test kernel/mailbox_bound_test.cpp)
 jaal_test(kernel_features_test kernel/features_test.cpp)
 jaal_test(kernel_sim_test kernel/sim_test.cpp)
 jaal_test(kernel_timeline_test kernel/timeline_test.cpp)
+jaal_test(kernel_given_test kernel/given_test.cpp)
 
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)

@@ -12,6 +12,8 @@ core/stream.hpp: sink_access
 # The kernel mints each stream run's generation-gated sink. `atomic`: a
 # lock-free "a task failed" flag, so an idle step doesn't take a lock.
 kernel/kernel.hpp: sink_access atomic
+# given<P> runs tasks inline and mints a sink into a local vector for them.
+host/given.hpp: sink_access
 
 # The mailbox IS the lock around the message queue; it mints sinks to itself.
 # `thread`: it records std::thread::id of the loop (no thread is created)
