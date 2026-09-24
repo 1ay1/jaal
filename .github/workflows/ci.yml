@@ -48,4 +48,11 @@ jobs:
       - run: cmake --preset mingw
       - run: cmake --build --preset mingw -j
       - name: test (under wine)
-        run: WINEDEBUG=-all ctest --test-dir build/mingw --output-on-failure --timeout 180
+        # In a container job, $HOME (/github/home) isn't owned by the user
+        # the steps run as, and wine refuses to create its prefix there.
+        # Give it one in the workspace.
+        run: |
+          export WINEPREFIX="$GITHUB_WORKSPACE/.wine"
+          export WINEDEBUG=-all
+          wineboot --init >/dev/null 2>&1 || true
+          ctest --test-dir build/mingw --output-on-failure --timeout 180
