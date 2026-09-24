@@ -42,7 +42,10 @@
 // Signals are a built-in event source: a program subscribes with
 // Sub::on_signal. A program that DOESN'T subscribe to interrupt/terminate/
 // hangup stops with 128 + signo (130 for Ctrl+C), so it's never left
-// un-killable because it forgot to ask. If the host's event_type is a
+// un-killable because it forgot to ask. And once the loop has ended, the
+// handlers come OFF before shutdown runs (D34): shutdown can take seconds,
+// and a second ^C during it must kill the process, not queue a signal
+// nobody is reading any more. If the host's event_type is a
 // variant that includes signal_event, signals are routed through it;
 // otherwise signals get their own lane.
 
@@ -348,6 +351,16 @@ int run(H& host, run_options opt, durable<P> d) {
         }
         // A wake just means "the mailbox has messages": step() drains it.
     }
+    // The loop is over; now shutdown runs, and it can take a while (a task
+    // that ignores its stop token holds it for the whole grace). Signal
+    // handlers must NOT stay installed through that: they'd keep catching
+    // SIGINT into a pipe nobody drains, so a user hammering ^C on a
+    // slow-exiting program would be ignored. Dropping the source here
+    // unwatches the pipe and restores each signal's previous disposition,
+    // so from this point a second ^C kills the process the ordinary way.
+    // (Measured before this: 20 SIGINTs over a 10 s shutdown, all swallowed.)
+    sig_reg.reset();
+    if (sigs) { auto dead = std::move(*sigs); (void)dead; }   // dtor restores the handlers
     if constexpr (requires { host.release(); }) host.release();
     return std::move(k).finish();
 }

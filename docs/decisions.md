@@ -591,3 +591,42 @@ at 100% CPU. That's a symptom nobody notices in a unit test, so
 writability is reported after `modify`, and then checks the reactor goes
 QUIET after modifying back — plus that pending readability survives a
 modify (which a drop-and-re-watch can lose).
+
+## D34. Signal handlers come off before shutdown
+
+**Decision.** `run()` drops its signal source when the loop ends, *before*
+`host.release()` and `kernel::finish()`. From then on every signal has the
+disposition it had before jaal started, so a second Ctrl+C kills the process
+the ordinary way.
+
+**The bug.** Handlers used to stay installed for the whole of `run()`,
+shutdown included. Shutdown is not instant: `finish()` waits up to
+`options::shutdown_grace` (2 s by default) for workers, and a task that
+ignores its stop token holds it for all of it. During that window the
+handler was still catching SIGINT and writing it into a pipe that nothing
+drained any more. Measured: 20 SIGINTs over a 10 s shutdown, every one
+swallowed, with the process unkillable by ^C throughout.
+
+That contradicted the promise at the top of `kernel/run.hpp` — "a program
+that doesn't subscribe to interrupt/terminate/hangup stops with 128 + signo,
+so it's never left un-killable because it forgot to ask". A program that DID
+subscribe was left un-killable during its own exit, which is exactly when a
+user reaches for ^C a second time.
+
+**Why this is the right split.** While the loop runs, a signal is the
+program's to interpret (D17) — that's what lets an editor ask "save before
+quitting?" on ^C. Once the loop has ended, there is no program left to ask:
+the decision to exit has been made, and the only meaning a further ^C can
+have is "stop waiting". Handing it back to the OS is both simpler and what
+every other program does.
+
+**Test.** `tests/kernel/signal_shutdown_test.cpp` forks a program whose task
+never stops, waits for `release()` to announce that shutdown has begun (so
+the test isn't racing a window), sends a second SIGINT, and requires the
+child to die *by the signal* (`WIFSIGNALED`, `WTERMSIG == SIGINT`) rather
+than exit tidily. It fails deterministically against the old code.
+
+**Still true afterwards.** An inherited `SIG_IGN` (nohup, a background job
+in a non-interactive shell) stays ignored — `release()` restores the
+*previous* disposition, not the default, so jaal never makes a program more
+killable than it was when it started.

@@ -73,7 +73,7 @@ subscription lifecycle. Everything else is a library on top of `task` and
 | `debounce<T>` / `throttle` | model values | "settle before acting" and "at most once per interval" |
 | `every(d, msg)` | source | repeating timer; keeps its phase across model changes |
 | `stream(key, body, args...)` | source | long-running work; runs while subscribed, cancelled when not |
-| `on_signal(set, f)` | router | Ctrl+C, terminate, hangup, resize, child as messages |
+| `on_signal(set, f)` | router | Ctrl+C, terminate, hangup, resize, child as messages. Unsubscribed interrupt/terminate/hangup stops with 128+signo; once the loop ends the handlers come off, so a second ^C during a slow shutdown kills the process |
 
 ### Extension points (for hosts and libraries)
 

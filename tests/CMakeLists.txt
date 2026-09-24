@@ -59,6 +59,10 @@ jaal_test(kernel_timeline_test kernel/timeline_test.cpp)
 jaal_test(kernel_given_test kernel/given_test.cpp)
 jaal_test(kernel_resume_test kernel/resume_test.cpp)
 jaal_test(kernel_stream_stop_test kernel/stream_stop_test.cpp)
+# ^C during shutdown: needs fork() and a real signal, so POSIX only.
+if(UNIX)
+    jaal_test(kernel_signal_shutdown_test kernel/signal_shutdown_test.cpp)
+endif()
 
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)

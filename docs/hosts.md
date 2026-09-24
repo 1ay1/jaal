@@ -280,6 +280,20 @@ message is printed. Shutdown is bounded
 ([D20](decisions.md#d20-shutdown-is-bounded)): a worker still running after
 the grace period is abandoned and reported, not waited on forever.
 
+The order once the loop ends is fixed:
+
+1. **signal handlers come off** ([D34](decisions.md#d34-signal-handlers-come-off-before-shutdown)),
+   restoring whatever disposition each signal had before jaal started — so a
+   second Ctrl+C during a slow shutdown kills the process instead of being
+   queued for a loop that has stopped reading
+2. `release()` — your turn: restore the terminal, close sockets, drop
+   registrations
+3. `finish()` — stop timers and sources, ask every task to stop, join
+   workers within the grace, close the mailbox
+
+So `release()` can assume the loop is over and no more events will arrive,
+and it must not assume any task has finished yet.
+
 ## Driving it yourself
 
 If something else owns the loop — Qt, a game engine, an existing `select` —
