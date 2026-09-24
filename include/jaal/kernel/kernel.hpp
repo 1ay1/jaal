@@ -308,6 +308,11 @@ public:
     template <class H>
     std::size_t route(const event_type& ev, H& host) {
         if (exit_) return 0;
+        // A host event is its own instant: it may come long after the last
+        // step (a keystroke after the program sat idle for a minute), and a
+        // timer it arms must count from NOW, not from the last step's time.
+        // step() resets this too; route() is the other way into the fold.
+        now_cached_ = false;
         const auto before = pending_.size();
         for (auto& r : routers_) r(ev, routed_);
         for (auto& m : routed_) pending_.push_back({0, std::move(m)});
@@ -335,6 +340,7 @@ public:
     turn step(H& host) {
         turn t;
         if (exit_) { t.exit = exit_; return t; }
+        now_cached_ = false;                  // a new step: time has moved
         const auto t0 = opt_.trace ? std::chrono::steady_clock::now()
                                    : std::chrono::steady_clock::time_point{};
 
@@ -345,9 +351,20 @@ public:
         if (exit_) { t.exit = exit_; return t; }
 
         // 2. timers due now
-        fired_.clear();
-        timers_.collect_due(clock_.now(), fired_);
-        for (auto& q : fired_) pending_.push_back(std::move(q));
+        //
+        // Only read the clock when a timer could actually be due. The clock
+        // is the most expensive thing on this path: steady_clock::now() is a
+        // ~16 ns syscall-backed read on macOS, more than the entire fold of
+        // a message, and it was being paid on EVERY step — idle ones
+        // included — even by a program with no timers at all. With nothing
+        // armed there's nothing to be due, so there's nothing to ask.
+        // (The benchmarks run on sim_clock, whose now() costs 0.3 ns, which
+        // is exactly why this hid: the real-clock idle step was 20 ns.)
+        if (!timers_.empty()) {
+            fired_.clear();
+            timers_.collect_due(step_now(), fired_);
+            for (auto& q : fired_) pending_.push_back(std::move(q));
+        }
 
         // 3. fold, within the budget
         const auto before = folds_;
@@ -636,6 +653,27 @@ private:
         for (auto& e : errs) fault_raised(fault_site::task, e, true);
     }
 
+    // ── time ────────────────────────────────────────────────────────────
+    // "Now", as seen by everything in one step. Read lazily, at most once.
+    //
+    // Two reasons, one about speed and one about meaning:
+    //   * steady_clock::now() costs ~16 ns on macOS — more than folding a
+    //     message. A step that arms 100 timers read it 100 times.
+    //   * every timer armed in one step should agree on when "now" was. With
+    //     a fresh read each, `after(10ms)` from two updates in the same batch
+    //     got two different deadlines for what the program sees as one
+    //     instant, and their order depended on how long update() took.
+    // Lazy, so a step that arms nothing and has no timers never reads it.
+    // Reset at the top of step(); a clock that moves mid-step (sim_clock
+    // advanced by a test between steps) is picked up at the next step.
+    [[nodiscard]] typename C::time_point step_now() {
+        if (!now_cached_) {
+            now_        = clock_.now();
+            now_cached_ = true;
+        }
+        return now_;
+    }
+
     // ── effects ─────────────────────────────────────────────────────────
     template <class H>
     void interpret(cmd_type c, H& host) {
@@ -666,7 +704,7 @@ private:
                 // the order the effects were returned. No timer involved.
                 pending_.push_back({0, std::move(x.msg)});
             } else if constexpr (std::same_as<U, payload_t<fx::after, msg_type>>) {
-                timers_.after(clock_.now(), x.delay, queued{0, std::move(x.msg)});
+                timers_.after(step_now(), x.delay, queued{0, std::move(x.msg)});
             } else if constexpr (std::same_as<U, payload_t<fx::task, msg_type>>) {
                 auto job = [t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
                             s = inbox_.sink()](std::stop_token st) mutable {
@@ -793,7 +831,7 @@ private:
                 const auto& payload = std::get<payload_t<D, msg_type>>(p);
                 const origin_id origin = inbox_.open_origin();
                 live_origins_.insert(origin);
-                const auto id = timers_.every(clock_.now(), payload.interval,
+                const auto id = timers_.every(step_now(), payload.interval,
                                               queued{origin, payload.msg});
                 timer_of_[k] = {id, origin};
             } else if constexpr (std::same_as<D, fx::stream>) {
@@ -940,6 +978,9 @@ private:
 
     std::function<void(const msg_type&)> record_;   // first: set before the ctor body folds
     C                   clock_;
+    // The clock, read at most ONCE per step (see step_now).
+    typename C::time_point now_{};
+    bool                   now_cached_ = false;
     options             opt_;
     rng                 rng_;
     std::uint64_t       seed_used_ = 0;
