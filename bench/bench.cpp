@@ -151,6 +151,42 @@ void bench_reconcile() {
                 "reconcile", N, ns);
 }
 
+// ── simulation: whole scenarios per second ───────────────────────────────
+// A search box: 3 keystrokes, 3 tasks with random latency, a timer, 2
+// invariants checked after every message. One run = one seed.
+struct Search {
+    struct Model { int query = 0; int shown = 0; };
+    struct Type { int q; }; struct Results { int q; };
+    using Msg = std::variant<Type, Results>;
+    using Cmd = jaal::CoreCmd<Msg>;
+    static Model init() { return {}; }
+    static std::pair<Model, Cmd> update(Model m, Msg msg) {
+        if (auto* t = std::get_if<Type>(&msg)) {
+            m.query = t->q;
+            return {m, Cmd::task([](jaal::Sink<Msg> out, std::stop_token, int q) {
+                                     out.send(Results{q});
+                                 }, t->q)};
+        }
+        if (std::get<Results>(msg).q == m.query) m.shown = m.query;
+        return {m, Cmd::none()};
+    }
+};
+
+void bench_sim() {
+    constexpr std::size_t N = 20'000;
+    const double ns = ns_per(N, [&] {
+        auto r = jaal::explore<Search>(1, N, {}, [](jaal::sim<Search>& s) {
+            s.at(0ms, Search::Type{1});
+            s.at(2ms, Search::Type{2});
+            s.at(4ms, Search::Type{3});
+            s.check("shown <= query", [](const Search::Model& m) { return m.shown <= m.query; });
+        });
+        if (!r.ok()) std::printf("  !! sim broke\n");
+    });
+    std::printf("  %-14s %10zu runs  %8.1f us/run  (%6.0f scenarios/s)\n", "sim", N,
+                ns / 1e3, 1e9 / ns);
+}
+
 }  // namespace
 
 int main() {
@@ -166,5 +202,6 @@ int main() {
     bench_cross_thread();
     bench_idle_step();
     bench_reconcile();
+    bench_sim();
     return 0;
 }

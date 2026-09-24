@@ -61,6 +61,28 @@ same as for any other program.
 
 Full example: [examples/ticker.cpp](examples/ticker.cpp).
 
+## Finding races with a seed
+
+`jaal::sim` runs a program with task latency, same-instant ordering and
+injected crashes all picked by one seed. `explore` tries many seeds and
+hands back the first one that breaks an invariant:
+
+```cpp
+auto r = jaal::explore<Search>(1, 500, {}, [](jaal::sim<Search>& s) {
+    s.at(0ms, Type{1});
+    s.at(2ms, Type{2});                 // fetch results come back in any order
+    s.check("never show stale results", [last = 0](const Model& m) mutable {
+        bool ok = m.shown >= last; last = m.shown; return ok;
+    });
+});
+if (!r.ok()) puts(r.failure->describe().c_str());
+// seed 1 broke "never show stale results" at step 7 (t=9.629ms) after 6 message(s)
+```
+
+The same seed breaks the same way every time, on every platform, and
+`r.failure->messages` replays through `jaal::replay`. A run takes about a
+microsecond, so hundreds of thousands of seeds a second.
+
 ## Building
 
 Needs GCC 16 or clang 22 (C++26), CMake 3.29+, Ninja.

@@ -118,6 +118,16 @@ The conformance suite runs the same checks against every reactor backend.
 
 - `headless<P>`: no screen, fake clock, records every effect instead of
   running it. Timers fire when a test says `advance()`.
+- `sim<P>`: deterministic simulation. One seed controls task latency,
+  the order of anything due at the same instant, and injected task crashes
+  and hangs. Invariants are checked after every message. `explore()` runs
+  a scenario over many seeds and returns the first one that breaks, with
+  the message log that replays it through `jaal::replay`. Same seed, same
+  run, on every platform (the RNG is jaal's own, not `<random>`'s).
+  Task bodies run on the loop thread; stream bodies don't run at all, the
+  test feeds a stream through `stream(key)`.
+- `kernel::executor<Msg>`: where task and stream bodies run. The kernel
+  asks the host for one (`make_executor`) and falls back to the real pool.
 - `scripts/check.sh`: gcc, clang, ASan, TSan, and Windows under wine.
 
 ### Measured cost
@@ -131,6 +141,7 @@ Release build, one core, from `bench/` (`jaal_bench`):
 | cross-thread send + drain + fold, 4 producers | ~195 ns |
 | a `step` with nothing to do | ~3.6 ns |
 | a message that changes the model, plus re-subscribe of 8 timers | ~660 ns |
+| a whole sim run: start, 3 inputs, 3 tasks, 2 invariants, shutdown | ~1.1 us (~900k seeds/s) |
 
 For comparison, the C prior art (`~/projects/tea`) measured ~54 ns for its
 fold round trip and ~234 ns cross-thread with 4 producers. These are
@@ -161,9 +172,10 @@ These are **deliberate** — each one is someone else's job or a later layer.
 
 ## Planned, not built
 
-- **Simulated reactor and seeded scheduler** for deterministic tests of
-  concurrent code (only the simulated clock exists today).
 - **A real run on macOS**, and on Windows outside wine.
+- **Simulated I/O** (sockets, files) for the sim, once there are I/O
+  effects in a library to simulate.
+- **A time-travel debugger** over recorded runs (step, diff, bisect).
 - **Fuzzing** of the reconciler, timer heap and routing.
 - **A user guide** (the README has a tour; there's no step-by-step guide).
 - **maya as a jaal host**, then agentty on top.

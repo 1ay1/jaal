@@ -26,6 +26,7 @@
 #include "core/sink.hpp"
 #include "core/stream.hpp"
 #include "core/sub.hpp"
+#include "kernel/executor.hpp"
 #include "kernel/fault.hpp"
 #include "kernel/guarded.hpp"
 #include "kernel/kernel.hpp"
@@ -34,6 +35,7 @@
 #include "kernel/scope.hpp"
 #include "kernel/trace.hpp"
 #include "host/headless.hpp"
+#include "host/sim.hpp"
 
 namespace jaal {
 inline constexpr int version_major = 0;

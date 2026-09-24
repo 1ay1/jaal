@@ -56,7 +56,7 @@
 #include "trace.hpp"
 #include "loop.hpp"
 #include "mailbox.hpp"
-#include "pool.hpp"
+#include "executor.hpp"
 #include "reconcile.hpp"
 #include "timer_heap.hpp"
 
@@ -364,15 +364,7 @@ private:
           model_(std::move(m)),
           inbox_(wake, opt.mailbox),
           task_faults_(std::make_shared<task_fault_box>()),
-          pool_(std::make_unique<pool>(
-              opt.max_workers,
-              // Runs on a worker thread: just queue the error (under a lock)
-              // and wake the loop, which reports it on its own thread.
-              [box = task_faults_, wake](std::exception_ptr e) {
-                  box->errors.with([&](auto& v) { v.push_back(std::move(e)); });
-                  box->pending.store(true, std::memory_order_release);
-                  if (wake) wake();
-              })) {
+          pool_(make_executor(host, opt, task_faults_, wake)) {
         // `skip` promises the model survives a fault, which needs a copy
         // taken before update(). A move-only model can't be copied, so a
         // fault would lose it: that's `stop`, not `skip`. Say so instead of
@@ -562,8 +554,7 @@ private:
                             s = inbox_.sink()](std::stop_token st) mutable {
                     std::move(*t).run(s, std::move(st));
                 };
-                if (x.where == fx::placement::isolated) pool_->post_isolated(std::move(job));
-                else                                    pool_->post(std::move(job));
+                pool_->post(std::move(job), x.where);
             } else if constexpr (std::same_as<U, payload_t<fx::now, msg_type>>) {
                 // The KERNEL's clock, so tests control it. The time is
                 // expressed as a steady_clock time_point: the sim clock's
@@ -761,12 +752,12 @@ private:
         // The body's stop_token must fire on EITHER the stream being dropped
         // (own) or the kernel shutting down (the pool's token). A fresh
         // source joined to both by stop_callbacks gives one token that does.
-        pool_->post_isolated([factory = p.body, sink = std::move(sink), own](
-                                 std::stop_token pool_stop) mutable {
+        pool_->post_stream(p.key, std::move(sink), [factory = p.body, own](
+                                 Sink<msg_type> out, std::stop_token pool_stop) mutable {
             std::stop_source merged;
             std::stop_callback a(own,       [&] { merged.request_stop(); });
             std::stop_callback b(pool_stop, [&] { merged.request_stop(); });
-            factory.run(std::move(sink), merged.get_token());
+            factory.run(std::move(out), merged.get_token());
         });
     }
 
@@ -843,7 +834,30 @@ private:
     model_type          model_;
     inbox<msg_type>     inbox_;
     std::shared_ptr<task_fault_box> task_faults_;
-    std::unique_ptr<pool> pool_;
+    std::unique_ptr<executor<msg_type>> pool_;
+
+    // Where background work runs (kernel/executor.hpp). A host that has
+    // make_executor<Msg>(on_error) picks it (the simulation runs jobs on
+    // the loop thread in a seeded order); anything else gets the real pool.
+    //
+    // The error callback runs on whatever thread the job ran on: it just
+    // queues the error (under a lock) and wakes the loop, which reports it
+    // on its own thread.
+    template <class H>
+    static std::unique_ptr<executor<msg_type>> make_executor(
+            H& host, const options& opt, std::shared_ptr<task_fault_box> box,
+            std::function<void()> wake) {
+        typename executor<msg_type>::error_fn on_error =
+            [box = std::move(box), wake](std::exception_ptr e) {
+                box->errors.with([&](auto& v) { v.push_back(std::move(e)); });
+                box->pending.store(true, std::memory_order_release);
+                if (wake) wake();
+            };
+        if constexpr (requires { host.template make_executor<msg_type>(on_error); }) {
+            if (auto e = host.template make_executor<msg_type>(on_error)) return e;
+        }
+        return std::make_unique<pool_executor<msg_type>>(opt.max_workers, std::move(on_error));
+    }
     timer_heap<C, msg_type> timers_;
     running_sources<msg_type, sub_row> sources_;
     std::unordered_map<src_key, timer_id, detail::rec::key_hash> timer_of_;

@@ -329,3 +329,34 @@ number is recorded where the change is.
 **Cost.** Two more atomics (on the allowlist, with reasons). The lock-free
 checks are hints: a false "empty" is corrected by the wake that came with
 the message, so nothing is delayed or lost (TSan-clean).
+
+## D28. Simulation runs background work on the loop thread
+
+**Decision.** `sim<P>` swaps the kernel's executor for one that runs each
+task body on the loop thread at `now + random latency`. One seed picks the
+latencies, breaks ties between things due at the same instant, and decides
+injected crashes and hangs. Stream bodies aren't run; the test feeds them.
+
+**Why.** The bugs worth finding are ordering bugs: a result arriving after
+a newer one, a timer firing between two replies. With real threads they
+show up once a month in production. With the seed in charge, `explore()`
+tries hundreds of orders in milliseconds and hands back one seed that
+breaks, which reproduces every time and replays through `update`.
+
+**Alternatives.**
+- Real threads with random sleeps: slow, and a failure can't be replayed.
+- Deterministic threads (a scheduler that hands out turns): would run
+  blocking bodies, but needs every lock and wait to go through it. jaal's
+  task bodies can call anything, so that can't be enforced.
+- `<random>` distributions: their output differs between standard
+  libraries, so a seed from a Linux CI run wouldn't reproduce on Windows.
+  jaal uses splitmix64 and its own range reduction.
+
+**Cost.** A task body that blocks (waits on its stop token, reads a
+socket) hangs the sim; such work is tested by scripting its result
+messages with `at()`. The kernel got one indirection: tasks go through a
+virtual `executor` call. The host picks it (`make_executor`), so the
+default path is still the pool and nothing in `options` changed.
+
+**Measured.** A full run (kernel start, 3 inputs, 3 tasks, 2 invariants,
+shutdown) is ~1.1 us: about 900k seeds a second on one core.
