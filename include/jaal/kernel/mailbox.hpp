@@ -194,6 +194,14 @@ public:
         if (opt_.capacity != 0) room_.notify_all();   // blocked senders: go
     }
 
+    /// Lock-free "might there be something to drain?" for the loop's idle
+    /// check. False means empty as of the last drain; a message pushed
+    /// concurrently is seen on the next step (it also woke the loop), so it
+    /// is never lost, only never ACTED ON twice. Same hint drain() uses.
+    [[nodiscard]] bool maybe_nonempty() const noexcept {
+        return nonempty_.load(std::memory_order_acquire);
+    }
+
     /// A new origin, live until retire(). Loop thread.
     [[nodiscard]] origin_id open_origin() {
         std::lock_guard lk(m_);
@@ -326,6 +334,7 @@ public:
     void drain(std::vector<Msg>& out)          { box_->drain(out); }
     using entry = typename mailbox<Msg>::entry;
     void drain_tagged(std::vector<entry>& out) { box_->drain_tagged(out); }
+    [[nodiscard]] bool maybe_nonempty() const noexcept { return box_->maybe_nonempty(); }
     void count_retired()                       { box_->count_retired(); }
     [[nodiscard]] bool empty() const           { return box_->empty(); }
     [[nodiscard]] std::size_t size() const     { return box_->size(); }

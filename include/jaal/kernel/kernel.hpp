@@ -352,6 +352,34 @@ public:
     turn step(H& host) {
         turn t;
         if (exit_) { t.exit = exit_; return t; }
+
+        // The idle fast path. Most steps have nothing to do: the loop woke
+        // for a host event it already routed, or a timer that isn't due, or
+        // nothing at all. Every phase below checks for its own work, but
+        // reaching each check costs something. So ask ONE question first —
+        // is there anything anywhere? — and leave if not.
+        //
+        // Each clause is a single load, and together they're exactly the
+        // conditions under which a phase below would do work:
+        //   pending_          messages already queued (dispatch, route)
+        //   mailbox           messages from other threads (lock-free hint)
+        //   task faults       errors from worker threads (lock-free flag)
+        //   subs_dirty_       a model change that hasn't re-subscribed yet
+        //   timers            something armed whose deadline could be now
+        // Timers are the one that needs the clock, so they're checked last
+        // and only when armed, which keeps a program with no timers from
+        // ever reading it here.
+        //
+        // Tracing turns it off: a trace promises a `step` event for every
+        // step() (kernel/trace.hpp), and "nothing happened" is information
+        // a trace reader wants, not noise. The trace hook is already a cost
+        // an instrumented run chose to pay.
+        if (!opt_.trace && pending_.empty() && !inbox_.maybe_nonempty()
+            && !task_faults_->pending.load(std::memory_order_acquire)
+            && !subs_dirty_
+            && (timers_.empty() || clock_.now() < *timers_.next_deadline())) {
+            return t;
+        }
         now_cached_ = false;                  // a new step: time has moved
         const auto t0 = opt_.trace ? std::chrono::steady_clock::now()
                                    : std::chrono::steady_clock::time_point{};

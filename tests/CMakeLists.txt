@@ -63,6 +63,7 @@ jaal_test(kernel_stream_stop_test kernel/stream_stop_test.cpp)
 jaal_test(kernel_teardown_test kernel/teardown_test.cpp)
 jaal_test(kernel_time_cache_test kernel/time_cache_test.cpp)
 jaal_test(kernel_subs_key_test kernel/subs_key_test.cpp)
+jaal_test(kernel_idle_gate_test kernel/idle_gate_test.cpp)
 # ^C during shutdown: needs fork() and a real signal, so POSIX only.
 if(UNIX)
     jaal_test(kernel_signal_shutdown_test kernel/signal_shutdown_test.cpp)
