@@ -145,6 +145,25 @@ static int timer_tests() {
                   == std::chrono::nanoseconds::max());
     static_assert(k::saturate_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(5))
                   == std::chrono::nanoseconds(5'000'000));
+
+    // timeout_from rounds UP. A deadline 0.3 ms away must wait 1 ms, never
+    // 0: rounding down made maya wake just before the timer, find nothing
+    // due, compute 0 ms, and spin.
+    {
+        using namespace std::chrono;
+        const auto t = c.now();
+        auto to = k::timeout_from<sim_clock>(t, t + microseconds(300));
+        if (!to || *to != milliseconds(1)) return 33;
+        to = k::timeout_from<sim_clock>(t, t + microseconds(1500));
+        if (!to || *to != milliseconds(2)) return 34;
+        to = k::timeout_from<sim_clock>(t, t + milliseconds(7));
+        if (!to || *to != milliseconds(7)) return 35;          // exact stays exact
+        to = k::timeout_from<sim_clock>(t, t);
+        if (!to || *to != milliseconds(0)) return 36;          // due now: don't wait
+        to = k::timeout_from<sim_clock>(t, t - milliseconds(5));
+        if (!to || *to != milliseconds(0)) return 37;          // overdue: don't wait
+        if (k::timeout_from<sim_clock>(t, std::nullopt)) return 38;   // no deadline
+    }
     return 0;
 }
 

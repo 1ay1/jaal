@@ -68,6 +68,15 @@ ctest --preset dev
 Other presets: `clang`, `asan`, `tsan`, `release`, `mingw` (Windows cross
 build with llvm-mingw; tests run under wine).
 
+To run the whole matrix (gcc, clang, asan, tsan, windows under wine):
+
+```sh
+scripts/check.sh
+```
+
+It prints one line per preset and exits non-zero if any fails. About
+2.5 minutes on a 12-core machine. There's no hosted CI; this is the check.
+
 ## What's tested where
 
 | | Linux | Windows | macOS |
