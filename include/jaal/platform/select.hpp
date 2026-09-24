@@ -2,7 +2,7 @@
 // jaal::platform::native_reactor / native_signals — the backends for the OS
 // this is being compiled for.
 //
-// This is the ONE #if chain over operating systems in jaal (DESIGN.md §7).
+// This is the ONE #if chain over operating systems in jaal (docs/design.md §7).
 // Everything above it names native_reactor and native_signals; nothing
 // above it names an OS.
 //

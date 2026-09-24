@@ -1,7 +1,7 @@
 #pragma once
 // jaal rows — the set of effects a Cmd may contain, as a type.
 //
-//   using core_fx = row<fx::quit, fx::after, fx::task, fx::isolated_task>;
+//   using core_fx = make_row<fx::quit, fx::after, fx::task, fx::now>;
 //
 // A row is a SET: order and duplicates don't matter. make_row<...> puts the
 // effects in a canonical order (by name) and removes duplicates, so

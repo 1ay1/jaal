@@ -1,10 +1,10 @@
 #pragma once
-// jaal core effects: quit, after, task, isolated_task.
+// jaal core effects: quit, after, task, now.
 //
 // These are the effects the kernel runs itself. Every host supports them.
 //
 // Tasks are where memory and concurrency bugs are born, so they get the
-// strictest shape (CONCURRENCY.md §4.6):
+// strictest shape (docs/concurrency.md §4.6):
 //
 //   * the body is a CAPTURELESS function: it can't borrow `this`, the model,
 //     a local, or the mailbox. Checked by conversion to a function pointer,
@@ -172,57 +172,109 @@ concept captureless_mapper =
     std::is_convertible_v<F, std::invoke_result_t<F, From> (*)(From)>;
 }  // namespace detail_task
 
-#define JAAL_TASK_EFFECT(NAME, STR)                                                   \
-    struct NAME {                                                                     \
-        static constexpr std::string_view name = STR;                                 \
-        template <class Msg> struct type {                                            \
-            ::jaal::detail::task_thunk<Msg> thunk;                                    \
-        };                                                                            \
-        template <class F, class M>                                                   \
-        static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {      \
-            using To = std::invoke_result_t<F, M>;                                    \
-            static_assert(detail_task::captureless_mapper<std::remove_cvref_t<F>, M>, \
-                          "jaal: Cmd::map on a Cmd holding a task needs a "           \
-                          "captureless mapper (it runs on the worker thread)");       \
-            To (*fp)(M) = f;                                                          \
-            return {std::move(e.thunk).map(fp)};                                      \
-        }                                                                             \
-        template <class Self, class Msg> struct ctors {                               \
-            template <class Body, class... Args>                                      \
-                requires TaskBody<Body, Msg, Args...>                                 \
-                      && (Sendable<Args> && ...)                                      \
-            [[nodiscard]] static Self NAME(Body body, Args... args) {                 \
-                void (*fn)(Sink<Msg>, std::stop_token, Args...) = body;               \
-                return Self(type<Msg>{                                                \
-                    ::jaal::detail::task_thunk<Msg>::make(fn, std::move(args)...)});  \
-            }                                                                         \
-            /* Same call, wrong shape: say which rule it broke. */                    \
-            template <class Body, class... Args>                                      \
-                requires (!(TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...))) \
-            static Self NAME(Body, Args...) {                                         \
-                if constexpr (!(Sendable<Args> && ...))                               \
-                    static_assert((Sendable<Args> && ...),                            \
-                        "jaal: a task argument is not Sendable; pass owned values "   \
-                        "(std::string, not std::string_view or a pointer)");          \
-                else if constexpr (std::is_invocable_v<Body, Sink<Msg>,               \
-                                                       std::stop_token, Args...>)     \
-                    static_assert(TaskBody<Body, Msg, Args...>,                       \
-                        "jaal: a task body must not capture anything; pass what it "  \
-                        "needs as arguments after the body");                         \
-                else                                                                  \
-                    static_assert(TaskBody<Body, Msg, Args...>,                       \
-                        "jaal: a task body must be callable as "                      \
-                        "(Sink<Msg>, std::stop_token, Args...)");                     \
-                return Self{};                                                        \
-            }                                                                         \
-        };                                                                            \
-    };
+/// Where a task runs. A closed enum, so "which thread" is one of exactly
+/// two choices, spelled at the call site.
+enum class placement : std::uint8_t {
+    pool,       // the shared worker pool: short work, reused threads
+    isolated,   // its own detached thread: work that may hang (a stuck
+                // syscall leaks one thread instead of blocking the pool)
+};
 
-/// Run on the kernel's worker pool.
-JAAL_TASK_EFFECT(task, "task")
-/// Run on a dedicated thread, so a hung syscall can't block the pool.
-JAAL_TASK_EFFECT(isolated_task, "isolated_task")
-#undef JAAL_TASK_EFFECT
+/// Run a captureless body with Sendable arguments off the loop. One effect,
+/// two placements: Cmd::task(body, args...) runs on the pool;
+/// Cmd::task(isolated, body, args...) runs on its own thread.
+struct task {
+    static constexpr std::string_view name = "task";
+    template <class Msg> struct type {
+        ::jaal::detail::task_thunk<Msg> thunk;
+        placement                       where = placement::pool;
+    };
+    template <class F, class M>
+    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
+        using To = std::invoke_result_t<F, M>;
+        static_assert(detail_task::captureless_mapper<std::remove_cvref_t<F>, M>,
+                      "jaal: Cmd::map on a Cmd holding a task needs a "
+                      "captureless mapper (it runs on the worker thread)");
+        To (*fp)(M) = f;
+        return {std::move(e.thunk).map(fp), e.where};
+    }
+    template <class Self, class Msg> struct ctors {
+        template <class Body, class... Args>
+            requires TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...)
+        [[nodiscard]] static Self task(Body body, Args... args) {
+            return make(placement::pool, body, std::move(args)...);
+        }
+        template <class Body, class... Args>
+            requires TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...)
+        [[nodiscard]] static Self task(placement where, Body body, Args... args) {
+            return make(where, body, std::move(args)...);
+        }
+        /// Kept as a spelling: Cmd::task_isolated(body, args...).
+        template <class Body, class... Args>
+            requires TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...)
+        [[nodiscard]] static Self task_isolated(Body body, Args... args) {
+            return make(placement::isolated, body, std::move(args)...);
+        }
+        // Same call, wrong shape: say which rule it broke.
+        template <class Body, class... Args>
+            requires (!std::same_as<Body, placement>)
+                  && (!(TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...)))
+        static Self task(Body, Args...) { explain<Body, Args...>(); return Self{}; }
+
+    private:
+        template <class Body, class... Args>
+        static Self make(placement where, Body body, Args... args) {
+            void (*fn)(Sink<Msg>, std::stop_token, Args...) = body;
+            return Self(type<Msg>{::jaal::detail::task_thunk<Msg>::make(fn, std::move(args)...),
+                                  where});
+        }
+        template <class Body, class... Args>
+        static void explain() {
+            if constexpr (!(Sendable<Args> && ...))
+                static_assert((Sendable<Args> && ...),
+                    "jaal: a task argument is not Sendable; pass owned values "
+                    "(std::string, not std::string_view or a pointer)");
+            else if constexpr (std::is_invocable_v<Body, Sink<Msg>, std::stop_token, Args...>)
+                static_assert(TaskBody<Body, Msg, Args...>,
+                    "jaal: a task body must not capture anything; pass what it "
+                    "needs as arguments after the body");
+            else
+                static_assert(TaskBody<Body, Msg, Args...>,
+                    "jaal: a task body must be callable as "
+                    "(Sink<Msg>, std::stop_token, Args...)");
+        }
+    };
+};
+
+inline constexpr placement isolated = placement::isolated;
+
+/// Read the KERNEL's clock and deliver the time as a message.
+///
+/// A task calling std::chrono would read the real clock, so the headless
+/// host couldn't control it (advance(5s) wouldn't move it) and replay would
+/// see different times. `now` reads the clock the kernel was started with:
+/// real in production, simulated in tests.
+///
+/// The mapper runs on the loop thread, synchronously, so it may capture.
+struct now {
+    static constexpr std::string_view name = "now";
+    using time_point = std::chrono::steady_clock::time_point;
+    template <class Msg> struct type {
+        std::function<Msg(time_point)> to_msg;
+    };
+    template <class F, class M>
+    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
+        using To = std::invoke_result_t<F, M>;
+        return {[g = std::move(e.to_msg), f = std::forward<F>(f)](time_point t) -> To {
+            return f(g(t));
+        }};
+    }
+    template <class Self, class Msg> struct ctors {
+        template <class F>
+            requires std::is_invocable_r_v<Msg, F&, time_point>
+        [[nodiscard]] static Self now(F f) { return Self(type<Msg>{std::move(f)}); }
+    };
+};
 
 }  // namespace fx
 }  // namespace jaal

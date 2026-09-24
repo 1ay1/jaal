@@ -44,6 +44,7 @@
 
 #include "../meta/list.hpp"
 #include "effect.hpp"
+#include "router.hpp"
 #include "row.hpp"
 
 namespace jaal {
@@ -82,6 +83,7 @@ namespace detail::sub {
 template <class D, class Self, class Msg> struct ctors_of {};
 template <class D, class Self, class Msg>
     requires requires { typename D::template ctors<Self, Msg>; }
+          && (!requires { requires !D::inherit_ctors; })
 struct ctors_of<D, Self, Msg> : D::template ctors<Self, Msg> {};
 
 template <class T> inline constexpr bool is_sub_v = false;
@@ -155,6 +157,24 @@ public:
     Sub& operator=(Sub&&) noexcept = default;
 
     [[nodiscard]] static Sub none() noexcept { return Sub{}; }
+
+    /// Sub::on(tag{}, f): subscribe to the router kind named by `tag` (a
+    /// jaal::router<Event, "name"> in this Sub's row). One name for every
+    /// router kind, so two routers never collide on a factory name.
+    template <class Tag, class F>
+        requires meta::member_of<Tag, meta::list<Ds...>>
+              && requires { typename Tag::template ctors<Sub, Msg>; }
+    [[nodiscard]] static Sub on(Tag t, F&& f) {
+        return Tag::template ctors<Sub, Msg>::on(t, std::forward<F>(f));
+    }
+    template <class Tag, class F>
+        requires (!meta::member_of<Tag, meta::list<Ds...>>)
+    static Sub on(Tag, F&&) {
+        static_assert(meta::member_of<Tag, meta::list<Ds...>>,
+                      "jaal: Sub::on(tag, f): this router isn't in the Sub's row; "
+                      "add it with make_row / row_union");
+        return Sub{};
+    }
 
     [[nodiscard]] static Sub batch(std::vector<Sub> subs) {
         Batch out;
@@ -318,7 +338,8 @@ struct every {
 
 }  // namespace fx
 
-using core_src = make_row<fx::every>;
+// core_src (every + stream) is declared in core_fx.hpp, which can see
+// fx::stream; stream.hpp depends on the task machinery in fx.hpp.
 
 }  // namespace jaal
 

@@ -43,7 +43,7 @@ enum class fault_site : std::uint8_t {
     update,        // P::update threw
     subscribe,     // P::subscribe threw
     effect,        // a host handle()/start_source() threw on the loop
-    task,          // a task or isolated_task threw on a worker thread
+    task,          // a task (pool or isolated) threw on a worker thread
 };
 
 [[nodiscard]] constexpr std::string_view to_string(fault_site s) noexcept {

@@ -4,8 +4,8 @@ This is the deep version of how jaal stops memory and concurrency bugs. It
 starts from what maya does today, found by reading every thread, lock,
 atomic and `thread_local` in maya's source, and builds up from there.
 
-It's a companion to [DESIGN.md](DESIGN.md). Where the two disagree, this file
-is newer and wins; DESIGN.md sections 3.6, 3.7, 4.5 and 4.6 point here.
+It's a companion to [design.md](design.md). Where the two disagree, this file
+is newer and wins; design.md sections 3.6, 3.7, 4.5 and 4.6 point here.
 
 ## 1. What maya does today
 
@@ -146,7 +146,7 @@ Everything below is how the types enforce those three.
 
 ### 4.1 `affine<T>`: may cross threads, by move, once
 
-A plain `Sendable` check (DESIGN.md 3.7) says what a type is. It doesn't
+A plain `Sendable` check (design.md 3.7) says what a type is. It doesn't
 stop two threads from using the same object. The ownership part comes from
 how jaal APIs take their arguments:
 
@@ -163,7 +163,7 @@ CI, which makes that Level B.
 
 ### 4.2 `Sendable`, deep
 
-DESIGN.md 3.7 listed `Sendable` as a shallow lint. It can now look inside
+design.md 3.7 listed `Sendable` as a shallow lint. It can now look inside
 structs. C++26 structured binding packs (P1061) let a template name every
 field type of an aggregate without reflection. Tested and working on GCC 16,
 clang 22 and llvm-mingw clang 23:
@@ -248,7 +248,7 @@ because nobody holds a raw pointer.
 
 ### 4.4 `Sink<Msg>`: the only way back into a loop
 
-As in DESIGN.md 3.6, plus what the maya bugs teach:
+As in design.md 3.6, plus what the maya bugs teach:
 
 ```cpp
 template <Sendable Msg>
@@ -447,7 +447,7 @@ widget code at all.
 ### 4.10 Signals stay in the platform layer
 
 P6 is correct and it stays where it is, moved into `jaal/platform/<os>/`.
-The rule from DESIGN.md 6.7 holds: user code never runs inside a signal
+The rule from design.md 6.7 holds: user code never runs inside a signal
 handler, it only ever sees signals as events. The async-signal-safety
 reasoning stays in one place, maintained by one person, tested by the
 conformance suite.
@@ -516,7 +516,7 @@ stop that. It can make it visible:
   code that crosses threads.
 - **Compile time.** Deep `Sendable` walks every field of every Msg type. It's
   one expansion per struct and memoised, but agentty's Msg is big. Measure at
-  migration step 5 (DESIGN.md 12).
+  migration step 5 (design.md 12).
 - **Copies.** Moving data across threads instead of sharing it costs moves,
   and occasionally copies. `shared<T>` covers the cases where that matters.
 - **Aggregates only.** Deep `Sendable` works on plain structs. Classes with
@@ -530,7 +530,7 @@ Kept short on purpose:
 1. `restore_guard` callbacks must be async-signal-safe.
 2. `sendable_opt_in` must only be used for types that are actually safe to
    move between threads.
-3. `update` and `view` must be pure. (DESIGN.md 3.1.)
+3. `update` and `view` must be pure. (design.md 3.1.)
 4. Code outside jaal that uses raw threads anyway, if it's on the allowlist.
 
 ## 10. Build order

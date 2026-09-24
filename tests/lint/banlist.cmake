@@ -1,5 +1,5 @@
 # tests/lint/banlist.cmake — keep raw concurrency primitives out of code
-# that should go through jaal's safe types (CONCURRENCY.md §7).
+# that should go through jaal's safe types (docs/concurrency.md §7).
 #
 # Fails when any of these appear in a scanned file that is NOT on the
 # allowlist:

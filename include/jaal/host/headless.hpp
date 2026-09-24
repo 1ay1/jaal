@@ -88,8 +88,9 @@ public:
     using kernel_type = kernel::kernel<P, Event, C>;
     using msg_type    = typename P::Msg;
 
-    explicit headless(kernel::options opt = {})
-        : k_(kernel_type::start(rec_, C{}, opt)) {}
+    explicit headless(kernel::options opt = {},
+                      std::function<void(const msg_type&)> record = {})
+        : k_(kernel_type::start(rec_, C{}, opt, {}, std::move(record))) {}
 
     headless(const headless&)            = delete;
     headless& operator=(const headless&) = delete;

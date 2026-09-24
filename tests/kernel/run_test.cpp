@@ -168,7 +168,7 @@ struct Busy {
     using Cmd = jaal::CoreCmd<Msg>;
     static std::pair<Model, Cmd> init() {
         Cmd work = Cmd::batch(
-            Cmd::isolated_task([](jaal::Sink<Msg> out, std::stop_token) {
+            Cmd::task(jaal::fx::isolated, [](jaal::Sink<Msg> out, std::stop_token) {
                 std::this_thread::sleep_for(150ms);     // still running at shutdown
                 out.send(Late{});                       // must just return false
             }),

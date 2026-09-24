@@ -1,7 +1,7 @@
 #pragma once
 // jaal::meta::list — the type list every other type-level tool is built on.
 //
-// Design rules for this module (see DESIGN.md §2):
+// Design rules for this module (see docs/design.md §2):
 //   * no dependency on anything else in jaal
 //   * queries are concepts or constexpr values, never class templates you
 //     have to ::value

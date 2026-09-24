@@ -91,67 +91,81 @@ public:
         std::vector<stopped>   stop;
         std::vector<duplicate> duplicates;
         bool changed() const noexcept { return !start.empty() || !stop.empty(); }
+        void clear() noexcept { start.clear(); keep.clear(); stop.clear(); duplicates.clear(); }
     };
 
     /// Diff `next` against what's running, update the running set to match,
     /// and return what changed. Routers are appended to `routers` in order.
+    ///
+    /// Performance: subscription sets are small (a handful of sources), so
+    /// this uses FLAT vectors with linear search instead of hash maps, and
+    /// reuses its storage across calls. Measured before: three hash maps and
+    /// five vectors allocated per call, ~1.15 us for an 8-source Sub. The
+    /// plan it returns refers to storage owned here and is valid until the
+    /// next reconcile().
     template <class RouterSink>
-    plan reconcile(const Sub<Msg, row_type>& next, RouterSink&& routers) {
-        std::unordered_map<key, payload, detail::rec::key_hash> want;
-        std::vector<key> order;
-        std::unordered_map<key, std::uint32_t, detail::rec::key_hash> next_ordinal;
-        plan p;
+    const plan& reconcile(const Sub<Msg, row_type>& next, RouterSink&& routers) {
+        want_.clear();
+        ordinals_.clear();
+        plan_.clear();
 
         next.for_each([&]<class X>(const X& x) {
-            (take_leaf<Ds>(x, want, order, next_ordinal, p, routers), ...);
+            (take_leaf<Ds>(x, routers), ...);
         });
 
-        for (auto& k : order) {
-            auto it = running_.find(k);
-            if (it == running_.end()) p.start.push_back({k, want.at(k)});
-            else                      p.keep.push_back({k, want.at(k)});
+        for (auto& w : want_) {
+            if (find(running_, w.k)) plan_.keep.push_back({w.k, w.p});
+            else                     plan_.start.push_back({w.k, w.p});
         }
-        for (auto& [k, _] : running_)
-            if (!want.contains(k)) p.stop.push_back({k});
+        for (auto& r : running_)
+            if (!find(want_, r.k)) plan_.stop.push_back({r.k});
 
-        running_ = std::move(want);
-        return p;
+        running_.swap(want_);                 // want_'s old storage is reused next call
+        return plan_;
     }
 
     [[nodiscard]] std::size_t size() const noexcept { return running_.size(); }
-    [[nodiscard]] bool contains(const key& k) const { return running_.contains(k); }
+    [[nodiscard]] bool contains(const key& k) const { return find(running_, k) != nullptr; }
 
 private:
-    using want_map    = std::unordered_map<key, payload, detail::rec::key_hash>;
-    using ordinal_map = std::unordered_map<key, std::uint32_t, detail::rec::key_hash>;
+    struct entry { key k; payload p; };
+
+    static const entry* find(const std::vector<entry>& v, const key& k) noexcept {
+        for (auto& e : v) if (e.k == k) return &e;
+        return nullptr;
+    }
 
     // One leaf of the flattened Sub, offered to descriptor D. Does nothing
     // unless x is D's payload.
     template <class D, class X, class RouterSink>
-    static void take_leaf(const X& x, want_map& want, std::vector<key>& order,
-                          ordinal_map& next_ordinal, plan& p, RouterSink& routers) {
+    void take_leaf(const X& x, RouterSink& routers) {
         if constexpr (std::same_as<X, payload_t<D, Msg>>) {
             if constexpr (SourceDescriptor<D>) {
                 auto k = D::key(x);
                 if constexpr (detail::rec::numbered_source<D>) {
                     auto base    = k;
                     base.ordinal = 0;
-                    k.ordinal    = next_ordinal[key{tagged_key<D>{base}}]++;
+                    k.ordinal    = next_ordinal(key{tagged_key<D>{base}});
                 }
                 key tk{tagged_key<D>{std::move(k)}};
-                if (want.contains(tk)) {
-                    p.duplicates.push_back({tk});
-                } else {
-                    want.emplace(tk, payload{x});
-                    order.push_back(std::move(tk));
-                }
+                if (find(want_, tk)) plan_.duplicates.push_back({tk});
+                else                 want_.push_back({std::move(tk), payload{x}});
             } else {
                 routers(x);
             }
         }
     }
 
-    std::unordered_map<key, payload, detail::rec::key_hash> running_;
+    std::uint32_t next_ordinal(const key& base) {
+        for (auto& [k, n] : ordinals_) if (k == base) return n++;
+        ordinals_.emplace_back(base, 1u);
+        return 0;
+    }
+
+    std::vector<entry>                          running_;
+    std::vector<entry>                          want_;       // scratch, reused
+    std::vector<std::pair<key, std::uint32_t>>  ordinals_;   // scratch, reused
+    plan                                        plan_;       // scratch, reused
 };
 
 }  // namespace jaal

@@ -1,7 +1,7 @@
 #pragma once
 // jaal::Sink<Msg> — the only way work outside the loop can talk to it.
 //
-// Design: CONCURRENCY.md §4.4. The rules, all enforced by the type:
+// Design: docs/concurrency.md §4.4. The rules, all enforced by the type:
 //
 //   * WEAK. A Sink holds a weak reference to the mailbox. There is no API
 //     that turns it into a strong one, so a task can never keep the

@@ -1,7 +1,7 @@
 #pragma once
 // jaal::Sendable — may this value be moved to another thread?
 //
-// Design: CONCURRENCY.md §4.2. A value is Sendable when, after it's moved to
+// Design: docs/concurrency.md §4.2. A value is Sendable when, after it's moved to
 // another thread, it holds nothing that the sending thread can still reach
 // or free. So: no raw pointers, no references, no views, no shared mutable
 // ownership. Owned values and deep copies are fine.

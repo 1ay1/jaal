@@ -1,6 +1,6 @@
 // tests/kernel/kernel_test.cpp — the kernel, end to end, on the headless
 // host and the simulated clock. One section per rule carried over from
-// maya's run<P> (DESIGN.md 9.2): each is a bug maya actually had.
+// maya's run<P> (docs/design.md 9.2): each is a bug maya actually had.
 
 #include <jaal/core/core_fx.hpp>
 #include <jaal/core/program.hpp>
@@ -72,7 +72,7 @@ static int rule1() {
     k.dispatch(QuitApp::Go{2});
     k.dispatch(QuitApp::Go{3});         // queued behind the quit
     auto t = k.step(h.record());
-    if (!t.quit || t.exit_code != 3) return 101;
+    if (!t.quit() || t.exit != 3) return 101;
     if (h.model().seen != 2) return 102;                 // Go{3} never folded
     auto beeps = h.effects<beep>();
     // Go{1} beeped; Go{2} beeped, then quit — the Beep{99} after the quit

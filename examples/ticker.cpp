@@ -1,68 +1,76 @@
-// examples/ticker.cpp — a complete jaal program on the real platform.
+// examples/ticker.cpp — a complete jaal program.
 //
 //   $ ./ticker
-//   tick 1 ... tick 5, then quits with code 0
-//   Ctrl+C at any point: prints "bye" and quits (the program subscribes)
+//   runs a pretend download on a background stream while ticking, then
+//   quits. Ctrl+C at any point prints "bye" and quits.
 //
-// Shows: init with a Cmd, a timer subscription, a background task with its
-// result coming back as a Msg, a signal as a Msg, and quit.
+// Shows: program<> aliases, update returning just a model, a timer, a keyed
+// stream (cancelled the moment the program stops subscribing), a signal as
+// a message, and quit.
 
-#include <jaal/core/core_fx.hpp>
-#include <jaal/kernel/run.hpp>
+#include <jaal/jaal.hpp>
 
 #include <cstdio>
-#include <string>
+#include <thread>
 #include <variant>
 
 using namespace std::chrono_literals;
 
-struct Ticker {
-    struct Model {
-        int         ticks = 0;
-        std::string host;
-    };
+namespace msg {
+struct Tick {};
+struct Progress { int percent; };
+struct Done {};
+struct Interrupted {};
+}  // namespace msg
 
-    struct Tick {};
-    struct GotHost { std::string name; };
-    struct Interrupted {};
-    using Msg = std::variant<Tick, GotHost, Interrupted>;
+struct Model {
+    int  ticks    = 0;
+    int  percent  = 0;
+    bool fetching = true;
+};
 
-    using Cmd = jaal::CoreCmd<Msg>;
-    using Sub = jaal::Sub<Msg, jaal::row_union<jaal::core_src,
-                                               jaal::make_row<jaal::fx::on_signal>>>;
+using Msg = std::variant<msg::Tick, msg::Progress, msg::Done, msg::Interrupted>;
 
-    static std::pair<Model, Cmd> init() {
-        // Slow work goes to a task. It owns its inputs and reports back
-        // through the Sink; it can't touch the model.
-        return {{}, Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
-            out.send(GotHost{"localhost"});
-        })};
-    }
+// Core effects and sources come for free; this program adds signals.
+struct Ticker : jaal::program<Model, Msg, jaal::fx_list<>, jaal::src_list<jaal::fx::on_signal>> {
+    static Model init() { return {}; }
 
-    static std::pair<Model, Cmd> update(Model m, Msg msg) {
+    static step update(Model m, Msg in) {
         return std::visit(jaal::overload{
-            [&](Tick) -> std::pair<Model, Cmd> {
+            [&](msg::Tick) -> step {
                 ++m.ticks;
-                std::printf("tick %d%s%s\n", m.ticks,
-                            m.host.empty() ? "" : " on ", m.host.c_str());
-                return {m, m.ticks == 5 ? Cmd::quit(0) : Cmd::none()};
+                std::printf("tick %d  (%d%%)\n", m.ticks, m.percent);
+                return m;                                    // no effects
             },
-            [&](GotHost g) -> std::pair<Model, Cmd> {
-                m.host = std::move(g.name);
-                return {m, Cmd::none()};
+            [&](msg::Progress p) -> step { m.percent = p.percent; return m; },
+            [&](msg::Done) -> step {
+                std::printf("done after %d ticks\n", m.ticks);
+                m.fetching = false;
+                return {m, Cmd::quit(0)};
             },
-            [&](Interrupted) -> std::pair<Model, Cmd> {
+            [&](msg::Interrupted) -> step {
                 std::printf("bye\n");
                 return {m, Cmd::quit(0)};
             },
-        }, msg);
+        }, in);
     }
 
-    static Sub subscribe(const Model&) {
-        return Sub::batch(
-            Sub::every(500ms, Tick{}),
-            Sub::on_signal({jaal::sig::interrupt},
-                           [](jaal::sig) { return Msg{Interrupted{}}; }));
+    static Sub subscribe(const Model& m) {
+        auto always = Sub::batch(
+            Sub::every(250ms, msg::Tick{}),
+            Sub::on_signal({jaal::sig::interrupt}, [](jaal::sig) { return Msg{msg::Interrupted{}}; }));
+        if (!m.fetching) return always;
+        // A stream lives exactly as long as this subscription does. When
+        // `fetching` goes false, its stop_token fires and anything it still
+        // sends is dropped.
+        return Sub::batch(std::move(always),
+            Sub::stream("fetch", [](jaal::Sink<Msg> out, std::stop_token st, int steps) {
+                for (int i = 1; i <= steps && !st.stop_requested(); ++i) {
+                    std::this_thread::sleep_for(100ms);      // pretend network
+                    out.send(msg::Progress{i * 100 / steps});
+                }
+                out.send(msg::Done{});
+            }, 10));
     }
 };
 

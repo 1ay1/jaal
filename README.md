@@ -6,9 +6,15 @@ You write `update`. jaal runs the loop, the timers, the background tasks and
 the OS waiting, on Linux, macOS and Windows. It doesn't draw anything:
 renderers like [maya](https://github.com/1ay1/maya) plug in as hosts.
 
-Status: core, kernel and platform layers are built and tested (see
-[DESIGN.md](DESIGN.md) and [CONCURRENCY.md](CONCURRENCY.md)). maya doesn't
+Status: core, kernel and platform layers are built and tested. maya doesn't
 run on it yet.
+
+**Docs** live in [docs/](docs/):
+
+- [scope.md](docs/scope.md): what jaal offers, what it doesn't, what's planned
+- [decisions.md](docs/decisions.md): the design decisions and why
+- [design.md](docs/design.md): the full technical design
+- [concurrency.md](docs/concurrency.md): the threading and memory safety model
 
 ## The idea in one example
 

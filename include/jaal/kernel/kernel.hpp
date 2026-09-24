@@ -22,12 +22,12 @@
 //   6. a Sink doesn't keep the kernel alive; sends after finish() fail
 //   7. background Msgs are drained every step, wake or no wake
 //
-// Effects: the kernel runs core_fx itself (quit, after, task,
-// isolated_task). Every other effect in the program's row goes to
-// host.handle(effect). A host that can't handle one is a compile error
-// naming the effect (HostFor, below).
+// Effects: the kernel runs core_fx itself (quit, after, task, now). Every
+// other effect in the program's row goes to host.handle(effect). A host
+// that can't handle one is a compile error naming the effect (HostFor).
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <concepts>
 #include <cstddef>
@@ -41,16 +41,19 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #include "../core/core_fx.hpp"
 #include "../core/program.hpp"
+#include "../core/stream.hpp"
 #include "../core/sub.hpp"
 #include "../platform/clock.hpp"
 #include "fault.hpp"
 #include "guarded.hpp"
+#include "trace.hpp"
 #include "loop.hpp"
 #include "mailbox.hpp"
 #include "pool.hpp"
@@ -95,6 +98,7 @@ template <class H, class Msg, class L> struct runs_all_sources;
 template <class H, class Msg, class... Ds>
 struct runs_all_sources<H, Msg, meta::list<Ds...>>
     : std::bool_constant<((!SourceDescriptor<Ds> || std::same_as<Ds, fx::every>
+                           || std::same_as<Ds, fx::stream>
                            || runs_source<H, Ds, Msg>) && ...)> {};
 
 }  // namespace detail::host
@@ -157,11 +161,15 @@ const RE* as(const HE& ev) noexcept {
 namespace kernel {
 
 /// What one step() did, for the host to act on.
+///
+/// `exit` holds the exit code exactly when the program is quitting. An exit
+/// code without a quit (or a quit without a code) can't be represented.
 struct turn {
-    bool model_changed = false;   // a drawing host should consider a frame
-    bool quit          = false;   // stop driving; call finish()
-    int  exit_code     = 0;
-    std::size_t folded = 0;       // messages folded this turn
+    bool               model_changed = false;   // a drawing host should consider a frame
+    std::size_t        folded        = 0;       // messages folded this turn
+    std::optional<int> exit;                    // set: stop driving, call finish()
+
+    [[nodiscard]] bool quit() const noexcept { return exit.has_value(); }
 };
 
 struct options {
@@ -180,6 +188,14 @@ struct options {
     /// A worker still running after this is abandoned (detached) and
     /// reported, instead of hanging shutdown forever.
     std::chrono::milliseconds shutdown_grace{2000};
+
+    /// Mailbox bound and what to do when it's full (kernel/mailbox.hpp).
+    /// Default: unbounded.
+    mailbox_options mailbox{};
+
+    /// Called on the loop thread for each fold, effect, subscribe, fault
+    /// and step (kernel/trace.hpp). One branch per event when unset.
+    trace_hook trace;
 };
 
 /// Marker for a host with no input events (a headless server, a test).
@@ -211,13 +227,19 @@ public:
 
     /// The only constructor: runs init() and its Cmd. There is no
     /// "constructed but not started" state to misuse.
+    ///
+    /// `record`, if set, is called with every message update() folds, in
+    /// fold order, whatever its source (kernel/replay.hpp). It's given here
+    /// rather than set later because init's effects can produce messages
+    /// right away.
     template <class H>
     [[nodiscard]] static kernel start(H& host, C clock = {}, options opt = {},
-                                      std::function<void()> wake = {}) {
+                                      std::function<void()> wake = {},
+                                      std::function<void(const msg_type&)> record = {}) {
         require_host_for<H, P>();
         auto [m, c] = run_init<P>();
         return kernel(host, std::move(m), std::move(c), std::move(clock), opt,
-                      std::move(wake));
+                      std::move(wake), std::move(record));
     }
 
     // ── input ───────────────────────────────────────────────────────────
@@ -230,7 +252,7 @@ public:
     /// should still stop the program).
     template <class H>
     std::size_t route(const event_type& ev, H& host) {
-        if (quit_) return 0;
+        if (exit_) return 0;
         const auto before = pending_.size();
         for (auto& r : routers_) r(ev, pending_);
         const auto produced = pending_.size() - before;
@@ -246,9 +268,8 @@ public:
     /// host that lost its terminal). The next step() reports quit. A quit
     /// the program already asked for keeps its own exit code.
     void stop(int code) noexcept {
-        if (quit_) return;
-        quit_      = true;
-        exit_code_ = code;
+        if (exit_) return;
+        exit_ = code;
         pending_.clear();
     }
 
@@ -256,13 +277,15 @@ public:
     template <class H>
     turn step(H& host) {
         turn t;
-        if (quit_) { t.quit = true; t.exit_code = exit_code_; return t; }
+        if (exit_) { t.exit = exit_; return t; }
+        const auto t0 = opt_.trace ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
 
         // 1. background messages, every turn, whether or not we were woken
         inbox_.drain(scratch_);
         for (auto& m : scratch_) pending_.push_back(std::move(m));
         drain_task_faults();
-        if (quit_) { t.quit = true; t.exit_code = exit_code_; return t; }
+        if (exit_) { t.exit = exit_; return t; }
 
         // 2. timers due now
         fired_.clear();
@@ -278,8 +301,13 @@ public:
         reconcile(host);
 
         t.model_changed = changed;
-        t.quit          = quit_;
-        t.exit_code     = exit_code_;
+        t.exit          = exit_;
+        if (opt_.trace) {
+            trace_event e{trace_kind::step};
+            e.folded   = t.folded;
+            e.duration = std::chrono::steady_clock::now() - t0;
+            emit_trace(e);
+        }
         return t;
     }
 
@@ -298,39 +326,51 @@ public:
     [[nodiscard]] Sink<msg_type> sink() const { return inbox_.sink(); }
 
     [[nodiscard]] const model_type& model() const noexcept { return model_; }
-    [[nodiscard]] bool quitting() const noexcept { return quit_; }
+    [[nodiscard]] bool quitting() const noexcept { return exit_.has_value(); }
     [[nodiscard]] C& clock() noexcept { return clock_; }
 
     /// Faults reported so far (update, subscribe, effect or task).
     [[nodiscard]] std::uint64_t fault_count() const noexcept { return faults_; }
 
+    /// Mailbox load: drops, blocked sends, high-water mark.
+    [[nodiscard]] mailbox_stats mailbox_load() const { return inbox_.stats(); }
+
     /// Ordered shutdown, once. Consumes the kernel.
     int finish() && {
         shutdown();
-        return exit_code_;
+        return exit_.value_or(0);
     }
 
 private:
     // Task faults arrive from worker threads. They're queued here and
     // reported from step(), on the loop thread, like every other fault.
-    // guarded<T>: the errors are only reachable under their lock (the
-    // banlist keeps raw mutexes out of the kernel; this is what it's for).
-    using task_fault_box = guarded<std::vector<std::exception_ptr>>;
+    //
+    // Hot path: step() runs on every wakeup and task faults are rare, so
+    // checking must not take the lock. `pending` is set (release) AFTER
+    // the error is queued and read (acquire) before locking; step() only
+    // locks when it's set. Measured: taking the lock unconditionally was
+    // ~75% of an idle step. The errors themselves stay under guarded<T>.
+    struct task_fault_box {
+        guarded<std::vector<std::exception_ptr>> errors;
+        std::atomic<bool>                        pending{false};
+    };
 
     template <class H>
     kernel(H& host, model_type m, cmd_type init_cmd, C clock, options opt,
-           std::function<void()> wake)
-        : clock_(std::move(clock)),
+           std::function<void()> wake, std::function<void(const msg_type&)> record)
+        : record_(std::move(record)),
+          clock_(std::move(clock)),
           opt_(opt),
           model_(std::move(m)),
-          inbox_(wake),
+          inbox_(wake, opt.mailbox),
           task_faults_(std::make_shared<task_fault_box>()),
           pool_(std::make_unique<pool>(
               opt.max_workers,
               // Runs on a worker thread: just queue the error (under a lock)
               // and wake the loop, which reports it on its own thread.
               [box = task_faults_, wake](std::exception_ptr e) {
-                  box->with([&](auto& v) { v.push_back(std::move(e)); });
+                  box->errors.with([&](auto& v) { v.push_back(std::move(e)); });
+                  box->pending.store(true, std::memory_order_release);
                   if (wake) wake();
               })) {
         // `skip` promises the model survives a fault, which needs a copy
@@ -360,7 +400,7 @@ private:
     bool fold_pending(H& host) {
         bool changed = false;
         std::size_t n = 0;
-        while (!pending_.empty() && !quit_ && n < opt_.fold_budget) {
+        while (!pending_.empty() && !exit_ && n < opt_.fold_budget) {
             // Take the batch; anything the effects add lands in a fresh
             // pending_ and is folded next time round the loop.
             auto batch = std::move(pending_);
@@ -372,18 +412,18 @@ private:
                 if (!fold_one(std::move(batch[i]), host)) {
                     // The message faulted. Under `stop` the kernel is now
                     // quitting; under `skip` it's dropped and we go on.
-                    if (quit_) { ++i; break; }
+                    if (exit_) { ++i; break; }
                     continue;
                 }
                 changed = true;
-                if (quit_) {
+                if (exit_) {
                     // Rule 1: a quit stops the batch. Nothing after it runs
                     // its effects.
                     ++i;
                     break;
                 }
             }
-            if (quit_) { pending_.clear(); break; }
+            if (exit_) { pending_.clear(); break; }
             // Budget hit mid-batch: put the unfolded tail back, in order,
             // AHEAD of anything the effects queued.
             if (i < batch.size()) {
@@ -412,8 +452,16 @@ private:
             if (opt_.on_fault == fault_policy::skip) saved.emplace(model_);
 
         cmd_type c;
+        const auto t0 = opt_.trace ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
+        std::size_t index = 0;
+        if constexpr (requires { msg.index(); }) index = msg.index();
+        // Record BEFORE update consumes the message (kernel/replay.hpp).
+        if (record_) {
+            try { record_(msg); } catch (...) {}
+        }
         try {
-            auto [m, cmd] = P::update(std::move(model_), std::move(msg));
+            auto [m, cmd] = detail::prog::split(P::update(std::move(model_), std::move(msg)));
             model_ = std::move(m);
             c      = std::move(cmd);
         } catch (...) {
@@ -421,6 +469,12 @@ private:
             if (kept) model_ = std::move(*saved);
             fault_raised(fault_site::update, std::current_exception(), kept);
             return false;
+        }
+        if (opt_.trace) {
+            trace_event e{trace_kind::fold};
+            e.msg_index = index;
+            e.duration  = std::chrono::steady_clock::now() - t0;
+            emit_trace(e);
         }
         subs_dirty_ = true;
         ++folds_;
@@ -434,6 +488,12 @@ private:
         return true;
     }
 
+    // The trace hook runs program-supplied code: contain it like the fault
+    // handler (a throwing hook must not take the loop down).
+    void emit_trace(const trace_event& e) noexcept {
+        try { opt_.trace(e); } catch (...) {}
+    }
+
     // Report a fault and apply the policy.
     void fault_raised(fault_site site, std::exception_ptr e, bool model_kept) {
         const bool stop = opt_.on_fault == fault_policy::stop || !model_kept;
@@ -444,6 +504,11 @@ private:
     }
 
     void report(const fault& f) noexcept {
+        if (opt_.trace) {
+            trace_event e{trace_kind::fault};
+            e.name = to_string(f.site);
+            emit_trace(e);
+        }
         try {
             if (opt_.faults) {
                 opt_.faults(f);
@@ -459,7 +524,11 @@ private:
     }
 
     void drain_task_faults() {
-        auto errs = task_faults_->with([](auto& v) { return std::exchange(v, {}); });
+        if (!task_faults_->pending.load(std::memory_order_acquire)) return;   // hot path
+        task_faults_->pending.store(false, std::memory_order_relaxed);
+        // Cleared BEFORE draining: an error queued between the clear and the
+        // swap sets it again and is drained now or next step, never lost.
+        auto errs = task_faults_->errors.with([](auto& v) { return std::exchange(v, {}); });
         // A task fault doesn't touch the model, so the model is kept. The
         // policy still applies: `stop` quits, `skip` carries on.
         for (auto& e : errs) fault_raised(fault_site::task, e, true);
@@ -470,27 +539,38 @@ private:
     void interpret(cmd_type c, H& host) {
         std::visit([&]<class X>(X&& x) {
             using U = std::remove_cvref_t<X>;
+            if constexpr (!std::same_as<U, typename cmd_type::None>
+                          && !std::same_as<U, typename cmd_type::Batch>) {
+                if (opt_.trace) {
+                    trace_event e{trace_kind::effect};
+                    e.name = effect_name_of<U>();
+                    emit_trace(e);
+                }
+            }
             if constexpr (std::same_as<U, typename cmd_type::None>) {
             } else if constexpr (std::same_as<U, typename cmd_type::Batch>) {
                 for (auto& inner : x.cmds) {
-                    if (quit_) return;
+                    if (exit_) return;
                     interpret(std::move(inner), host);
                 }
             } else if constexpr (std::same_as<U, payload_t<fx::quit, msg_type>>) {
-                quit_      = true;
-                exit_code_ = x.code;
+                if (!exit_) exit_ = x.code;
             } else if constexpr (std::same_as<U, payload_t<fx::after, msg_type>>) {
                 timers_.after(clock_.now(), x.delay, std::move(x.msg));
             } else if constexpr (std::same_as<U, payload_t<fx::task, msg_type>>) {
-                pool_->post([t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
-                             s = inbox_.sink()](std::stop_token st) mutable {
+                auto job = [t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
+                            s = inbox_.sink()](std::stop_token st) mutable {
                     std::move(*t).run(s, std::move(st));
-                });
-            } else if constexpr (std::same_as<U, payload_t<fx::isolated_task, msg_type>>) {
-                pool_->post_isolated([t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
-                                      s = inbox_.sink()](std::stop_token st) mutable {
-                    std::move(*t).run(s, std::move(st));
-                });
+                };
+                if (x.where == fx::placement::isolated) pool_->post_isolated(std::move(job));
+                else                                    pool_->post(std::move(job));
+            } else if constexpr (std::same_as<U, payload_t<fx::now, msg_type>>) {
+                // The KERNEL's clock, so tests control it. The time is
+                // expressed as a steady_clock time_point: the sim clock's
+                // count since its epoch, which is what tests compare.
+                const auto d = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    clock_.now().time_since_epoch());
+                pending_.push_back(x.to_msg(std::chrono::steady_clock::time_point(d)));
             } else {
                 // A non-core effect: only reachable when the program's row
                 // has one, and HostFor has already checked the host handles
@@ -500,6 +580,16 @@ private:
                 call_handle(host, std::forward<X>(x));
             }
         }, std::move(c.inner));
+    }
+
+    // The descriptor name for an effect payload type U in this row.
+    template <class U>
+    static constexpr std::string_view effect_name_of() {
+        std::string_view n = "?";
+        [&]<class... Ds>(meta::list<Ds...>) {
+            ((std::same_as<U, payload_t<Ds, msg_type>> ? (n = Ds::name, 0) : 0), ...);
+        }(typename cmd_type::row_type::effects{});
+        return n;
     }
 
     template <class H, class X>
@@ -528,7 +618,7 @@ private:
         }
 
         routers_.clear();
-        auto plan = sources_.reconcile(*widened, [&]<class R>(const R& r) {
+        const auto& plan = sources_.reconcile(*widened, [&]<class R>(const R& r) {
             add_router(r);
         });
         try {
@@ -539,6 +629,13 @@ private:
             fault_raised(fault_site::effect, std::current_exception(), true);
         }
         duplicates_ += plan.duplicates.size();
+        if (opt_.trace) {
+            trace_event e{trace_kind::subscribe};
+            e.started = plan.start.size();
+            e.stopped = plan.stop.size();
+            e.kept    = plan.keep.size();
+            emit_trace(e);
+        }
     }
 
     template <class R>
@@ -582,6 +679,8 @@ private:
                 const auto& payload = std::get<payload_t<D, msg_type>>(p);
                 const auto id = timers_.every(clock_.now(), payload.interval, payload.msg);
                 timer_of_[k] = id;
+            } else if constexpr (std::same_as<D, fx::stream>) {
+                start_stream(k, std::get<payload_t<D, msg_type>>(p));
             } else {
                 const auto& payload = std::get<payload_t<D, msg_type>>(p);
                 call_start_source(host, payload, tk.key, inbox_.sink());
@@ -626,17 +725,86 @@ private:
                     timers_.cancel(it->second);
                     timer_of_.erase(it);
                 }
+            } else if constexpr (std::same_as<D, fx::stream>) {
+                stop_stream(k);
             } else {
                 call_stop_source(host, std::type_identity<D>{}, tk.key);
             }
         }, k);
     }
 
+    // ── streams ────────────────────────────────────────────────────────────────────
+    // Each running stream gets its own thread (streams are long and often
+    // block; they must not starve the task pool) and a GENERATION. Its Sink
+    // is a gate that stamps each message with that generation, and
+    // fold_pending drops messages whose generation is no longer live. So
+    // stopping a stream is immediate from the program's point of view, even
+    // if the body ignores its stop token for a while.
+    struct stream_run {
+        std::uint64_t    gen;
+        std::stop_source stop;
+        // The gate this run posts through. Owned HERE (the Sink the body
+        // holds is weak), so it lives exactly as long as the run is
+        // subscribed; after that the body's sends return false.
+        std::shared_ptr<detail::mailbox_iface<msg_type>> gate;
+    };
+
+    void start_stream(const src_key& k, const payload_t<fx::stream, msg_type>& p) {
+        const std::uint64_t gen = ++stream_gen_;
+        live_streams_->with([&](auto& live) { live.insert(gen); });
+        stream_run run{gen, std::stop_source{}, make_gate(gen)};
+        auto own  = run.stop.get_token();
+        auto sink = sink_access::make<msg_type>(
+            std::weak_ptr<detail::mailbox_iface<msg_type>>(run.gate));
+        streams_[k] = std::move(run);
+
+        // The body's stop_token must fire on EITHER the stream being dropped
+        // (own) or the kernel shutting down (the pool's token). A fresh
+        // source joined to both by stop_callbacks gives one token that does.
+        pool_->post_isolated([factory = p.body, sink = std::move(sink), own](
+                                 std::stop_token pool_stop) mutable {
+            std::stop_source merged;
+            std::stop_callback a(own,       [&] { merged.request_stop(); });
+            std::stop_callback b(pool_stop, [&] { merged.request_stop(); });
+            factory.run(std::move(sink), merged.get_token());
+        });
+    }
+
+    // A gate for one stream run: posts go to the real mailbox, but only while
+    // that run's generation is live. Two layers, both needed:
+    //   * the gate object is owned by stream_run, and dropped with it, so a
+    //     stopped stream's Sink goes dead (weak) and sends return false
+    //   * the generation check covers the window where a send has already
+    //     locked the weak pointer when the stream is dropped
+    std::shared_ptr<detail::mailbox_iface<msg_type>> make_gate(std::uint64_t gen) {
+        struct gate final : detail::mailbox_iface<msg_type> {
+            Sink<msg_type>                                              out;
+            std::shared_ptr<guarded<std::unordered_set<std::uint64_t>>> live;
+            std::uint64_t                                               gen;
+            gate(Sink<msg_type> o, decltype(live) l, std::uint64_t g)
+                : out(std::move(o)), live(std::move(l)), gen(g) {}
+            bool post(msg_type m) override {
+                const bool alive = live->read([&](const auto& s) { return s.contains(gen); });
+                return alive && out.send(std::move(m));
+            }
+        };
+        return std::make_shared<gate>(inbox_.sink(), live_streams_, gen);
+    }
+
+    void stop_stream(const src_key& k) {
+        auto it = streams_.find(k);
+        if (it == streams_.end()) return;
+        const auto gen = it->second.gen;
+        live_streams_->with([&](auto& live) { live.erase(gen); });
+        it->second.stop.request_stop();
+        streams_.erase(it);
+    }
+
     template <class TK> struct key_desc { using type = void; };
     template <class D> struct key_desc<tagged_key<D>> { using type = D; };
 
     // ── shutdown ────────────────────────────────────────────────────────
-    // Fixed order (DESIGN.md 4.7):
+    // Fixed order (docs/design.md 4.7):
     //   1. stop timers and routers       (nothing new becomes due)
     //   2. stop workers: request stop on every task, join pool workers
     //      (isolated threads are asked to stop, not joined)
@@ -647,6 +815,15 @@ private:
         timers_.clear();
         routers_.clear();
         timer_of_.clear();
+        // Streams: ask each to stop and mark every generation dead, so a
+        // stream still finishing its last send drops it.
+        for (auto& [k, run] : streams_) run.stop.request_stop();
+        streams_.clear();
+        live_streams_->with([](auto& live) { live.clear(); });
+        // Close the mailbox FIRST. A worker blocked in send() on a full
+        // mailbox is released with `false`, and every later send fails at
+        // once, so workers finish quickly instead of running out the grace.
+        inbox_.close();
         if (pool_) {
             // Bounded: a task ignoring its stop token can't hang finish().
             abandoned_ = pool_->shutdown(opt_.shutdown_grace);
@@ -656,11 +833,11 @@ private:
                 report(fault{fault_site::task, nullptr, std::move(what), true, true});
             }
         }
-        inbox_.close();
     }
 
     using router_fn = std::function<void(const event_type&, std::vector<msg_type>&)>;
 
+    std::function<void(const msg_type&)> record_;   // first: set before the ctor body folds
     C                   clock_;
     options             opt_;
     model_type          model_;
@@ -670,6 +847,10 @@ private:
     timer_heap<C, msg_type> timers_;
     running_sources<msg_type, sub_row> sources_;
     std::unordered_map<src_key, timer_id, detail::rec::key_hash> timer_of_;
+    std::unordered_map<src_key, stream_run, detail::rec::key_hash> streams_;
+    std::shared_ptr<guarded<std::unordered_set<std::uint64_t>>> live_streams_ =
+        std::make_shared<guarded<std::unordered_set<std::uint64_t>>>();
+    std::uint64_t       stream_gen_ = 0;
     std::vector<router_fn> routers_;
     std::vector<msg_type> pending_;
     std::vector<msg_type> scratch_;
@@ -678,8 +859,7 @@ private:
     std::uint64_t       faults_     = 0;
     std::size_t         abandoned_  = 0;
     std::size_t         duplicates_ = 0;
-    int                 exit_code_  = 0;
-    bool                quit_       = false;
+    std::optional<int>  exit_;           // set = quitting, with this code
     bool                subs_dirty_ = true;
     bool                down_       = false;
 };

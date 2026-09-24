@@ -7,9 +7,18 @@
 core/sink.hpp: sink_access
 # Task map builds a forwarding sink for the mapped task.
 core/fx.hpp: sink_access
+# Stream map builds a forwarding sink for the mapped stream, the same way.
+core/stream.hpp: sink_access
+# The kernel mints each stream run's generation-gated sink. `atomic`: a
+# lock-free "a task failed" flag, so an idle step doesn't take a lock.
+kernel/kernel.hpp: sink_access atomic
 
 # The mailbox IS the lock around the message queue; it mints sinks to itself.
-kernel/mailbox.hpp: mutex sink_access
+# `thread`: it records std::thread::id of the loop (no thread is created)
+# so a full blocking mailbox refuses a loop-thread post instead of
+# deadlocking on a drain only the loop can do.
+# `atomic`: a lock-free "maybe non-empty" hint so an idle drain skips the lock.
+kernel/mailbox.hpp: mutex sink_access thread atomic
 # loop_key is defined here.
 kernel/loop.hpp: loop_key
 # The worker pool: threads, the job queue lock, and detached isolated threads.

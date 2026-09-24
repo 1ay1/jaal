@@ -69,8 +69,10 @@ using K = jaal::source_key_t<R>;
 static_assert(std::variant_size_v<K> == 2);   // every + watch, not on_key
 
 // widening / narrowing, like Cmd
-static_assert(std::is_convertible_v<Sub<Msg, jaal::core_src>, S>);
-static_assert(!std::is_constructible_v<Sub<Msg, jaal::core_src>, S>);
+static_assert(std::is_convertible_v<Sub<Msg, make_row<fx::every>>, S>);
+static_assert(!std::is_constructible_v<Sub<Msg, make_row<fx::every>>, S>);
+// core_src (every + stream) is NOT a subrow of R: R has no stream
+static_assert(!std::is_convertible_v<Sub<Msg, jaal::core_src>, S>);
 
 template <class X> concept has_every = requires { X::every(1ms, Msg{0}); };
 static_assert(has_every<S>);

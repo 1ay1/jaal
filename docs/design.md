@@ -371,7 +371,7 @@ deep: it looks inside aggregate structs field by field using C++26
 structured binding packs, so a `string_view` hidden in a nested struct is
 rejected. Full rules, the `Frozen` / `shared<T>` types for sharing
 immutable data, and the opt-in for classes jaal can't look inside are in
-[CONCURRENCY.md](CONCURRENCY.md) section 4.
+[concurrency.md](concurrency.md) section 4.
 
 ### 3.8 Errors
 
@@ -393,7 +393,7 @@ No exceptions cross the platform boundary. Every platform call returns
 
 Concurrency and memory safety for everything in this section (Sink, tasks,
 the mailbox, `loop_bound`, `scope`, `guarded`) is designed in detail in
-[CONCURRENCY.md](CONCURRENCY.md), starting from what maya does today.
+[concurrency.md](concurrency.md), starting from what maya does today.
 
 ### 4.1 Shape
 
@@ -505,7 +505,7 @@ return fx::task<Msg>(path, [](Sink<Msg> out, std::stop_token st, std::string pat
 - The body must be captureless (checked by conversion to a function
   pointer), and every argument must be `Sendable`. So a task owns all its
   inputs and can't hold `this`, the model, a raw pointer or the mailbox.
-  Why, and the one hole left (globals), are in CONCURRENCY.md 4.6.
+  Why, and the one hole left (globals), are in concurrency.md 4.6.
 - Internally the body and its arguments are stored together, type-erased
   once, in the effect. The erasure is jaal's, not the user's, so nothing
   unchecked goes in.
@@ -872,8 +872,8 @@ an include-graph test (section 9).
 jaal/
 ├── CMakeLists.txt
 ├── CMakePresets.json             dev, release, asan, tsan, sim, mingw-cross
-├── DESIGN.md                     this file
-├── CONCURRENCY.md                memory and concurrency safety, from maya's code up
+├── design.md                     this file
+├── concurrency.md                memory and concurrency safety, from maya's code up
 ├── README.md
 ├── LICENSE                       MIT
 ├── cmake/
@@ -1114,15 +1114,22 @@ Measured in `bench/`, checked before each release:
 
 ## 14. Open questions
 
-1. **Row order.** `row<a, b>` and `row<b, a>` are different types today.
-   Either normalise rows by sorting on `D::name` at compile time, or accept
-   that widening makes them interchangeable in practice. Leaning towards
-   sorting, so error messages and variants are stable.
-2. **Compile time.** agentty's `Msg` is a large variant, and every Cmd
-   instantiation multiplies it by the row size. Needs a measurement at step
-   5 before committing: build time of agentty before and after.
-3. **Where routers live.** They filter the host's `event_type`, so they
-   probably belong to the host's source row. Needs one pass with maya's
-   actual `Sub` code to confirm.
-4. **`Sendable` strictness.** A warning-level concept (opt-out allowed) or a
-   hard requirement. Start strict, relax if it hurts.
+Answered since this was written (kept so the reasoning is visible):
+
+1. ~~**Row order.**~~ Settled: `make_row` sorts by `D::name` and
+   deduplicates, so rows are sets and spelling never creates a new type
+   ([decisions.md](decisions.md) D2).
+2. ~~**Where routers live.**~~ Settled: a router names its `event_type`; a
+   host's event type may be a variant, and each router takes one
+   alternative ([decisions.md](decisions.md) D22).
+3. ~~**`Sendable` strictness.**~~ Settled: strict, with explicit per-type
+   opt-ins. It found a real race in agentty on its first run
+   ([decisions.md](decisions.md) D7).
+
+Still open:
+
+4. **Compile time.** agentty's `Msg` is a large variant, and every Cmd
+   instantiation multiplies it by the row size. Measured so far: the deep
+   `Sendable` check on agentty's real `Msg` costs about 4 s in one TU,
+   mostly agentty's own headers. The full build-time cost of moving maya
+   onto jaal still needs measuring.

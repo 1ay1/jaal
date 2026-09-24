@@ -1,40 +1,62 @@
 #pragma once
-// jaal::run<P>() — run a program for real: kernel + native reactor + signals.
+// jaal::run<P>() — run a program for real: kernel + native reactor + signals
+// + whatever the host brings.
 //
-//   int main() { return jaal::run<Counter>(); }
+//   int main() { return jaal::run<Counter>(); }                // no host input
+//   int main() { tui t; return jaal::run<Editor>(t); }         // a host
 //
-// This is the loop DESIGN.md §5.2 describes, with nothing simulated:
+// The loop (docs/design.md §5.2), with nothing simulated:
 //
 //   1. start the kernel (init + init Cmd); its mailbox wakes the reactor
-//   2. wait on the reactor until the next timer, a wake, a signal, or input
-//   3. hand signals and host events to the kernel; step it
-//   4. repeat until the program quits; finish() in a fixed order
+//   2. let the host register its handles (a tty fd, a listening socket, an
+//      X11 connection) with the reactor
+//   3. wait until the next deadline, a wake, a signal, or a host handle
+//   4. signals and host events go through the program's subscriptions; step
+//   5. let the host draw (if it draws); repeat until quit; finish()
 //
-// Signals are ordinary input. A program that wants them subscribes:
+// ── the host interface ───────────────────────────────────────────────────
+// Everything is optional except event_type. A host provides what it needs:
 //
-//   static Sub subscribe(const Model&) {
-//       return Sub::on_signal({sig::interrupt, sig::terminate},
-//                             [](jaal::signal s) { return Msg{Shutdown{}}; });
-//   }
+//   struct my_host {
+//       using event_type = std::variant<KeyEvent, MouseEvent>;   // what routers see
 //
-// and gets a Msg on the loop thread. A program that DOESN'T subscribe to
-// interrupt/terminate gets the conventional behaviour: the loop stops with
-// exit code 128 + signal number (130 for Ctrl+C, 143 for SIGTERM), the way
-// a shell reports it. So a jaal program is never left un-killable by Ctrl+C
-// just because it forgot to ask.
+//       // 2. register handles; keep the registrations, they unwatch on drop
+//       void attach(jaal::host_context<my_host>& cx);
 //
-// Hosts: run<P>() uses a host with no screen and no input of its own
-// (headless_host), which suits servers and tools. A terminal or GUI host
-// (maya) plugs in through run<P>(host), supplying its own events and
-// effects.
+//       // 3→4. one of the host's handles is ready: read it and emit events
+//       void on_ready(jaal::host_context<my_host>& cx, const jaal::readiness& r);
+//
+//       // 5. after each step that changed the model: draw
+//       template <class K> void present(K& kernel);
+//
+//       // effects/sources beyond core: handle(E), start_source/stop_source
+//
+//       // teardown, before the kernel finishes (restore the terminal, ...)
+//       void release();
+//   };
+//
+// The host emits events through host_context::emit(ev). They're routed one
+// at a time, re-subscribing between them (the ^T m o rule), exactly as if
+// the kernel had read them itself.
+//
+// Signals are a built-in event source: a program subscribes with
+// Sub::on_signal. A program that DOESN'T subscribe to interrupt/terminate/
+// hangup stops with 128 + signo (130 for Ctrl+C), so it's never left
+// un-killable because it forgot to ask. If the host's event_type is a
+// variant that includes signal_event, signals are routed through it;
+// otherwise signals get their own lane.
 
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <optional>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
+#include <vector>
 
 #include "../core/program.hpp"
 #include "../core/sub.hpp"
@@ -48,9 +70,11 @@ namespace jaal {
 
 using platform::sig;
 using platform::signal_set;
+using platform::readiness;
+using platform::interest;
 
 // ── the signal router ────────────────────────────────────────────────────
-/// The event the driver routes to programs: which signals arrived.
+/// The event signals arrive as: which signals arrived (one per event).
 struct signal_event {
     signal_set signals;
 };
@@ -65,7 +89,7 @@ struct on_signal {
     using event_type = signal_event;
 
     template <class Msg> struct type {
-        signal_set                                 wanted;
+        signal_set                              wanted;
         std::function<std::optional<Msg>(sig)>  f;
     };
     template <class F, class M>
@@ -76,9 +100,6 @@ struct on_signal {
             return std::nullopt;
         }};
     }
-    // A signal_event can carry several signals; route() returns the first
-    // match. The driver delivers one signal per event, so in practice each
-    // event is exactly one signal.
     template <class M>
     static std::optional<M> route(const type<M>& p, const signal_event& ev) {
         for (auto s : ev.signals)
@@ -92,11 +113,12 @@ struct on_signal {
             requires std::is_invocable_v<F&, sig>
         [[nodiscard]] static Self on_signal(signal_set wanted, F f) {
             using R = std::invoke_result_t<F&, sig>;
-            if constexpr (std::is_convertible_v<R, std::optional<Msg>>)
+            if constexpr (std::is_convertible_v<R, std::optional<Msg>>
+                          && !std::is_convertible_v<R, Msg>)
                 return Self(type<Msg>{wanted, std::move(f)});
             else
                 return Self(type<Msg>{wanted, [f = std::move(f)](sig s) -> std::optional<Msg> {
-                    return f(s);
+                    return Msg(f(s));
                 }});
         }
     };
@@ -104,33 +126,80 @@ struct on_signal {
 
 }  // namespace fx
 
-// ── hosts ────────────────────────────────────────────────────────────────
-/// A host with no screen and no input of its own: signals only. Runs only
-/// programs whose effects are all core ones (HostFor checks that).
+/// The subscription row every run<P> program may use on top of core_src:
+/// signals. `jaal::run_src` = core_src + on_signal.
+using run_src = row_union<core_src, make_row<fx::on_signal>>;
+
+// ── host interface ───────────────────────────────────────────────────────
+
+/// A host with no screen and no input of its own: signals only.
 struct headless_host {
     using event_type = signal_event;
 };
 
 namespace detail::run {
 
-// The driver installs one signal source for every portable signal, once.
-// The program's subscriptions decide what each signal means; the source
-// just makes sure it arrives as an event.
-inline constexpr signal_set all_signals{sig::interrupt, sig::terminate,
-                                        sig::hangup, sig::resize,
-                                        sig::child};
+// The event type the KERNEL sees: the host's, with signal_event folded in.
+//   host event E (not a variant)      → variant<E, signal_event>
+//   host event variant<A...>          → variant<A..., signal_event> (unless present)
+//   host event signal_event           → signal_event
+template <class E> struct with_signals { using type = std::variant<E, signal_event>; };
+template <> struct with_signals<signal_event> { using type = signal_event; };
+template <class... A> struct with_signals<std::variant<A...>> {
+    using type = std::conditional_t<(std::same_as<A, signal_event> || ...),
+                                    std::variant<A...>,
+                                    std::variant<A..., signal_event>>;
+};
 
-// Conventional exit code for dying of a signal: 128 + the POSIX number.
+inline constexpr signal_set all_signals{sig::interrupt, sig::terminate, sig::hangup,
+                                        sig::resize, sig::child};
+
 constexpr int exit_code_for(sig s) noexcept {
     switch (s) {
         case sig::interrupt: return 128 + 2;    // SIGINT
         case sig::terminate: return 128 + 15;   // SIGTERM
         case sig::hangup:    return 128 + 1;    // SIGHUP
-        default:                return 128;
+        default:             return 128;
     }
 }
 
+// Tokens the driver owns; host tokens start above these.
+inline constexpr std::uint64_t kSignalToken = 1;
+inline constexpr std::uint64_t kFirstHostToken = 1u << 16;
+
+// A host event, as the kernel's event type (which also carries signals).
+template <class KE, class HE>
+KE to_kernel_event(const HE& ev) {
+    if constexpr (std::same_as<HE, KE>)
+        return ev;                                  // same type: pass through
+    else if constexpr (requires { std::variant_size<HE>::value; })
+        return std::visit([](const auto& e) { return KE{e}; }, ev);   // variant → wider variant
+    else
+        return KE{ev};                              // one type → the variant holding it
+}
+
+// The kernel's host is an adapter over the user's host: it forwards
+// effects and sources (handle / start_source / stop_source) when the user's
+// host has them, and nothing else. kernel.hpp's HostFor checks the program's
+// row against exactly these, so a missing handler is still a compile error.
+template <class H, class KE>
+struct forward_host {
+    H& h;
+    using event_type = KE;
+    template <class E> requires requires(H& x, E e) { x.handle(std::move(e)); }
+    void handle(E e) { h.handle(std::move(e)); }
+    template <class Pay, class Key, class Msg>
+        requires requires(H& x, const Pay& p, const Key& k, Sink<Msg> s) { x.start_source(p, k, s); }
+    void start_source(const Pay& p, const Key& k, Sink<Msg> s) { h.start_source(p, k, std::move(s)); }
+    template <class D, class Key>
+        requires requires(H& x, std::type_identity<D> d, const Key& k) { x.stop_source(d, k); }
+    void stop_source(std::type_identity<D> d, const Key& k) { h.stop_source(d, k); }
+};
+
 }  // namespace detail::run
+
+template <class H>
+using kernel_event_t = typename detail::run::with_signals<typename H::event_type>::type;
 
 struct run_options {
     kernel::options kernel{};
@@ -139,11 +208,47 @@ struct run_options {
     bool default_signal_exit = true;
 };
 
+template <Program P, class H> int run(H& host, run_options opt);
+
+/// What a host gets from run(): the reactor to watch its handles with, and
+/// a way to hand events to the program.
+template <class H>
+class host_context {
+public:
+    using reactor = platform::native_reactor;
+    using event   = typename H::event_type;
+
+    /// Watch a handle. Keep the registration: dropping it unwatches. The
+    /// token passed to on_ready() is `token` (host tokens can't collide
+    /// with the driver's).
+    [[nodiscard]] result<typename reactor::registration>
+    watch(typename reactor::handle h, interest what, std::uint64_t token) {
+        return r_.watch(h, what, token + detail::run::kFirstHostToken);
+    }
+
+    /// Hand one event to the program: routed now, then re-subscribed
+    /// before the next emit (the ^T m o rule).
+    void emit(const event& ev) { emit_(ev); }
+
+    /// End the program with an exit code (the terminal went away, ...).
+    void stop(int code) { stop_(code); }
+
+    [[nodiscard]] reactor& native_reactor() noexcept { return r_; }
+
+private:
+    template <Program, class H2> friend int run(H2&, run_options);
+    host_context(reactor& r, std::function<void(const event&)> e, std::function<void(int)> s)
+        : r_(r), emit_(std::move(e)), stop_(std::move(s)) {}
+    reactor&                           r_;
+    std::function<void(const event&)>  emit_;
+    std::function<void(int)>           stop_;
+};
+
 /// Run P on the native platform with host H. Returns the exit code.
 template <Program P, class H>
-    requires std::same_as<typename H::event_type, signal_event>
-int run(H& host, run_options opt = {}) {
-    using K = kernel::kernel<P, signal_event, platform::steady_clock>;
+int run(H& host, run_options opt) {
+    using KE = kernel_event_t<H>;
+    using K  = kernel::kernel<P, KE, platform::steady_clock>;
     namespace pf = platform;
 
     auto reactor = pf::native_reactor::create();
@@ -158,19 +263,29 @@ int run(H& host, run_options opt = {}) {
     // mailbox wakes the reactor, and its shutdown must finish first.
     auto sigs = pf::native_signals::install(detail::run::all_signals);
     std::optional<typename pf::native_reactor::registration> sig_reg;
-    constexpr std::uint64_t kSignalToken = 1;
     if (sigs) {
-        auto r = reactor->watch(sigs->handle(), pf::interest::read, kSignalToken);
+        auto r = reactor->watch(sigs->handle(), interest::read, detail::run::kSignalToken);
         if (r) sig_reg.emplace(std::move(*r));
     }
 
-    K k = K::start(host, platform::steady_clock{}, opt.kernel, [waker] { waker.wake(); });
+    detail::run::forward_host<H, KE> fwd{host};
+
+    K k = K::start(fwd, platform::steady_clock{}, opt.kernel, [waker] { waker.wake(); });
+
+    // Host events arriving from on_ready() route immediately, one at a time.
+    host_context<H> cx(
+        *reactor,
+        [&](const typename H::event_type& ev) { k.route(detail::run::to_kernel_event<KE>(ev), fwd); },
+        [&](int code) { k.stop(code); });
+
+    if constexpr (requires { host.attach(cx); }) host.attach(cx);
 
     for (;;) {
-        auto t = k.step(host);
-        if (t.quit) break;
+        auto t = k.step(fwd);
+        if constexpr (requires { host.present(k); })
+            if (t.model_changed || t.folded == 0) host.present(k);
+        if (t.quit()) break;
 
-        // Sleep until the next deadline (rounded up: see timer_heap.hpp).
         const auto timeout = kernel::timeout_from<platform::steady_clock>(
             k.clock().now(), k.next_deadline());
         auto res = reactor->wait(timeout);
@@ -182,22 +297,33 @@ int run(H& host, run_options opt = {}) {
         }
 
         for (std::uint8_t i = 0; i < res->count; ++i) {
-            if (res->ready[i].token != kSignalToken || !sigs) continue;
-            for (auto s : sigs->take()) {
-                const auto produced = k.route(signal_event{signal_set{s}}, host);
-                // Nobody subscribed to an interrupt/terminate/hangup: act
-                // like a normal process and stop, instead of ignoring it.
-                if (produced == 0 && opt.default_signal_exit
-                    && (s == sig::interrupt || s == sig::terminate || s == sig::hangup))
-                    k.stop(detail::run::exit_code_for(s));
+            const auto& r = res->ready[i];
+            if (r.token == detail::run::kSignalToken) {
+                if (!sigs) continue;
+                for (auto s : sigs->take()) {
+                    const auto produced = k.route(KE{signal_event{signal_set{s}}}, fwd);
+                    if (produced == 0 && opt.default_signal_exit
+                        && (s == sig::interrupt || s == sig::terminate || s == sig::hangup))
+                        k.stop(detail::run::exit_code_for(s));
+                }
+            } else if (r.token >= detail::run::kFirstHostToken) {
+                if constexpr (requires { host.on_ready(cx, r); }) {
+                    readiness mine = r;
+                    mine.token -= detail::run::kFirstHostToken;
+                    host.on_ready(cx, mine);
+                }
             }
         }
         // A wake just means "the mailbox has messages": step() drains it.
     }
+    if constexpr (requires { host.release(); }) host.release();
     return std::move(k).finish();
 }
 
-/// Run P with the headless host.
+template <Program P, class H>
+int run(H& host) { return run<P>(host, run_options{}); }
+
+/// Run P with no host of its own (signals, timers, tasks, streams).
 template <Program P>
 int run(run_options opt = {}) {
     headless_host h;

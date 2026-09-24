@@ -1,7 +1,7 @@
 #pragma once
 // jaal::platform — the capability concepts every backend implements.
 //
-// A platform is a bundle of capabilities (DESIGN.md §6). Each is a concept
+// A platform is a bundle of capabilities (docs/design.md §6). Each is a concept
 // here; each has several backends (posix/, linux/, darwin/, windows/, sim/);
 // every backend passes the same conformance suite
 // (tests/platform/conformance.cpp).

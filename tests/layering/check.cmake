@@ -1,4 +1,4 @@
-# tests/layering/check.cmake — enforce DESIGN.md §7: a file's path says what
+# tests/layering/check.cmake — enforce docs/design.md §7: a file's path says what
 # it may depend on.
 #
 #   meta      → (nothing in jaal)

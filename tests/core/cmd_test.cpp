@@ -32,7 +32,7 @@ using title = jaal::pure_fx<Title, "title">;
 static_assert(jaal::Effect<fx::quit>);
 static_assert(jaal::Effect<fx::after>);
 static_assert(jaal::Effect<fx::task>);
-static_assert(jaal::Effect<fx::isolated_task>);
+static_assert(jaal::Effect<fx::now>);
 static_assert(jaal::Effect<beep>);
 static_assert(jaal::carries_msg_v<fx::after>);
 static_assert(jaal::carries_msg_v<fx::task>);

@@ -35,6 +35,8 @@
 
 namespace jaal {
 
+template <class Model, class C> struct step;   // program_base.hpp
+
 namespace detail::prog {
 
 template <class P>
@@ -46,6 +48,22 @@ template <class M, class C> struct step_parts<std::pair<M, C>> {
     using model = M;
     using cmd   = C;
 };
+// jaal::step<Model, Cmd> (program_base.hpp): what update() returns when a
+// program uses jaal::program<>. Same parts as the pair.
+template <class M, class C>
+struct step_parts<::jaal::step<M, C>> {
+    using model = M;
+    using cmd   = C;
+};
+
+/// Split whatever update()/init() returned into (model, cmd).
+template <class S>
+auto split(S&& s) {
+    if constexpr (requires { s.model; s.cmd; })
+        return std::pair{std::move(s.model), std::move(s.cmd)};
+    else
+        return std::pair{std::move(s.first), std::move(s.second)};
+}
 
 template <class P> using cmd_t = typename step_parts<step_t<P>>::cmd;
 
@@ -95,6 +113,12 @@ concept HasPlainInit = requires {
 template <class P>
 concept HasCmdInit = requires {
     { P::init() } -> std::same_as<std::pair<typename P::Model, cmd_of<P>>>;
+} || requires {
+    // init() returning jaal::step<Model, Cmd> (program_base.hpp)
+    requires std::same_as<typename detail::prog::step_parts<
+                              decltype(P::init())>::model, typename P::Model>;
+    requires std::same_as<typename detail::prog::step_parts<
+                              decltype(P::init())>::cmd, cmd_of<P>>;
 };
 
 // ── the concept ──────────────────────────────────────────────────────────
@@ -130,7 +154,7 @@ concept HasNeedsWarmup = requires(const typename P::Model& m) {
 // ── running a program's init, either shape ───────────────────────────────
 template <Program P>
 [[nodiscard]] auto run_init() -> std::pair<typename P::Model, cmd_of<P>> {
-    if constexpr (HasCmdInit<P>) return P::init();
+    if constexpr (HasCmdInit<P>) return detail::prog::split(P::init());
     else                         return {P::init(), cmd_of<P>::none()};
 }
 
