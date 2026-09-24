@@ -233,6 +233,27 @@ void bench_reconcile_scaling() {
     bench_reconcile_at<256>(5'000);
 }
 
+// ── one message, one step: the shape an app actually has ────────────────
+// bench_fold queues 5M messages and folds them in one step, which measures
+// the fold in isolation and hides everything that happens PER STEP. A UI
+// does the opposite: one keystroke, one step, one frame. That path was 39 ns
+// against the fold's 10 — a malloc and free per step, because taking the
+// pending batch by move stole its buffer. Nothing in the suite would have
+// caught that, so it's measured here too.
+void bench_step_per_message() {
+    constexpr std::size_t N = 2'000'000;
+    jaal::headless<Counter> h;
+    auto& k = h.kernel();
+    const double ns = ns_per(N, [&] {
+        for (std::size_t i = 0; i < N; ++i) {
+            k.dispatch(Counter::Inc{});
+            k.step(h.record());
+        }
+    });
+    if (h.model().n != N) std::printf("  !! step-per-message lost messages\n");
+    report("step/msg", N, ns);
+}
+
 }  // namespace
 
 int main() {
@@ -244,6 +265,7 @@ int main() {
 #endif
     );
     bench_fold();
+    bench_step_per_message();
     bench_fold_effect();
     bench_cross_thread();
     bench_idle_step();
