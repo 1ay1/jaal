@@ -38,6 +38,7 @@ jaal_test(platform_conformance platform/conformance.cpp)
 jaal_test(platform_signals_test platform/signals_test.cpp)
 jaal_test(kernel_run_test kernel/run_test.cpp)
 jaal_test(kernel_mailbox_race_test kernel/mailbox_race_test.cpp)
+jaal_test(kernel_fault_test kernel/fault_test.cpp)
 
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)

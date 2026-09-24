@@ -46,6 +46,7 @@ static_assert(!Frozen<std::shared_ptr<const int>>);
 static_assert(!Frozen<std::string_view>);
 static_assert(!Frozen<std::span<const int>>);
 static_assert(!Frozen<std::stop_token>);
+static_assert(!Frozen<std::exception_ptr>);
 static_assert(!Frozen<int&>);
 
 // ── mutable: the whole reason Frozen exists ─────────────────────────────

@@ -1,32 +1,38 @@
 #pragma once
-// jaal::kernel::pool — worker threads for tasks, with cancellation.
+// jaal::kernel::pool — worker threads for tasks, with cancellation and a
+// shutdown that can't hang.
 //
-// From maya's BackgroundQueue, plus the one thing it lacks (stop tokens):
+// From maya's BackgroundQueue, plus what it lacks:
 //
 //   * workers start LAZILY, up to max(4, hardware_concurrency), and live
 //     for the pool's lifetime, so a burst reuses warm threads instead of
 //     paying thread creation per task
 //   * every task body is wrapped: an exception can NEVER reach
-//     std::terminate from a worker. It's reported through on_error.
+//     std::terminate from a worker. It goes to the error callback, which
+//     the kernel turns into a reported fault.
 //   * isolated tasks get a dedicated thread. A wedged syscall (hung NFS,
 //     dead FUSE mount) leaks ONE thread instead of blocking the pool; if
 //     the OS refuses a thread (EAGAIN), it falls back to the pool.
 //   * every task gets a std::stop_token, and shutdown requests stop on all
-//     of them. Cancellation is the gap that made maya's tasks
-//     un-cancellable, only orphan-able.
-//   * a task body can't reach the pool: it gets a Sink (weak) and a token.
-//     There is no way for queued work to keep the runtime alive.
+//     of them.
+//   * shutdown is BOUNDED. A worker that doesn't return within the grace
+//     period is abandoned (detached) instead of blocking forever.
 //
-// Shutdown order (each step is a test in kernel_test):
-//   request stop → wake workers → join → drop queue.
-// Detached isolated threads are NOT joined: that's what makes them
-// isolated. They see stop_requested() and their sink returns false.
+// Lifetime, the part that makes abandoning safe:
+//   Everything a worker touches (the queue, the lock, the counters) lives
+//   in a shared `core` that each worker co-owns through a shared_ptr. The
+//   pool object holds one reference; each worker holds one. So an abandoned
+//   worker that finally returns after the pool is gone touches only memory
+//   it still owns. Without this, detaching would trade a hang for a
+//   use-after-free.
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <stop_token>
 #include <thread>
@@ -37,13 +43,15 @@ namespace jaal::kernel {
 
 class pool {
 public:
-    using job       = std::function<void(std::stop_token)>;
-    using error_fn  = std::function<void(std::exception_ptr)>;
+    using job      = std::function<void(std::stop_token)>;
+    using error_fn = std::function<void(std::exception_ptr)>;
 
     explicit pool(unsigned max_workers = 0, error_fn on_error = {})
-        : max_(max_workers ? max_workers
-                           : std::max(4u, std::thread::hardware_concurrency())),
-          on_error_(std::move(on_error)) {}
+        : c_(std::make_shared<core>()) {
+        c_->max = max_workers ? max_workers
+                              : std::max(4u, std::thread::hardware_concurrency());
+        c_->on_error = std::move(on_error);
+    }
 
     pool(const pool&)            = delete;
     pool& operator=(const pool&) = delete;
@@ -54,122 +62,152 @@ public:
     /// and we're under the cap.
     void post(job j) {
         {
-            std::lock_guard lk(m_);
-            if (stopping_) return;
-            queue_.push_back(std::move(j));
-            if (idle_ == 0 && workers_.size() < max_) spawn_worker();
+            std::lock_guard lk(c_->m);
+            if (c_->stopping) return;
+            c_->queue.push_back(std::move(j));
+            if (c_->idle == 0 && workers_.size() < c_->max) spawn_worker();
         }
-        cv_.notify_one();
+        c_->cv.notify_one();
     }
 
     /// Run on a thread of its own, detached. For work that may never return.
     void post_isolated(job j) {
         {
-            std::lock_guard lk(m_);
-            if (stopping_) return;
+            std::lock_guard lk(c_->m);
+            if (c_->stopping) return;
         }
         try {
-            std::jthread t([this, j = std::move(j)](std::stop_token st) mutable {
-                run_guarded(j, std::move(st));
+            // The thread co-owns the core, so it can report an error even
+            // if it outlives the pool.
+            std::jthread t([c = c_, j = std::move(j)](std::stop_token st) mutable {
+                run_guarded(*c, j, std::move(st));
             });
-            // Keep the stop_source so shutdown can ask it to stop, then
-            // detach: we never join it.
-            std::lock_guard lk(m_);
-            isolated_.push_back(t.get_stop_source());
+            std::lock_guard lk(c_->m);
+            c_->isolated.push_back(t.get_stop_source());
             t.detach();
         } catch (...) {
-            // The OS refused a thread (EAGAIN). Fall back to the pool
-            // rather than dropping the work.
-            post(std::move(j));
+            post(std::move(j));      // the OS refused a thread: use the pool
         }
     }
 
-    /// Ask every running task to stop, join the pool's workers, and refuse
-    /// new work. Safe to call twice. Isolated threads are asked to stop
-    /// but never joined.
-    void shutdown() {
-        std::vector<std::jthread> to_join;
+    /// Ask every running task to stop, wait up to `grace` for the pool's
+    /// workers to return, and refuse new work. Returns how many workers were
+    /// ABANDONED (still running after the grace; detached, safely, see the
+    /// lifetime note above). Safe to call twice. Isolated threads are asked
+    /// to stop but never waited for.
+    std::size_t shutdown(std::chrono::milliseconds grace = std::chrono::seconds(2)) {
+        std::vector<std::jthread> workers;
         {
-            std::lock_guard lk(m_);
-            if (stopping_) return;
-            stopping_ = true;
-            queue_.clear();
-            for (auto& s : isolated_) s.request_stop();
-            isolated_.clear();
-            to_join.swap(workers_);
+            std::lock_guard lk(c_->m);
+            if (c_->stopping) return 0;
+            c_->stopping = true;
+            c_->queue.clear();
+            for (auto& s : c_->isolated) s.request_stop();
+            c_->isolated.clear();
+            workers.swap(workers_);
         }
-        for (auto& w : to_join) w.request_stop();
-        cv_.notify_all();
-        to_join.clear();        // joins
+        for (auto& w : workers) w.request_stop();
+        c_->cv.notify_all();
+
+        // Wait for every worker to leave its loop, or for the grace to end.
+        const std::size_t n = workers.size();
+        bool all_out;
+        {
+            std::unique_lock lk(c_->m);
+            all_out = c_->exited_cv.wait_for(lk, grace, [&] { return c_->exited >= n; });
+        }
+        if (all_out) {
+            workers.clear();                 // every one has left: join is instant
+            return 0;
+        }
+        std::size_t abandoned;
+        {
+            std::lock_guard lk(c_->m);
+            abandoned = n - std::min(c_->exited, n);
+        }
+        // Some are stuck. Detach all: joining even the finished ones one by
+        // one would risk blocking on a stuck one first. They co-own `core`.
+        for (auto& w : workers) w.detach();
+        return abandoned;
     }
 
     [[nodiscard]] std::size_t worker_count() const {
-        std::lock_guard lk(m_);
+        std::lock_guard lk(c_->m);
         return workers_.size();
     }
 
     [[nodiscard]] std::size_t queued() const {
-        std::lock_guard lk(m_);
-        return queue_.size();
+        std::lock_guard lk(c_->m);
+        return c_->queue.size();
     }
 
 private:
-    void spawn_worker() {                       // call with m_ held
+    // Everything a worker touches. Co-owned by the pool and every worker.
+    struct core {
+        std::mutex                    m;
+        std::condition_variable       cv;
+        std::condition_variable       exited_cv;
+        std::deque<job>               queue;
+        std::vector<std::stop_source> isolated;
+        std::size_t                   idle     = 0;
+        std::size_t                   exited   = 0;
+        unsigned                      max      = 4;
+        bool                          stopping = false;
+        error_fn                      on_error;
+    };
+
+    void spawn_worker() {                           // call with c_->m held
         try {
-            workers_.emplace_back([this](std::stop_token st) { worker_loop(std::move(st)); });
+            workers_.emplace_back([c = c_](std::stop_token st) { worker_loop(c, std::move(st)); });
         } catch (...) {
-            // Can't spawn: existing workers will pick the job up. If there
-            // are none, the job waits until one exists. Never a crash.
+            // Can't spawn: existing workers pick the job up. Never a crash.
         }
     }
 
-    void worker_loop(std::stop_token st) {
-        // Defence in depth. shutdown() sets stopping_ under the lock and
-        // then notifies, so today that alone wakes every worker; this
-        // callback covers a stop requested by any OTHER path (a future
-        // caller, a per-worker stop) that doesn't notify. Verified: with
-        // this line removed the suite still passes, so it is not
-        // load-bearing for the current shutdown path.
-        std::stop_callback wake(st, [this] { cv_.notify_all(); });
+    static void worker_loop(std::shared_ptr<core> c, std::stop_token st) {
+        // A stop request made by any path must wake a worker asleep in
+        // wait(); shutdown() also notifies, this covers every other path.
+        std::stop_callback wake(st, [raw = c.get()] { raw->cv.notify_all(); });
         for (;;) {
             job j;
             {
-                std::unique_lock lk(m_);
-                ++idle_;
-                cv_.wait(lk, [&] { return stopping_ || st.stop_requested() || !queue_.empty(); });
-                --idle_;
-                if (stopping_ || st.stop_requested()) return;
-                j = std::move(queue_.front());
-                queue_.pop_front();
+                std::unique_lock lk(c->m);
+                ++c->idle;
+                c->cv.wait(lk, [&] { return c->stopping || st.stop_requested() || !c->queue.empty(); });
+                --c->idle;
+                if (c->stopping || st.stop_requested()) break;
+                j = std::move(c->queue.front());
+                c->queue.pop_front();
             }
-            run_guarded(j, st);
-            // j is destroyed HERE, outside the lock: its captures may own
-            // anything, and destroying them must not run under m_.
-            j = nullptr;
+            run_guarded(*c, j, st);
+            j = nullptr;                // destroy captures outside the lock
         }
+        {
+            std::lock_guard lk(c->m);
+            ++c->exited;
+        }
+        c->exited_cv.notify_all();
     }
 
-    void run_guarded(job& j, std::stop_token st) noexcept {
+    static void run_guarded(core& c, job& j, std::stop_token st) noexcept {
         try {
             j(std::move(st));
         } catch (...) {
-            if (on_error_) {
-                try { on_error_(std::current_exception()); } catch (...) {}
+            error_fn cb;
+            {
+                std::lock_guard lk(c.m);
+                cb = c.on_error;
             }
-            // Swallowed on purpose: a throwing task must not take the
-            // process down (agentty's isolated_thread learned this).
+            if (cb) {
+                try { cb(std::current_exception()); } catch (...) {}
+            }
+            // Never rethrown: a throwing task must not take the process
+            // down (agentty's isolated_thread learned this).
         }
     }
 
-    mutable std::mutex        m_;
-    std::condition_variable   cv_;
-    std::deque<job>           queue_;
+    std::shared_ptr<core>     c_;
     std::vector<std::jthread> workers_;
-    std::vector<std::stop_source> isolated_;
-    std::size_t               idle_     = 0;
-    unsigned                  max_      = 4;
-    bool                      stopping_ = false;
-    error_fn                  on_error_;
 };
 
 }  // namespace jaal::kernel

@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstddef>
 #include <deque>
+#include <exception>
 #include <expected>
 #include <forward_list>
 #include <functional>
@@ -115,6 +116,12 @@ template <> struct shape_of<std::nullptr_t>                { using type = value;
 // many threads at once (its operations are thread-safe by specification).
 // So it's Sendable. It is not Frozen: a stop request changes what it reports.
 template <> struct shape_of<std::stop_token> { using type = sync_handle; };
+
+// std::exception_ptr exists to carry an exception from one thread to
+// another (std::promise, std::rethrow_exception). Copying and destroying
+// one is thread-safe by specification ([propagation]). Same shape as
+// stop_token: Sendable, and not claimed Frozen.
+template <> struct shape_of<std::exception_ptr> { using type = sync_handle; };
 
 
 // ── shape queries, for policies and diagnostics ───────────────────────────

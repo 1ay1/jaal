@@ -55,6 +55,8 @@ static_assert(Sendable<std::expected<void, int>>);
 static_assert(Sendable<std::chrono::milliseconds>);
 static_assert(Sendable<std::chrono::steady_clock::time_point>);
 static_assert(Sendable<std::stop_token>);
+static_assert(Sendable<std::exception_ptr>);          // made to cross threads
+static_assert(Sendable<std::vector<std::exception_ptr>>);
 
 static_assert(!Sendable<std::string_view>);
 static_assert(!Sendable<std::span<int>>);

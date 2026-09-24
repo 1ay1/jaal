@@ -32,10 +32,13 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <stop_token>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -46,6 +49,8 @@
 #include "../core/program.hpp"
 #include "../core/sub.hpp"
 #include "../platform/clock.hpp"
+#include "fault.hpp"
+#include "guarded.hpp"
 #include "loop.hpp"
 #include "mailbox.hpp"
 #include "pool.hpp"
@@ -164,6 +169,17 @@ struct options {
     /// host's input and drawing. The rest carry over to the next step.
     std::size_t fold_budget = 4096;
     unsigned    max_workers = 0;  // 0 = max(4, hardware_concurrency)
+
+    /// What to do when program code throws (see kernel/fault.hpp).
+    fault_policy on_fault = fault_policy::stop;
+    /// Told about every fault, on the loop thread. Empty = one line to
+    /// stderr.
+    fault_handler faults;
+
+    /// How long finish() waits for pool workers to notice their stop token.
+    /// A worker still running after this is abandoned (detached) and
+    /// reported, instead of hanging shutdown forever.
+    std::chrono::milliseconds shutdown_grace{2000};
 };
 
 /// Marker for a host with no input events (a headless server, a test).
@@ -245,6 +261,8 @@ public:
         // 1. background messages, every turn, whether or not we were woken
         inbox_.drain(scratch_);
         for (auto& m : scratch_) pending_.push_back(std::move(m));
+        drain_task_faults();
+        if (quit_) { t.quit = true; t.exit_code = exit_code_; return t; }
 
         // 2. timers due now
         fired_.clear();
@@ -283,6 +301,9 @@ public:
     [[nodiscard]] bool quitting() const noexcept { return quit_; }
     [[nodiscard]] C& clock() noexcept { return clock_; }
 
+    /// Faults reported so far (update, subscribe, effect or task).
+    [[nodiscard]] std::uint64_t fault_count() const noexcept { return faults_; }
+
     /// Ordered shutdown, once. Consumes the kernel.
     int finish() && {
         shutdown();
@@ -290,15 +311,44 @@ public:
     }
 
 private:
+    // Task faults arrive from worker threads. They're queued here and
+    // reported from step(), on the loop thread, like every other fault.
+    // guarded<T>: the errors are only reachable under their lock (the
+    // banlist keeps raw mutexes out of the kernel; this is what it's for).
+    using task_fault_box = guarded<std::vector<std::exception_ptr>>;
+
     template <class H>
     kernel(H& host, model_type m, cmd_type init_cmd, C clock, options opt,
            std::function<void()> wake)
         : clock_(std::move(clock)),
           opt_(opt),
           model_(std::move(m)),
-          inbox_(std::move(wake)),
-          pool_(std::make_unique<pool>(opt.max_workers)) {
-        interpret(std::move(init_cmd), host);
+          inbox_(wake),
+          task_faults_(std::make_shared<task_fault_box>()),
+          pool_(std::make_unique<pool>(
+              opt.max_workers,
+              // Runs on a worker thread: just queue the error (under a lock)
+              // and wake the loop, which reports it on its own thread.
+              [box = task_faults_, wake](std::exception_ptr e) {
+                  box->with([&](auto& v) { v.push_back(std::move(e)); });
+                  if (wake) wake();
+              })) {
+        // `skip` promises the model survives a fault, which needs a copy
+        // taken before update(). A move-only model can't be copied, so a
+        // fault would lose it: that's `stop`, not `skip`. Say so instead of
+        // quietly weakening the promise.
+        if constexpr (!std::copy_constructible<model_type>) {
+            if (opt_.on_fault == fault_policy::skip)
+                report(fault{fault_site::update, nullptr,
+                             "fault_policy::skip needs a copyable Model; using stop",
+                             false, false});
+            opt_.on_fault = fault_policy::stop;
+        }
+        try {
+            interpret(std::move(init_cmd), host);
+        } catch (...) {
+            fault_raised(fault_site::effect, std::current_exception(), true);
+        }
         fold_pending(host);
         reconcile(host);
     }
@@ -318,13 +368,14 @@ private:
             std::size_t i = 0;
             for (; i < batch.size(); ++i) {
                 if (n >= opt_.fold_budget) break;
-                auto [m, c] = P::update(std::move(model_), std::move(batch[i]));
-                model_ = std::move(m);
-                changed = true;
-                subs_dirty_ = true;
                 ++n;
-                ++folds_;
-                interpret(std::move(c), host);
+                if (!fold_one(std::move(batch[i]), host)) {
+                    // The message faulted. Under `stop` the kernel is now
+                    // quitting; under `skip` it's dropped and we go on.
+                    if (quit_) { ++i; break; }
+                    continue;
+                }
+                changed = true;
                 if (quit_) {
                     // Rule 1: a quit stops the batch. Nothing after it runs
                     // its effects.
@@ -344,6 +395,74 @@ private:
             }
         }
         return changed;
+    }
+
+    // One message through update(), with fault containment. Returns false
+    // when it faulted (and was reported).
+    //
+    // The model is moved into update(). If update throws, that value is
+    // gone, so keeping the program's state means copying it FIRST. That
+    // copy is only made when it's needed: policy `skip` with a copyable
+    // model (the static_assert in the constructor rejects `skip` with a
+    // move-only model, where no copy is possible).
+    template <class H>
+    bool fold_one(msg_type msg, H& host) {
+        std::optional<model_type> saved;
+        if constexpr (std::copy_constructible<model_type>)
+            if (opt_.on_fault == fault_policy::skip) saved.emplace(model_);
+
+        cmd_type c;
+        try {
+            auto [m, cmd] = P::update(std::move(model_), std::move(msg));
+            model_ = std::move(m);
+            c      = std::move(cmd);
+        } catch (...) {
+            const bool kept = saved.has_value();
+            if (kept) model_ = std::move(*saved);
+            fault_raised(fault_site::update, std::current_exception(), kept);
+            return false;
+        }
+        subs_dirty_ = true;
+        ++folds_;
+        try {
+            interpret(std::move(c), host);
+        } catch (...) {
+            // update() succeeded; the model is its new value. An effect the
+            // host ran on the loop threw.
+            fault_raised(fault_site::effect, std::current_exception(), true);
+        }
+        return true;
+    }
+
+    // Report a fault and apply the policy.
+    void fault_raised(fault_site site, std::exception_ptr e, bool model_kept) {
+        const bool stop = opt_.on_fault == fault_policy::stop || !model_kept;
+        fault f{site, e, fault::describe(e), model_kept, stop};
+        ++faults_;
+        report(f);
+        if (stop) this->stop(fault_exit_code);
+    }
+
+    void report(const fault& f) noexcept {
+        try {
+            if (opt_.faults) {
+                opt_.faults(f);
+            } else {
+                std::fprintf(stderr, "jaal: fault in %.*s: %s%s\n",
+                             static_cast<int>(to_string(f.site).size()),
+                             to_string(f.site).data(), f.what.c_str(),
+                             f.stopping ? " (stopping)" : " (message dropped)");
+            }
+        } catch (...) {
+            // A throwing fault handler must not take the loop down.
+        }
+    }
+
+    void drain_task_faults() {
+        auto errs = task_faults_->with([](auto& v) { return std::exchange(v, {}); });
+        // A task fault doesn't touch the model, so the model is kept. The
+        // policy still applies: `stop` quits, `skip` carries on.
+        for (auto& e : errs) fault_raised(fault_site::task, e, true);
     }
 
     // ── effects ─────────────────────────────────────────────────────────
@@ -396,16 +515,29 @@ private:
     void reconcile(H& host) {
         if (!subs_dirty_) return;             // rule 3: only after a change
         subs_dirty_ = false;
-        routers_.clear();
 
-        auto next = run_subscribe<P>(model_);
-        sub_type widened = std::move(next);
-        auto plan = sources_.reconcile(widened, [&]<class R>(const R& r) {
+        // subscribe() is program code: it can throw. If it does, keep the
+        // subscriptions that are running (the last good set) rather than
+        // tearing them down on a bad model.
+        std::optional<sub_type> widened;
+        try {
+            widened.emplace(run_subscribe<P>(model_));
+        } catch (...) {
+            fault_raised(fault_site::subscribe, std::current_exception(), true);
+            return;
+        }
+
+        routers_.clear();
+        auto plan = sources_.reconcile(*widened, [&]<class R>(const R& r) {
             add_router(r);
         });
-        for (auto& s : plan.stop)  stop_source(s.k, host);
-        for (auto& s : plan.keep)  keep_source(s.k, s.p);
-        for (auto& s : plan.start) start_source(s.k, s.p, host);
+        try {
+            for (auto& s : plan.stop)  stop_source(s.k, host);
+            for (auto& s : plan.keep)  keep_source(s.k, s.p);
+            for (auto& s : plan.start) start_source(s.k, s.p, host);
+        } catch (...) {
+            fault_raised(fault_site::effect, std::current_exception(), true);
+        }
         duplicates_ += plan.duplicates.size();
     }
 
@@ -515,7 +647,15 @@ private:
         timers_.clear();
         routers_.clear();
         timer_of_.clear();
-        if (pool_) pool_->shutdown();
+        if (pool_) {
+            // Bounded: a task ignoring its stop token can't hang finish().
+            abandoned_ = pool_->shutdown(opt_.shutdown_grace);
+            if (abandoned_ != 0) {
+                std::string what = std::to_string(abandoned_)
+                    + " worker(s) still running after the shutdown grace; abandoned";
+                report(fault{fault_site::task, nullptr, std::move(what), true, true});
+            }
+        }
         inbox_.close();
     }
 
@@ -525,6 +665,7 @@ private:
     options             opt_;
     model_type          model_;
     inbox<msg_type>     inbox_;
+    std::shared_ptr<task_fault_box> task_faults_;
     std::unique_ptr<pool> pool_;
     timer_heap<C, msg_type> timers_;
     running_sources<msg_type, sub_row> sources_;
@@ -534,6 +675,8 @@ private:
     std::vector<msg_type> scratch_;
     std::vector<msg_type> fired_;
     std::uint64_t       folds_      = 0;
+    std::uint64_t       faults_     = 0;
+    std::size_t         abandoned_  = 0;
     std::size_t         duplicates_ = 0;
     int                 exit_code_  = 0;
     bool                quit_       = false;
