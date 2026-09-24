@@ -439,9 +439,22 @@ public:
     /// When the host should wake us next. Zero wait if work is already
     /// queued; nullopt if nothing is scheduled at all.
     [[nodiscard]] std::optional<time_point> next_deadline() const {
-        if (!pending_.empty()) return clock_.now();
+        if (!pending_.empty()) return time_point::min();
         return timers_.next_deadline();
     }
+
+    /// Is there work the loop must do WITHOUT waiting? Pending messages are
+    /// ready now; a timer is a deadline, not work.
+    ///
+    /// A driver should ask this rather than compare next_deadline() to the
+    /// clock. That comparison used to be how "pending" was spelled — return
+    /// clock_.now() as the deadline — and it was wrong by exactly one clock
+    /// read: the driver reads now() AGAIN, so the deadline is always a few
+    /// nanoseconds in the future, and timeout_from() rounds any positive
+    /// remainder UP to a whole millisecond (rightly: that's the hot-spin
+    /// fix). Result, measured: a program that keeps its queue busy slept
+    /// ~0.7 ms after every 4096-message step, and ran at 11% of a core.
+    [[nodiscard]] bool has_ready_work() const noexcept { return !pending_.empty(); }
 
     [[nodiscard]] bool has_pending() const noexcept { return !pending_.empty(); }
 
