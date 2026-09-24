@@ -153,6 +153,40 @@ public:
     [[nodiscard]] std::size_t size() const noexcept { return running_.size(); }
     [[nodiscard]] bool contains(const key& k) const { return find(running_, k) != nullptr; }
 
+    /// Would reconciling `next` change anything? Read-only: the running set
+    /// is untouched. Compares KEYS (which sources run), so it answers "is
+    /// the subscription set the same?" — the question a too-narrow subs_key
+    /// gets wrong. (Payloads aren't compared: a payload is a Msg, and Msg
+    /// needn't be equality-comparable.) Used by the debug check in
+    /// kernel::reconcile; not on any hot path.
+    [[nodiscard]] bool same_sources(const basic_sub<Msg, row_type>& next) const {
+        std::vector<key> seen;
+        std::vector<std::pair<key, std::uint32_t>> ords;
+        next.for_each([&]<class X>(const X& x) {
+            ([&] {
+                if constexpr (SourceDescriptor<Ds> && std::same_as<X, payload_t<Ds, Msg>>) {
+                    auto k = Ds::key(x);
+                    if constexpr (detail::rec::numbered_source<Ds>) {
+                        auto base = k;
+                        base.ordinal = 0;
+                        const key bk{tagged_key<Ds>{base}};
+                        std::uint32_t n = 0;
+                        bool found = false;
+                        for (auto& [ok, c] : ords)
+                            if (ok == bk) { n = c++; found = true; break; }
+                        if (!found) ords.emplace_back(bk, 1u);
+                        k.ordinal = n;
+                    }
+                    seen.push_back(key{tagged_key<Ds>{std::move(k)}});
+                }
+            }(), ...);
+        });
+        if (seen.size() != running_.size()) return false;
+        for (auto& k : seen)
+            if (!find(running_, k)) return false;
+        return true;
+    }
+
 private:
     struct entry { key k; payload p; };
 

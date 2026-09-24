@@ -306,6 +306,57 @@ concept HasVisualHash = requires(const typename P::Model& m) {
     { P::visual_hash(m) } -> std::convertible_to<std::uint64_t>;
 };
 
+/// Optional: the part of the model subscribe() depends on.
+///
+///   static auto subs_key(const Model& m) {
+///       return std::tuple{m.streaming, m.panel, m.timer_ms};
+///   }
+///
+/// subscribe() runs after EVERY model change, and re-running it means
+/// rebuilding the Sub and diffing it against what's running. But a model
+/// changes far more often than its subscriptions do — a keystroke edits the
+/// composer text; it doesn't open a panel or start a stream — so almost all
+/// of that work finds nothing to do. Measured: a program with ONE timer paid
+/// 71.7 ns per message against 24.1 with no subscribe at all; the difference
+/// is entirely the rebuild and diff.
+///
+/// With subs_key, the kernel compares the key against the last one and
+/// calls subscribe() only when it changed. The key is the program's own
+/// statement of "these are the fields subscribe() reads" — the same idea as
+/// visual_hash for view(), and agentty already structures its subscribe()
+/// that way (it reads a dozen fields of a 665-line model).
+///
+/// It's a VALUE, not a hash, on purpose: a hash can collide, and a collision
+/// here would silently keep a stale subscription (a timer that should have
+/// stopped, a router for a closed panel). Equality can't be wrong in that
+/// direction. Any equality-comparable, copyable type works: a tuple of the
+/// fields, a small struct, an int.
+///
+/// The rule that keeps it honest: subs_key must cover EVERYTHING subscribe()
+/// reads — including anything its routers CAPTURE. That second half is the
+/// one that bites. A router may capture the model freely (it's rebuilt on
+/// every subscribe, see core/router.hpp), so
+///
+///     Sub::on(on_key{}, [text = m.composer](const Key& k) { ... })
+///
+/// holds a COPY of m.composer. Skip the rebuild and that copy goes stale:
+/// the next key is routed against old text. So a field a router captures
+/// belongs in subs_key exactly as much as a field that decides which timers
+/// run. Leave one out and a change to it won't re-subscribe.
+///
+/// Debug builds check it: on every call the key says is unchanged, the
+/// kernel runs subscribe() anyway and asserts the result is equivalent
+/// (same sources, same payloads). So a key that's too narrow fails loudly
+/// in development instead of silently in production. The check can't see
+/// inside a router's captures (they're opaque callables), which is why the
+/// rule above is stated for them in words.
+template <class P>
+concept HasSubsKey = requires(const typename P::Model& m) {
+    { P::subs_key(m) };
+    requires std::equality_comparable<decltype(P::subs_key(m))>;
+    requires std::copyable<decltype(P::subs_key(m))>;
+};
+
 /// Optional: render once off-screen before the real frame (warm caches).
 template <class P>
 concept HasNeedsWarmup = requires(const typename P::Model& m) {

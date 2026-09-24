@@ -220,6 +220,18 @@ struct options {
     std::uint64_t random_seed = 0;
 };
 
+// Storage for the last subs_key, sized by the program. A trait rather than
+// std::conditional_t, because conditional_t names BOTH branches, and
+// decltype(P::subs_key(...)) doesn't exist for a program without one.
+template <class P>
+struct subs_key_slot { using type = std::monostate; };
+template <class P>
+    requires HasSubsKey<P>
+struct subs_key_slot<P> {
+    using type = std::optional<
+        std::remove_cvref_t<decltype(P::subs_key(std::declval<const typename P::Model&>()))>>;
+};
+
 /// Proof that a shutdown step is being taken by kernel::teardown, in order.
 /// Only teardown can make one, so kernel::finish() can't be called by hand:
 /// the kernel must go down LAST (signals off, host.release(), then it), and
@@ -758,6 +770,44 @@ private:
         if (!subs_dirty_) return;             // rule 3: only after a change
         subs_dirty_ = false;
 
+        // Rule 3, finer: after a change that can't affect subscriptions.
+        //
+        // A model changes far more often than its subscriptions do, and
+        // re-running subscribe() means rebuilding the Sub AND diffing it.
+        // Measured with one timer: 71.7 ns per message, against 24.1 with no
+        // subscribe at all — the whole difference is work that finds nothing
+        // to do. A program that declares subs_key (the fields subscribe()
+        // reads) lets the kernel skip it when those fields haven't moved.
+        if constexpr (HasSubsKey<P>) {
+          if (!subs_key_distrusted_) {
+            auto key = P::subs_key(model_);
+            if (subs_key_ && *subs_key_ == key) {
+#ifndef NDEBUG
+                // Debug: prove the key was wide enough. Run subscribe()
+                // anyway and check it would have changed nothing. A key
+                // that leaves out a field subscribe() reads fails HERE, the
+                // first time that field changes — in development, loudly —
+                // rather than as a timer that silently never stops. When
+                // it does fail, fall through and subscribe for real, NOW:
+                // the program keeps behaving correctly while the developer
+                // fixes the key, instead of carrying a stale set until some
+                // unrelated change happens to re-trigger it.
+                if (subs_key_covers_subscribe()) return;
+                // Proven too narrow. Stop using it for the rest of the run:
+                // every later change runs subscribe(), so the program stays
+                // correct (just without the saving) until the key is fixed.
+                subs_key_distrusted_ = true;
+                subs_key_.reset();
+#else
+                return;
+#endif
+            } else {
+                if (subs_key_) *subs_key_ = std::move(key);
+                else           subs_key_.emplace(std::move(key));
+            }
+          }
+        }
+
         // subscribe() is program code: it can throw. If it does, keep the
         // subscriptions that are running (the last good set) rather than
         // tearing them down on a bad model.
@@ -765,6 +815,10 @@ private:
         try {
             widened.emplace(prog::subscribe<P>(model_));
         } catch (...) {
+            // The key describes the model we FAILED to subscribe for, so it
+            // can't stand for the running set: forget it, and the next
+            // change retries subscribe() instead of skipping it.
+            if constexpr (HasSubsKey<P>) subs_key_.reset();
             fault_raised(fault_site::subscribe, std::current_exception(), true);
             return;
         }
@@ -789,6 +843,28 @@ private:
             emit_trace(e);
         }
     }
+
+#ifndef NDEBUG
+    // Debug only: subs_key said "unchanged", so subscribe() was about to be
+    // skipped. Run it anyway: true if the running sources would be the same
+    // (the key was wide enough). If not, report it as a subscribe fault
+    // naming the rule, and return false so the caller subscribes for real.
+    [[nodiscard]] bool subs_key_covers_subscribe() {
+        sub_type fresh;
+        try {
+            fresh = prog::subscribe<P>(model_);
+        } catch (...) {
+            return true;                      // subscribe()'s own faults surface on the real path
+        }
+        if (sources_.same_sources(fresh)) return true;
+        report(fault{fault_site::subscribe, nullptr,
+                     "subs_key() reported no change, but subscribe() now returns "
+                     "different sources: subs_key leaves out a field subscribe() "
+                     "reads. Add it to subs_key (see HasSubsKey in core/program.hpp).",
+                     false, false});
+        return false;
+    }
+#endif
 
     template <class R>
     void add_router(const R& r) {
@@ -1034,6 +1110,11 @@ private:
     std::size_t         duplicates_ = 0;
     std::optional<int>  exit_;           // set = quitting, with this code
     bool                subs_dirty_ = true;
+    // The last subs_key, when the program declares one. Empty = "no known
+    // key": the next change always runs subscribe().
+    [[no_unique_address]] typename subs_key_slot<P>::type subs_key_{};
+    // Debug: a subs_key once shown to be too narrow is never trusted again.
+    bool                subs_key_distrusted_ = false;
     bool                down_       = false;
 };
 

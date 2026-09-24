@@ -769,3 +769,53 @@ allocates nothing in a steady state.
 71 ns), because the work per source is now cache-friendly rather than a
 scan. At 256 timers: **186 us → 18 us, 10x.** `fold` is ~10 ns (was ~19 in
 the docs, and 68 ns before in-place update, D31).
+
+## D38. `subs_key`: subscribe() runs only when what it reads has changed
+
+**Decision.** A program may declare `static auto subs_key(const Model&)` —
+the fields `subscribe()` reads. After a model change the kernel compares it
+with the last key and calls `subscribe()` only if it moved. Optional; a
+program without it behaves exactly as before.
+
+**Why.** A model changes far more often than its subscriptions. A keystroke
+edits the composer text; it doesn't open a panel or start a stream. But
+every model change re-ran `subscribe()`, rebuilding the Sub and diffing it
+against the running set — and almost always finding nothing to do.
+Measured, one timer, real clock:
+
+| | ns/msg |
+|---|---|
+| `subscribe()` after every change | 78.8 |
+| with `subs_key` | **28.2** |
+| no `subscribe()` at all (the ceiling) | 23.7 |
+
+2.8x, and within 4.5 ns of a program with no subscriptions. The profiling
+that led here: `subscribe()` itself cost 0.0 ns (inlined away) and each part
+of the diff was ~1 ns, so no micro-optimisation of the diff could have
+closed a 55 ns gap. The only win was not doing the work.
+
+**Why a key and not a hash.** A hash can collide, and a collision here keeps
+a STALE subscription running — a timer that should have stopped, a router
+for a closed panel — silently. Equality can't be wrong in that direction.
+It's the same shape agentty's `subscribe()` already has: it reads about a
+dozen fields of a 665-line model.
+
+**The rule, and the part that bites.** `subs_key` must cover everything
+`subscribe()` reads, *including anything a router captures*. Routers may
+capture the model freely because they're rebuilt on every subscribe; skip
+the rebuild and a captured copy goes stale.
+
+**How it stays honest.** Debug builds, on every call the key says is
+unchanged, run `subscribe()` anyway and check the running sources would be
+the same. A too-narrow key is reported as a subscribe fault naming the rule
+("subs_key leaves out a field subscribe() reads"), the kernel re-subscribes
+for real on the spot, and the key is distrusted for the rest of the run — so
+the program stays correct while the developer fixes it. Release trusts the
+key; that's the point of it. The check compares source KEYS, not payloads
+(a payload holds a Msg, which needn't be equality-comparable), and can't see
+inside a router's captures — which is why that half of the rule is stated in
+words.
+
+`tests/kernel/subs_key_test.cpp` covers the skip, a key change still
+starting and stopping timers, the too-narrow key being caught, and a
+program without `subs_key` being unaffected. It passes in debug and release.
