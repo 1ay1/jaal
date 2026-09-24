@@ -127,6 +127,26 @@ struct Nested {
     // CSubmit: no handler, and ComposerMsg didn't opt into group handling
 };
 jaal::headless<Nested> h;
+#elif JAAL_CASE == 9
+// a host effect that answers with something that isn't the program's Msg:
+// named, rather than a wall of std::optional template errors.
+struct Ping {};
+using ping = jaal::pure_fx<Ping, "ping">;
+struct Pinger {
+    struct Model { int n = 0; };
+    struct Go {};
+    using Msg = std::variant<Go>;
+    using Cmd = jaal::Cmd<Msg, ping>;
+    static Cmd update(Model&, Go) { return Cmd(Ping{}); }
+};
+struct bad_host { std::string handle(Ping) { return "pong"; } };
+void f() {
+    bad_host h;
+    auto k = jaal::kernel::kernel<Pinger, jaal::kernel::no_events,
+                                  jaal::platform::sim_clock>::start(h);
+    k.dispatch(Pinger::Go{});
+    k.step(h);
+}
 #else
 #  error "unknown JAAL_CASE"
 #endif

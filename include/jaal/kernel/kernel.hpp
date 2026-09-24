@@ -808,10 +808,25 @@ private:
     }
 
     template <class H, class X>
-    static void call_handle(H& host, X&& x) {
-        if constexpr (requires { host.handle(std::forward<X>(x)); })
-            host.handle(std::forward<X>(x));
-        else
+    void call_handle(H& host, X&& x) {
+        // A host effect may ANSWER: handle() returning a Msg (or an
+        // optional one) has it folded in this step, in the order the
+        // effects were returned — exactly like send/now/random. This is
+        // how an effect that must run on the loop thread and produce a
+        // result (a terminal handing the tty to a child process and
+        // reporting how it exited) stays a value, not a callback.
+        if constexpr (requires { host.handle(std::forward<X>(x)); }) {
+            using R = decltype(host.handle(std::forward<X>(x)));
+            if constexpr (std::is_void_v<R>) {
+                host.handle(std::forward<X>(x));
+            } else {
+                static_assert(std::is_convertible_v<R, std::optional<msg_type>>,
+                              "jaal: a host handle() that returns something must "
+                              "return the program's Msg (or std::optional<Msg>)");
+                std::optional<msg_type> answer = host.handle(std::forward<X>(x));
+                if (answer) pending_.push_back({0, std::move(*answer)});
+            }
+        } else
             static_assert(sizeof(X) == 0, "jaal: host has no handle() for this effect");
     }
 

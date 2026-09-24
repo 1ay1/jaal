@@ -265,6 +265,26 @@ error: static assertion failed: jaal: host 'my_host' cannot run effect
 That check is `HostFor<H, P>`, and it's what keeps "works on the terminal,
 crashes on the web" from being possible.
 
+**An effect can answer.** Some effects have to run on the loop thread and
+produce a result, for example handing the tty to an interactive child
+(`sudo`, `$EDITOR`) and reporting how it exited. Return the Msg from
+`handle()`, or a `std::optional<Msg>` when there may be no answer:
+
+```cpp
+struct RunChild { std::string cmd; };
+using run_child = jaal::pure_fx<RunChild, "run_child">;
+
+std::optional<Msg> handle(RunChild r) {
+    const int code = suspend_and_run(r.cmd);      // blocks: the user is in the child
+    return ChildExited{code};
+}
+```
+
+The answer is folded in the same step, in the order the effects were
+returned, just like `Cmd::send`. The effect is still a value; there's no
+callback for the program to capture. Returning anything that isn't the
+program's Msg is a compile error that names the rule. (D39)
+
 Long-running host work (watching a directory, a socket pump) is a **source**
 instead, with `start_source`/`stop_source`, so the reconciler starts and
 stops it as the program subscribes and unsubscribes.

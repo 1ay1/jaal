@@ -819,3 +819,41 @@ words.
 `tests/kernel/subs_key_test.cpp` covers the skip, a key change still
 starting and stopping timers, the too-narrow key being caught, and a
 program without `subs_key` being unaffected. It passes in debug and release.
+
+## D39. A host effect may answer with a Msg
+
+**Decision.** A host's `handle(effect)` may return the program's `Msg` (or
+`std::optional<Msg>`) instead of `void`. The kernel folds the answer in the
+same step, in the order the effects were returned, the same way it handles
+`send`, `now` and `random`. A `void` handle() is unchanged. A handle()
+that returns anything else is a compile error that names the rule.
+
+**Why.** Moving agentty onto jaal turned up one effect that doesn't fit
+"describe it and forget it": running a code block on the real tty. The
+terminal is torn down, the child (sudo, an editor, a pager) gets the tty,
+the user interacts with it, and the program needs to know how it exited.
+maya spells that `Cmd::suspend(std::function<Msg()>)`, a callback the
+runtime calls on the UI thread. Putting a callback in an effect gives up
+what D2 and D23 rely on: an effect as data that a test host can record and
+a replay can skip.
+
+The other options were worse:
+
+- A task can't do it: it runs off the loop, and the tty is the loop's.
+- A source can't do it either: it's long-lived and keyed, and this is a
+  single blocking call.
+- `Cmd::now` already has a loop-thread callback, but it's for pure mappers.
+  Running a child process inside one would hide an effect inside a map.
+
+Answering keeps the effect a value (`RunChild{cmd}`) and the result a
+message (`ChildExited{code}`), so the model sees the result the same way it
+sees everything else. A replay folds `ChildExited` like any other message
+and never runs the child again (D23). A headless host records `RunChild` and
+doesn't answer, so a test sends `ChildExited` itself.
+
+**Scope.** The answer is folded in this step, so a host effect can't
+answer twice or answer later. Anything asynchronous is still a task or a
+source. `tests/kernel/answer_test.cpp` pins the ordering
+(`send`, answer, `send`) and shows that an unanswering and an answering
+effect can live on one host. A mutation that drops the answer fails it.
+`compile_fail.host_answer_not_msg` pins the diagnostic.

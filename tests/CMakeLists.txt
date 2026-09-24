@@ -55,6 +55,7 @@ jaal_test(kernel_mailbox_race_test kernel/mailbox_race_test.cpp)
 jaal_test(kernel_fault_test kernel/fault_test.cpp)
 jaal_test(kernel_mailbox_bound_test kernel/mailbox_bound_test.cpp)
 jaal_test(kernel_features_test kernel/features_test.cpp)
+jaal_test(kernel_answer_test kernel/answer_test.cpp)
 jaal_test(kernel_sim_test kernel/sim_test.cpp)
 jaal_test(kernel_timeline_test kernel/timeline_test.cpp)
 jaal_test(kernel_given_test kernel/given_test.cpp)
@@ -153,6 +154,9 @@ jaal_compile_fail(NAME program_missing_leaf_in_group SOURCE compile_fail/kernel.
                   MATCH "has no update for message '[^']*CSubmit' \\(reached as .*CEnter.*-> .*CSubmit\\)")
 jaal_compile_fail(NAME teardown_key_not_forgeable SOURCE compile_fail/kernel.cpp CASE 7
                   MATCH "(private|calling a private constructor|is private)")
+# a host effect that answers must answer with the program's Msg
+jaal_compile_fail(NAME host_answer_not_msg SOURCE compile_fail/kernel.cpp CASE 9
+                  MATCH "jaal: a host handle\\(\\) that returns something must return the program's Msg")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering
