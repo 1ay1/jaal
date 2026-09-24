@@ -26,6 +26,10 @@ endfunction()
 jaal_static_test(meta_list_test meta/list_test.cpp)
 jaal_static_test(core_sendable_test core/sendable_test.cpp)
 
+# Frozen/shared have static checks AND runtime behaviour (lifetime, many
+# readers), so they're a normal test: build, then run.
+jaal_test(core_frozen_test core/frozen_test.cpp)
+
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)
 jaal_compile_fail(NAME meta_concat_nonlist SOURCE compile_fail/meta.cpp CASE 2)
@@ -44,6 +48,22 @@ jaal_compile_fail(NAME sendable_shared_mut    SOURCE compile_fail/sendable.cpp C
                   MATCH "shared ownership of data another thread can change")
 jaal_compile_fail(NAME sendable_opaque        SOURCE compile_fail/sendable.cpp CASE 4
                   MATCH "specialise jaal::sendable_opt_in")
+
+# Frozen / shared<T>
+jaal_compile_fail(NAME frozen_mutable     SOURCE compile_fail/frozen.cpp CASE 1
+                  MATCH "is not Frozen: it has a `mutable` field of type 'int'")
+jaal_compile_fail(NAME frozen_unique      SOURCE compile_fail/frozen.cpp CASE 2
+                  MATCH "is not Frozen: it contains '[^']*unique_ptr[^']*', a pointer-like owner")
+jaal_compile_fail(NAME frozen_view        SOURCE compile_fail/frozen.cpp CASE 3
+                  MATCH "is not Sendable: it contains '[^']*string_view[^']*', a view")
+# These three are ordinary type errors, not jaal diagnostics, but each is
+# pinned to the reason anyway so a typo can't make them "pass".
+jaal_compile_fail(NAME shared_no_write    SOURCE compile_fail/frozen.cpp CASE 4
+                  MATCH "const std::(__cxx11::)?(basic_)?string")
+jaal_compile_fail(NAME shared_no_null     SOURCE compile_fail/frozen.cpp CASE 5
+                  MATCH "shared<Doc>::shared\\(\\)|no matching constructor")
+jaal_compile_fail(NAME shared_no_rawptr   SOURCE compile_fail/frozen.cpp CASE 6
+                  MATCH "const Doc ?\\*")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering
