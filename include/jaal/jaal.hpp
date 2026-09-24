@@ -13,6 +13,7 @@
 
 #include "core/cmd.hpp"
 #include "core/core_fx.hpp"
+#include "core/diff.hpp"
 #include "core/effect.hpp"
 #include "core/frozen.hpp"
 #include "core/fx.hpp"
@@ -33,6 +34,7 @@
 #include "kernel/replay.hpp"
 #include "kernel/run.hpp"
 #include "kernel/scope.hpp"
+#include "kernel/timeline.hpp"
 #include "kernel/trace.hpp"
 #include "host/headless.hpp"
 #include "host/sim.hpp"

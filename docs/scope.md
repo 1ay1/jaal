@@ -126,6 +126,14 @@ The conformance suite runs the same checks against every reactor backend.
   run, on every platform (the RNG is jaal's own, not `<random>`'s).
   Task bodies run on the loop thread; stream bodies don't run at all, the
   test feeds a stream through `stream(key)`.
+- `timeline<P>`: walk a recorded run (a sim failure's messages, or a
+  `recording`) like a video. `at(step)` is the model after that many
+  messages, `message(step)` is what caused it, `changes(step)` is a field
+  diff. `first_bad(pred)` finds the first step that breaks a check;
+  `bisect(pred)` does it in O(log n) checks for properties that stay bad.
+  Snapshots every 64 steps, so any jump folds at most 63 messages.
+- `diff(a, b)`: which fields of two structs differ, printed with
+  `std::format` where possible. Fields are named by position (`.2.1`).
 - `kernel::executor<Msg>`: where task and stream bodies run. The kernel
   asks the host for one (`make_executor`) and falls back to the real pool.
 - `scripts/check.sh`: gcc, clang, ASan, TSan, and Windows under wine.
@@ -175,7 +183,6 @@ These are **deliberate** — each one is someone else's job or a later layer.
 - **A real run on macOS**, and on Windows outside wine.
 - **Simulated I/O** (sockets, files) for the sim, once there are I/O
   effects in a library to simulate.
-- **A time-travel debugger** over recorded runs (step, diff, bisect).
 - **Fuzzing** of the reconciler, timer heap and routing.
 - **A user guide** (the README has a tour; there's no step-by-step guide).
 - **maya as a jaal host**, then agentty on top.

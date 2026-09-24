@@ -83,6 +83,14 @@ The same seed breaks the same way every time, on every platform, and
 `r.failure->messages` replays through `jaal::replay`. A run takes about a
 microsecond, so hundreds of thousands of seeds a second.
 
+Then walk the failing run step by step:
+
+```cpp
+jaal::timeline<Search> t(r.failure->messages);
+auto step = t.first_bad([](const Model& m) { return m.shown >= m.query || m.shown == 0; });
+puts(jaal::to_string(t.changes(*step)).c_str());   // ".1: 2 -> 1"
+```
+
 ## Building
 
 Needs GCC 16 or clang 22 (C++26), CMake 3.29+, Ninja.
