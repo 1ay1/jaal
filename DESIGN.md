@@ -366,23 +366,12 @@ private:
 
 ### 3.7 Sendable
 
-A Msg crosses threads, so it shouldn't carry borrowed pointers into memory
-that may be gone by the time it arrives.
-
-```cpp
-template <class T> inline constexpr bool sendable_v = /* default true */;
-template <class T> inline constexpr bool sendable_v<T*> = false;
-template <class T> inline constexpr bool sendable_v<std::span<T>> = false;
-template <>        inline constexpr bool sendable_v<std::string_view> = false;
-// variants, optionals, pairs, tuples, vectors: sendable if their parts are
-
-template <class T>
-concept Sendable = std::movable<T> && !std::is_reference_v<T> && sendable_v<T>;
-```
-
-What C++ can't prove: it can't look inside an arbitrary struct. A struct
-holding a `string_view` member passes. This is a lint that catches the common
-cases, not a proof like Rust's `Send`. Types can opt out explicitly.
+A Msg crosses threads, so it must not carry anything borrowed. `Sendable` is
+deep: it looks inside aggregate structs field by field using C++26
+structured binding packs, so a `string_view` hidden in a nested struct is
+rejected. Full rules, the `Frozen` / `shared<T>` types for sharing
+immutable data, and the opt-in for classes jaal can't look inside are in
+[CONCURRENCY.md](CONCURRENCY.md) section 4.
 
 ### 3.8 Errors
 
@@ -401,6 +390,10 @@ No exceptions cross the platform boundary. Every platform call returns
 `result<T>`. Failures that reach the app arrive as Msgs.
 
 ## 4. kernel: the loop as a value
+
+Concurrency and memory safety for everything in this section (Sink, tasks,
+the mailbox, `loop_bound`, `scope`, `guarded`) is designed in detail in
+[CONCURRENCY.md](CONCURRENCY.md), starting from what maya does today.
 
 ### 4.1 Shape
 
@@ -499,25 +492,34 @@ concept handles = requires(H& h, typename D::template type<Msg> e, context<Msg>&
 
 ### 4.5 Worker pool and tasks
 
-maya's `BackgroundQueue`, with cancellation added.
+maya's `BackgroundQueue`, with cancellation added, and with captures
+removed from task bodies.
 
 ```cpp
-namespace jaal::fx {
-struct task {
-    template <class Msg> struct type {
-        move_only_function<void(Sink<Msg>, std::stop_token)> run;
-    };
-};
-}
+// in update: a captureless body, plus the values it needs, moved in
+return fx::task<Msg>(path, [](Sink<Msg> out, std::stop_token st, std::string path) {
+    out.send(Loaded{read_file(path, st)});
+});
 ```
 
+- The body must be captureless (checked by conversion to a function
+  pointer), and every argument must be `Sendable`. So a task owns all its
+  inputs and can't hold `this`, the model, a raw pointer or the mailbox.
+  Why, and the one hole left (globals), are in CONCURRENCY.md 4.6.
+- Internally the body and its arguments are stored together, type-erased
+  once, in the effect. The erasure is jaal's, not the user's, so nothing
+  unchecked goes in.
 - Workers start lazily, up to `max(4, hardware_concurrency)`, and live for
   the process, so bursts reuse warm threads.
 - Each task gets a `std::stop_token`. It's triggered when the kernel shuts
   down, or when the source that spawned it is removed from the subscription.
 - `isolated_task` gets its own detached thread, so a hung syscall leaks one
   thread instead of blocking the pool. If the OS refuses a new thread, it
-  falls back to the pool.
+  falls back to the pool. Since the body owns all its inputs, a detached
+  thread has nothing borrowed to outlive.
+- Every thread body is wrapped so an exception can't reach
+  `std::terminate`. It's reported as an error Msg instead (the approach of
+  agentty's `isolated_thread`).
 - A task sees only its `Sink` and its stop token, never the kernel.
 
 ### 4.6 Mailbox
@@ -871,6 +873,7 @@ jaal/
 ├── CMakeLists.txt
 ├── CMakePresets.json             dev, release, asan, tsan, sim, mingw-cross
 ├── DESIGN.md                     this file
+├── CONCURRENCY.md                memory and concurrency safety, from maya's code up
 ├── README.md
 ├── LICENSE                       MIT
 ├── cmake/
@@ -894,7 +897,8 @@ jaal/
 │   │   ├── cmd.hpp               Cmd<Msg, Row>
 │   │   ├── sub.hpp               Sub<Msg, Row>, Router, Source, any_key
 │   │   ├── sink.hpp              Sink<Msg>
-│   │   ├── sendable.hpp          Sendable
+│   │   ├── sendable.hpp          deep Sendable (structured binding packs), opt-in
+│   │   ├── frozen.hpp            Frozen, shared<T>
 │   │   ├── error.hpp             error, result<T>
 │   │   └── fx/                   the core effect and source descriptors
 │   │       ├── quit.hpp
@@ -910,6 +914,9 @@ jaal/
 │   │   ├── timer_heap.hpp        4-ary heap with stable handles
 │   │   ├── mailbox.hpp           MPSC queue + waker protocol
 │   │   ├── pool.hpp              worker pool, stop tokens
+│   │   ├── loop.hpp              loop_token, loop_bound<T>
+│   │   ├── scope.hpp             scope + nursery (structured concurrency)
+│   │   ├── guarded.hpp           guarded<T>
 │   │   └── run.hpp               the generic run<P>(host) loop
 │   │
 │   ├── platform/
