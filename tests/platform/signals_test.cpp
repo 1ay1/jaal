@@ -19,18 +19,18 @@
 
 using namespace std::chrono_literals;
 namespace pf = jaal::platform;
-using pf::signal;
+using pf::sig;
 using pf::signal_set;
 
 // ── signal_set is a plain value ─────────────────────────────────────────
 static_assert(signal_set{}.empty());
-static_assert(signal_set{signal::resize}.contains(signal::resize));
-static_assert(!signal_set{signal::resize}.contains(signal::interrupt));
-static_assert((signal_set{signal::resize} | signal_set{signal::hangup})
-              == signal_set{signal::hangup, signal::resize});
+static_assert(signal_set{sig::resize}.contains(sig::resize));
+static_assert(!signal_set{sig::resize}.contains(sig::interrupt));
+static_assert((signal_set{sig::resize} | signal_set{sig::hangup})
+              == signal_set{sig::hangup, sig::resize});
 static_assert(signal_set::from_bits(0xFF).bits() == 0x1F);    // unknown bits dropped
 constexpr int count(signal_set s) { int n = 0; for (auto x : s) { (void)x; ++n; } return n; }
-static_assert(count(signal_set{signal::interrupt, signal::child}) == 2);
+static_assert(count(signal_set{sig::interrupt, sig::child}) == 2);
 static_assert(count(signal_set{}) == 0);
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -45,22 +45,22 @@ bool wait_readable(int fd, std::chrono::milliseconds t) {
 }
 
 int basic() {
-    auto s = pf::posix_signals::install({signal::resize, signal::child}).value();
-    if (s.watching() != signal_set{signal::resize, signal::child}) return 1;
+    auto s = pf::posix_signals::install({sig::resize, sig::child}).value();
+    if (s.watching() != signal_set{sig::resize, sig::child}) return 1;
     if (!s.take().empty()) return 2;
 
     ::raise(SIGWINCH);
     if (!wait_readable(s.handle(), 1s)) return 3;       // wakes the reactor
     auto got = s.take();
-    if (got != signal_set{signal::resize}) return 4;
+    if (got != signal_set{sig::resize}) return 4;
     if (!s.take().empty()) return 5;                    // taken once
     return 0;
 }
 
 int coalesces() {
-    auto s = pf::posix_signals::install({signal::resize}).value();
+    auto s = pf::posix_signals::install({sig::resize}).value();
     for (int i = 0; i < 50; ++i) ::raise(SIGWINCH);
-    if (s.take() != signal_set{signal::resize}) return 11;    // 50 raises, one event
+    if (s.take() != signal_set{sig::resize}) return 11;    // 50 raises, one event
     if (wait_readable(s.handle(), 0ms)) return 12;            // and the pipe is drained
     return 0;
 }
@@ -68,15 +68,15 @@ int coalesces() {
 int two_sources_both_see_it() {
     // Two independent installers (say, two kernels) each get every signal
     // they asked for. One doesn't consume the other's.
-    auto a = pf::posix_signals::install({signal::resize}).value();
-    auto b = pf::posix_signals::install({signal::resize, signal::child}).value();
+    auto a = pf::posix_signals::install({sig::resize}).value();
+    auto b = pf::posix_signals::install({sig::resize, sig::child}).value();
     ::raise(SIGWINCH);
-    if (a.take() != signal_set{signal::resize}) return 21;
-    if (b.take() != signal_set{signal::resize}) return 22;
+    if (a.take() != signal_set{sig::resize}) return 21;
+    if (b.take() != signal_set{sig::resize}) return 22;
     // a didn't ask for child: it doesn't get it
     ::raise(SIGCHLD);
     if (!a.take().empty()) return 23;
-    if (b.take() != signal_set{signal::child}) return 24;
+    if (b.take() != signal_set{sig::child}) return 24;
     return 0;
 }
 
@@ -91,13 +91,13 @@ int restores_previous_handler() {
     sigemptyset(&sa.sa_mask);
     ::sigaction(SIGWINCH, &sa, &old);
     {
-        auto s1 = pf::posix_signals::install({signal::resize}).value();
+        auto s1 = pf::posix_signals::install({sig::resize}).value();
         {
-            auto s2 = pf::posix_signals::install({signal::resize}).value();
+            auto s2 = pf::posix_signals::install({sig::resize}).value();
         }                                                // s1 still installed
         ::raise(SIGWINCH);
         if (app_handler_calls != 0) return 31;           // jaal's handler is in place
-        if (s1.take() != signal_set{signal::resize}) return 32;
+        if (s1.take() != signal_set{sig::resize}) return 32;
     }                                                    // last one gone
     ::raise(SIGWINCH);
     if (app_handler_calls != 1) return 33;               // the app's handler is back
@@ -112,9 +112,9 @@ int respects_inherited_ignore() {
     sigemptyset(&ign.sa_mask);
     ::sigaction(SIGHUP, &ign, &old);
     {
-        auto s = pf::posix_signals::install({signal::hangup, signal::resize}).value();
-        if (s.watching().contains(signal::hangup)) return 41;   // left ignored
-        if (!s.watching().contains(signal::resize)) return 42;
+        auto s = pf::posix_signals::install({sig::hangup, sig::resize}).value();
+        if (s.watching().contains(sig::hangup)) return 41;   // left ignored
+        if (!s.watching().contains(sig::resize)) return 42;
         struct sigaction cur {};
         ::sigaction(SIGHUP, nullptr, &cur);
         if (cur.sa_handler != SIG_IGN) return 43;
@@ -142,7 +142,7 @@ int teardown_under_fire() {
     long stray = 0;
     for (int i = 0; i < 400; ++i) {
         {
-            auto s = pf::posix_signals::install({signal::resize}).value();
+            auto s = pf::posix_signals::install({sig::resize}).value();
             std::this_thread::yield();
         }                                                // teardown under fire
         int q[2];
@@ -203,39 +203,39 @@ bool wait_signalled(void* h, std::chrono::milliseconds t) {
 
 int win_basic() {
     auto s = pf::console_signals::install(
-        {signal::interrupt, signal::hangup, signal::resize}).value();
+        {sig::interrupt, sig::hangup, sig::resize}).value();
     // resize isn't a console control event: honestly left out
-    if (s.watching() != signal_set{signal::interrupt, signal::hangup}) return 201;
+    if (s.watching() != signal_set{sig::interrupt, sig::hangup}) return 201;
     if (!s.take().empty()) return 202;
 
     // delivered on another thread, as Windows does
     std::jthread t([] { pf::test::console_ctrl(CTRL_C_EVENT); });
     t.join();
     if (!wait_signalled(s.handle(), 1s)) return 203;
-    if (s.take() != signal_set{signal::interrupt}) return 204;
+    if (s.take() != signal_set{sig::interrupt}) return 204;
     if (wait_signalled(s.handle(), 0ms)) return 205;     // event reset by take()
     return 0;
 }
 
 int win_mapping_and_coalesce() {
     auto s = pf::console_signals::install(
-        {signal::interrupt, signal::terminate, signal::hangup}).value();
+        {sig::interrupt, sig::terminate, sig::hangup}).value();
     for (int i = 0; i < 20; ++i) pf::test::console_ctrl(CTRL_BREAK_EVENT);
     pf::test::console_ctrl(CTRL_SHUTDOWN_EVENT);
     pf::test::console_ctrl(CTRL_CLOSE_EVENT);
-    if (s.take() != signal_set{signal::interrupt, signal::terminate, signal::hangup}) return 211;
+    if (s.take() != signal_set{sig::interrupt, sig::terminate, sig::hangup}) return 211;
     return 0;
 }
 
 int win_two_sources() {
-    auto a = pf::console_signals::install({signal::interrupt}).value();
-    auto b = pf::console_signals::install({signal::interrupt, signal::hangup}).value();
+    auto a = pf::console_signals::install({sig::interrupt}).value();
+    auto b = pf::console_signals::install({sig::interrupt, sig::hangup}).value();
     pf::test::console_ctrl(CTRL_C_EVENT);
-    if (a.take() != signal_set{signal::interrupt}) return 221;
-    if (b.take() != signal_set{signal::interrupt}) return 222;
+    if (a.take() != signal_set{sig::interrupt}) return 221;
+    if (b.take() != signal_set{sig::interrupt}) return 222;
     pf::test::console_ctrl(CTRL_CLOSE_EVENT);
     if (!a.take().empty()) return 223;
-    if (b.take() != signal_set{signal::hangup}) return 224;
+    if (b.take() != signal_set{sig::hangup}) return 224;
     return 0;
 }
 

@@ -7,7 +7,7 @@
 // thread, like any other event. All the async-signal-safety reasoning lives
 // in one place: the backend.
 //
-//   auto sigs = native_signals::install({signal::interrupt, signal::resize}).value();
+//   auto sigs = native_signals::install({sig::interrupt, sig::resize}).value();
 //   auto reg  = reactor.watch(sigs.handle(), interest::read, kSigToken).value();
 //   ... wait ...
 //   for (auto s : sigs.take()) { ... }
@@ -26,7 +26,7 @@
 
 namespace jaal::platform {
 
-enum class signal : std::uint8_t {
+enum class sig : std::uint8_t {
     interrupt,   // Ctrl+C              SIGINT   / CTRL_C_EVENT, CTRL_BREAK_EVENT
     terminate,   // asked to stop       SIGTERM  / CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT
     hangup,      // terminal went away  SIGHUP   / CTRL_CLOSE_EVENT
@@ -39,7 +39,7 @@ inline constexpr unsigned signal_count = 5;
 class signal_set {
 public:
     constexpr signal_set() noexcept = default;
-    constexpr signal_set(std::initializer_list<signal> l) noexcept {
+    constexpr signal_set(std::initializer_list<sig> l) noexcept {
         for (auto s : l) add(s);
     }
     static constexpr signal_set from_bits(std::uint8_t b) noexcept {
@@ -48,9 +48,9 @@ public:
         return s;
     }
 
-    constexpr void add(signal s) noexcept    { bits_ |= bit(s); }
-    constexpr void remove(signal s) noexcept { bits_ &= static_cast<std::uint8_t>(~bit(s)); }
-    [[nodiscard]] constexpr bool contains(signal s) const noexcept { return (bits_ & bit(s)) != 0; }
+    constexpr void add(sig s) noexcept    { bits_ |= bit(s); }
+    constexpr void remove(sig s) noexcept { bits_ &= static_cast<std::uint8_t>(~bit(s)); }
+    [[nodiscard]] constexpr bool contains(sig s) const noexcept { return (bits_ & bit(s)) != 0; }
     [[nodiscard]] constexpr bool empty() const noexcept { return bits_ == 0; }
     [[nodiscard]] constexpr std::uint8_t bits() const noexcept { return bits_; }
 
@@ -61,7 +61,7 @@ public:
     // Iterate the signals in the set: for (signal s : set) ...
     class iterator {
     public:
-        constexpr signal operator*() const noexcept { return static_cast<signal>(i_); }
+        constexpr sig operator*() const noexcept { return static_cast<sig>(i_); }
         constexpr iterator& operator++() noexcept { i_ = next(bits_, i_ + 1); return *this; }
         constexpr bool operator==(const iterator&) const noexcept = default;
     private:
@@ -78,7 +78,7 @@ public:
     [[nodiscard]] constexpr iterator end() const noexcept   { return {bits_, signal_count}; }
 
 private:
-    static constexpr std::uint8_t bit(signal s) noexcept {
+    static constexpr std::uint8_t bit(sig s) noexcept {
         return static_cast<std::uint8_t>(1u << static_cast<unsigned>(s));
     }
     static constexpr std::uint8_t mask() noexcept {

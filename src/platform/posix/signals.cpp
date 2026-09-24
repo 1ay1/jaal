@@ -142,7 +142,7 @@ result<posix_signals> posix_signals::install(signal_set wanted) {
 
     signal_set got;
     for (unsigned i = 0; i < signal_count; ++i) {
-        const auto sg = static_cast<signal>(i);
+        const auto sg = static_cast<sig>(i);
         if (!wanted.contains(sg)) continue;
         // nohup / background jobs: an inherited SIG_IGN stays ignored,
         // unless we already own the handler (then it isn't inherited).
@@ -166,7 +166,7 @@ void posix_signals::release() noexcept {
     const int wfd = s.fd.exchange(-1, std::memory_order_acq_rel);
     // 2. drop our share of each handler; the last one restores the old one
     for (unsigned i = 0; i < signal_count; ++i)
-        if (got_.contains(static_cast<signal>(i))) drop_handler(i);
+        if (got_.contains(static_cast<sig>(i))) drop_handler(i);
     // 3. wait out handler runs that may have loaded the old fd before step 1.
     //    Any run that loaded it counted itself in first; any run that starts
     //    now sees -1. Bounded in practice: a handler is a handful of

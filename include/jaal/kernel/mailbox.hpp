@@ -52,14 +52,21 @@ public:
     mailbox& operator=(const mailbox&) = delete;
 
     /// Thread-safe. False once closed.
+    ///
+    /// The wake happens UNDER the lock. With a real reactor behind wake_,
+    /// waking after unlocking races shutdown: a detached (isolated) task
+    /// could be between unlock and wake when the kernel closes the mailbox
+    /// and the reactor is destroyed, and its wake would write into a
+    /// closed fd the kernel may already have handed to something else.
+    /// Under the lock, close() waits for any post in progress, and every
+    /// post after close() returns before waking. A wake is one short
+    /// syscall and takes no other lock, so holding m_ across it is cheap
+    /// and can't deadlock.
     bool post(Msg m) override {
-        bool first = false;
-        {
-            std::lock_guard lk(m_);
-            if (closed_) return false;
-            first = q_.empty();
-            q_.push_back(std::move(m));
-        }
+        std::lock_guard lk(m_);
+        if (closed_) return false;
+        const bool first = q_.empty();
+        q_.push_back(std::move(m));
         if (first && wake_) wake_();      // only on empty → non-empty
         return true;
     }

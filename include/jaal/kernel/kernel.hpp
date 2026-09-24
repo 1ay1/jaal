@@ -188,16 +188,33 @@ public:
     /// Route ONE host event through the current subscriptions, then fold
     /// the result and re-subscribe before the next event is routed. That
     /// ordering is the fix for maya's "^T m o" bug.
+    ///
+    /// Returns how many messages the event produced, so a driver can tell
+    /// "nobody subscribed to this" from "handled" (an unhandled Ctrl+C
+    /// should still stop the program).
     template <class H>
-    void route(const event_type& ev, H& host) {
-        if (quit_) return;
+    std::size_t route(const event_type& ev, H& host) {
+        if (quit_) return 0;
+        const auto before = pending_.size();
         for (auto& r : routers_) r(ev, pending_);
+        const auto produced = pending_.size() - before;
         fold_pending(host);
         reconcile(host);
+        return produced;
     }
 
     /// Queue a message from the loop thread itself (a host callback).
     void dispatch(msg_type m) { pending_.push_back(std::move(m)); }
+
+    /// End the program from outside update() (a signal with no handler, a
+    /// host that lost its terminal). The next step() reports quit. A quit
+    /// the program already asked for keeps its own exit code.
+    void stop(int code) noexcept {
+        if (quit_) return;
+        quit_      = true;
+        exit_code_ = code;
+        pending_.clear();
+    }
 
     // ── one turn ────────────────────────────────────────────────────────
     template <class H>
@@ -336,9 +353,22 @@ private:
                     std::move(*t).run(s, std::move(st));
                 });
             } else {
-                host.handle(std::forward<X>(x));
+                // A non-core effect: only reachable when the program's row
+                // has one, and HostFor has already checked the host handles
+                // it. Spelled through a dependent helper so a host with no
+                // handle() at all (headless_host) still compiles when the
+                // program never returns such an effect.
+                call_handle(host, std::forward<X>(x));
             }
         }, std::move(c.inner));
+    }
+
+    template <class H, class X>
+    static void call_handle(H& host, X&& x) {
+        if constexpr (requires { host.handle(std::forward<X>(x)); })
+            host.handle(std::forward<X>(x));
+        else
+            static_assert(sizeof(X) == 0, "jaal: host has no handle() for this effect");
     }
 
     // ── subscriptions ───────────────────────────────────────────────────
@@ -397,9 +427,25 @@ private:
                 timer_of_[k] = id;
             } else {
                 const auto& payload = std::get<payload_t<D, msg_type>>(p);
-                host.start_source(payload, tk.key, inbox_.sink());
+                call_start_source(host, payload, tk.key, inbox_.sink());
             }
         }, k);
+    }
+
+    template <class H, class Payload, class Key>
+    static void call_start_source(H& host, const Payload& p, const Key& k, Sink<msg_type> s) {
+        if constexpr (requires { host.start_source(p, k, s); })
+            host.start_source(p, k, std::move(s));
+        else
+            static_assert(sizeof(Payload) == 0, "jaal: host has no start_source() for this source");
+    }
+
+    template <class H, class D, class Key>
+    static void call_stop_source(H& host, std::type_identity<D> d, const Key& k) {
+        if constexpr (requires { host.stop_source(d, k); })
+            host.stop_source(d, k);
+        else
+            static_assert(sizeof(Key) == 0, "jaal: host has no stop_source() for this source");
     }
 
     void keep_source(const src_key& k, const src_payload& p) {
@@ -424,7 +470,7 @@ private:
                     timer_of_.erase(it);
                 }
             } else {
-                host.stop_source(std::type_identity<D>{}, tk.key);
+                call_stop_source(host, std::type_identity<D>{}, tk.key);
             }
         }, k);
     }

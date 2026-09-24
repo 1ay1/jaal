@@ -36,10 +36,10 @@ int              g_sources = 0;          // installed sources; handler added at 
 int map_ctrl(DWORD type) noexcept {
     switch (type) {
         case CTRL_C_EVENT:
-        case CTRL_BREAK_EVENT:    return static_cast<int>(signal::interrupt);
+        case CTRL_BREAK_EVENT:    return static_cast<int>(sig::interrupt);
         case CTRL_LOGOFF_EVENT:
-        case CTRL_SHUTDOWN_EVENT: return static_cast<int>(signal::terminate);
-        case CTRL_CLOSE_EVENT:    return static_cast<int>(signal::hangup);
+        case CTRL_SHUTDOWN_EVENT: return static_cast<int>(sig::terminate);
+        case CTRL_CLOSE_EVENT:    return static_cast<int>(sig::hangup);
         default:                  return -1;
     }
 }
@@ -89,7 +89,7 @@ result<console_signals> console_signals::install(signal_set wanted) {
     ++g_sources;
 
     // Only the signals that console control events can deliver.
-    const signal_set deliverable{signal::interrupt, signal::terminate, signal::hangup};
+    const signal_set deliverable{sig::interrupt, sig::terminate, sig::hangup};
     const signal_set got = wanted & deliverable;
 
     auto& s = g_slots[idx];
