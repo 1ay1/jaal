@@ -34,8 +34,22 @@ struct message {
             if (len < Cap) buf[len++] = c;
         return *this;
     }
+
+    /// Append s, but at most `max` chars: long names keep their head and
+    /// tail with "..." between. A Msg variant's type name can run to
+    /// thousands of characters; without this it would push the actual
+    /// reason off the end of the message.
+    constexpr message& append_short(std::string_view s, std::size_t max = 120) {
+        if (s.size() <= max) return *this += s;
+        const std::size_t head = (max - 3) * 2 / 3;
+        const std::size_t tail = max - 3 - head;
+        *this += s.substr(0, head);
+        *this += "...";
+        return *this += s.substr(s.size() - tail);
+    }
     [[nodiscard]] constexpr const char* data() const { return buf.data(); }
     [[nodiscard]] constexpr std::size_t size() const { return len; }
+    [[nodiscard]] constexpr std::string_view view() const { return {buf.data(), len}; }
 };
 
 template <std::size_t Cap = 256, class... Parts>
