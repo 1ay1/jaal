@@ -47,11 +47,24 @@ concept numbered_source = SourceDescriptor<D> && requires {
 struct key_hash {
     template <class V>
     std::size_t operator()(const V& v) const {
-        return std::visit([&]<class K>(const K& k) {
-            const auto h = std::hash<std::remove_cvref_t<decltype(k.key)>>{}(k.key);
-            return h ^ (v.index() * 0x9E3779B97F4A7C15ull);
+        return std::visit([&]<class K>(const K& k) -> std::size_t {
+            if constexpr (std::same_as<K, detail::sub::no_source_key>) {
+                return 0;                       // unreachable: no values exist
+            } else {
+                const auto h = std::hash<std::remove_cvref_t<decltype(k.key)>>{}(k.key);
+                return h ^ (v.index() * 0x9E3779B97F4A7C15ull);
+            }
         }, v);
     }
+};
+
+// A variant over a row's payloads; std::monostate when the row is empty,
+// since std::variant<> is ill-formed.
+template <class Msg, class... Ds> struct payload_variant {
+    using type = std::variant<payload_t<Ds, Msg>...>;
+};
+template <class Msg> struct payload_variant<Msg> {
+    using type = std::variant<std::monostate>;
 };
 
 }  // namespace detail::rec
@@ -65,7 +78,7 @@ class running_sources<Msg, row<Ds...>> {
 public:
     using row_type = row<Ds...>;
     using key      = source_key_t<row_type>;
-    using payload  = std::variant<payload_t<Ds, Msg>...>;
+    using payload  = typename detail::rec::payload_variant<Msg, Ds...>::type;
 
     struct started { key k; payload p; };
     struct updated { key k; payload p; };     // kept, payload replaced

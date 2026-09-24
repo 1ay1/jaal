@@ -248,9 +248,22 @@ struct tagged_key {
 };
 
 namespace detail::sub {
+// A row with NO source kinds (no subscribe, or routers only) still needs a
+// key type for the reconciler's maps. std::variant<> is ill-formed, so it
+// gets this instead: a type with no values. Nothing can construct one, so
+// the "a source of this kind" code paths are unreachable by type, not by
+// luck.
+struct no_source_key {
+    no_source_key() = delete;
+    bool operator==(const no_source_key&) const = default;
+};
+
 template <class L> struct key_variant;
-template <class... Ds> struct key_variant<meta::list<Ds...>> {
-    using type = std::variant<tagged_key<Ds>...>;
+template <> struct key_variant<meta::list<>> {
+    using type = std::variant<no_source_key>;
+};
+template <class D, class... Ds> struct key_variant<meta::list<D, Ds...>> {
+    using type = std::variant<tagged_key<D>, tagged_key<Ds>...>;
 };
 template <class D> struct is_source : std::bool_constant<SourceDescriptor<D>> {};
 }  // namespace detail::sub

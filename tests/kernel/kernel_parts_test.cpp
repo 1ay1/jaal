@@ -131,6 +131,20 @@ static int timer_tests() {
     // "fire never" must not overflow into the past
     h.after(c.now(), sim_clock::duration::max(), Msg{0});
     if (h.next_deadline() != sim_clock::time_point::max()) return 30;
+
+    // ...including through a UNIT conversion: milliseconds::max() in a
+    // nanosecond clock used to wrap to -1 ms and fire immediately.
+    h.clear();
+    fired.clear();
+    h.after(c.now(), std::chrono::milliseconds::max(), Msg{7});
+    if (h.next_deadline() != sim_clock::time_point::max()) return 31;
+    c.advance(std::chrono::hours(24 * 365));
+    h.collect_due(c.now(), fired);
+    if (!fired.empty()) return 32;
+    static_assert(k::saturate_cast<std::chrono::nanoseconds>(std::chrono::milliseconds::max())
+                  == std::chrono::nanoseconds::max());
+    static_assert(k::saturate_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(5))
+                  == std::chrono::nanoseconds(5'000'000));
     return 0;
 }
 

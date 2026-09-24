@@ -29,6 +29,7 @@
 #include <utility>
 
 #include "cmd.hpp"
+#include "overload.hpp"
 #include "sendable.hpp"
 #include "sub.hpp"
 

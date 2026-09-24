@@ -1,9 +1,10 @@
 #pragma once
 // jaal::kernel::timer_heap — deadlines, and the two rules that matter.
 //
-//   1. A deadline is computed with saturating addition. `now + huge` is
-//      signed overflow, which is UB; a caller passing
-//      milliseconds::max() as "never" must not corrupt the heap.
+//   1. A deadline is computed with saturating arithmetic, INCLUDING the
+//      unit conversion. `now + huge` is signed overflow (UB), and so is
+//      duration_cast<nanoseconds>(milliseconds::max()), which wraps to
+//      -1 ms: a "fire never" timer would fire at once.
 //
 //   2. Turning a deadline into a wait timeout ROUNDS UP. Rounding down
 //      caused a hot spin in maya: the loop woke just before the timer was
@@ -28,16 +29,42 @@
 
 namespace jaal::kernel {
 
-/// now + d, clamped instead of overflowing.
-template <class Clock>
+/// duration_cast that CLAMPS instead of overflowing.
+///
+/// std::chrono::duration_cast<nanoseconds>(milliseconds::max()) is signed
+/// overflow: it wraps to -1 ms. Fed into a timer, "fire never" became "fire
+/// now". saturate_add was correct and never reached, because the overflow
+/// happened one step earlier, in the unit conversion. Found by kernel_test
+/// rule 5.
+template <class To, class Rep, class Period>
+[[nodiscard]] constexpr To saturate_cast(std::chrono::duration<Rep, Period> d) noexcept {
+    using namespace std::chrono;
+    if constexpr (std::ratio_greater_v<Period, typename To::period>) {
+        // Coarse → fine (ms → ns) is the direction that overflows. To's
+        // limits, expressed in d's coarser unit, are small numbers, so the
+        // comparison itself can't overflow.
+        const auto hi = duration_cast<duration<Rep, Period>>(To::max());
+        const auto lo = duration_cast<duration<Rep, Period>>(To::min());
+        if (d >= hi) return To::max();
+        if (d <= lo) return To::min();
+        return duration_cast<To>(d);
+    } else {
+        return duration_cast<To>(d);   // fine → coarse can't overflow
+    }
+}
+
+/// now + d, clamped instead of overflowing. d may be in any unit.
+template <class Clock, class Rep, class Period>
 [[nodiscard]] constexpr auto saturate_add(typename Clock::time_point now,
-                                          typename Clock::duration d) noexcept ->
+                                          std::chrono::duration<Rep, Period> d) noexcept ->
     typename Clock::time_point {
     using tp  = typename Clock::time_point;
-    using rep = typename Clock::duration::rep;
-    const rep left = std::numeric_limits<rep>::max() - now.time_since_epoch().count();
-    if (d.count() > left) return tp::max();
-    return now + d;
+    using dur = typename Clock::duration;
+    const dur dd = saturate_cast<dur>(d);
+    if (dd <= dur::zero()) return dd == dur::zero() ? now : now + dd;
+    const auto left = tp::max() - now;
+    if (dd > left) return tp::max();
+    return now + dd;
 }
 
 /// Milliseconds to wait for `deadline`, rounded UP, never negative.
@@ -69,14 +96,17 @@ public:
         timer_id   id = 0;
     };
 
-    /// Arm a one-shot timer.
-    timer_id after(time_point now, duration d, Payload p) {
+    /// Arm a one-shot timer. d may be in any unit; conversion saturates.
+    template <class Rep, class Period>
+    timer_id after(time_point now, std::chrono::duration<Rep, Period> d, Payload p) {
         return push({saturate_add<Clock>(now, d), duration::zero(), std::move(p), ++next_id_});
     }
 
     /// Arm a repeating timer; first fire one period from now.
-    timer_id every(time_point now, duration period, Payload p) {
-        const auto per = period <= duration::zero() ? duration{1} : period;
+    template <class Rep, class Period>
+    timer_id every(time_point now, std::chrono::duration<Rep, Period> period, Payload p) {
+        auto per = saturate_cast<duration>(period);
+        if (per <= duration::zero()) per = duration{1};
         return push({saturate_add<Clock>(now, per), per, std::move(p), ++next_id_});
     }
 
