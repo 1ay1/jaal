@@ -98,6 +98,10 @@ jaal_compile_fail(NAME scope_handle_pinned SOURCE compile_fail/scope.cpp CASE 2
 jaal_compile_fail(NAME scope_nursery_private SOURCE compile_fail/scope.cpp CASE 3
                   MATCH "private")
 
+# kernel / hosts
+jaal_compile_fail(NAME router_event_not_produced SOURCE compile_fail/kernel.cpp CASE 1
+                  MATCH "jaal: a subscription routes events this host doesn't produce")
+
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering
          COMMAND ${CMAKE_COMMAND}

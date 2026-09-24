@@ -278,6 +278,77 @@ static int budget() {
     return 0;
 }
 
+// ── a host with several event kinds (a terminal, a GUI) ──────────────────
+// The host's event type is a variant; each router takes one alternative.
+// on_key only sees keys, on_click only clicks, and routing stays one event
+// at a time with a re-subscribe between (the ^T m o rule still holds).
+struct Click { int x, y; };
+struct on_click {
+    static constexpr std::string_view name = "on_click";
+    using event_type = Click;
+    template <class Msg> struct type {
+        std::function<std::optional<Msg>(const Click&)> filter;
+    };
+    template <class F, class M>
+    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
+        using B = std::invoke_result_t<F, M>;
+        return {[g = std::move(e.filter), f = std::forward<F>(f)](const Click& c) -> std::optional<B> {
+            if (auto m = g(c)) return f(std::move(*m));
+            return std::nullopt;
+        }};
+    }
+    template <class M>
+    static std::optional<M> route(const type<M>& p, const Click& c) { return p.filter(c); }
+    template <class Self, class Msg> struct ctors {
+        template <class F> static Self on_click(F f) { return Self(type<Msg>{std::move(f)}); }
+    };
+};
+using KeyOrClick = std::variant<Key, Click>;
+
+struct TwoKinds {
+    struct Model { std::string keys; int clicks = 0; bool clicks_off = false; };
+    struct K { char c; }; struct C {};
+    using Msg = std::variant<K, C>;
+    using Cmd = jaal::CoreCmd<Msg>;
+    using Sub = jaal::Sub<Msg, make_row<on_key, on_click>>;
+    static Model init() { return {}; }
+    static std::pair<Model, Cmd> update(Model m, Msg msg) {
+        if (auto* k = std::get_if<K>(&msg)) {
+            m.keys += k->c;
+            if (k->c == 'x') m.clicks_off = true;          // stop listening to clicks
+        } else {
+            ++m.clicks;
+        }
+        return {m, Cmd::none()};
+    }
+    static Sub subscribe(const Model& m) {
+        auto keys = Sub::on_key([](const Key& k) -> std::optional<Msg> { return K{k.c}; });
+        if (m.clicks_off) return keys;
+        return Sub::batch(std::move(keys),
+                          Sub::on_click([](const Click&) -> std::optional<Msg> { return C{}; }));
+    }
+};
+
+static int variant_events() {
+    jaal::headless<TwoKinds, KeyOrClick> h;
+    h.event(Key{'a'});
+    h.event(Click{1, 1});
+    h.event(Key{'b'});
+    h.event(Click{2, 2});
+    if (h.model().keys != "ab" || h.model().clicks != 2) return 901;
+    // 'x' turns clicks off; the next click must see the NEW subscription
+    h.event(Key{'x'});
+    h.event(Click{3, 3});
+    if (h.model().clicks != 2) return 902;
+    return 0;
+}
+
+static_assert(jaal::detail::host_ev::routable_v<KeyOrClick, Key>);
+static_assert(jaal::detail::host_ev::routable_v<KeyOrClick, Click>);
+static_assert(jaal::detail::host_ev::routable_v<Key, Key>);
+static_assert(!jaal::detail::host_ev::routable_v<Key, Click>);
+static_assert(!jaal::detail::host_ev::routable_v<std::variant<Key>, Click>);
+
 // ── HostFor: a host must run every effect the program returns ───────────
 struct NoBeepHost {
     // handles nothing beyond core
@@ -288,7 +359,8 @@ static_assert(jaal::HostFor<jaal::recorder, QuitApp>);
 
 int main() {
     // Exit codes wrap at 256, so report the code as text.
-    int (*const checks[])() = {rule1, rule2, rule3, rule4, rule5, rule6, rule7, budget};
+    int (*const checks[])() = {rule1, rule2, rule3, rule4, rule5, rule6, rule7, budget,
+                               variant_events};
     for (auto f : checks)
         if (int r = f()) {
             std::fprintf(stderr, "kernel_test: check %d failed\n", r);

@@ -129,6 +129,25 @@ consteval void require_host_for() {
     }
 }
 
+namespace detail::host_ev {  // in jaal::, not jaal::kernel::
+// Can a router over RE see events from a host whose event type is HE?
+//   HE == RE                       yes: every event is one
+//   HE == variant<..., RE, ...>    yes: when the variant holds an RE
+template <class HE, class RE> inline constexpr bool in_variant_v = false;
+template <class... Ts, class RE>
+inline constexpr bool in_variant_v<std::variant<Ts...>, RE> = (std::same_as<Ts, RE> || ...);
+
+template <class HE, class RE>
+inline constexpr bool routable_v = std::same_as<HE, RE> || in_variant_v<HE, RE>;
+
+/// The event as an RE, or null when this event is some other kind.
+template <class RE, class HE>
+const RE* as(const HE& ev) noexcept {
+    if constexpr (std::same_as<HE, RE>) return &ev;
+    else                                return std::get_if<RE>(&ev);
+}
+}  // namespace detail::host_ev
+
 // ── kernel ───────────────────────────────────────────────────────────────
 namespace kernel {
 
@@ -149,6 +168,7 @@ struct options {
 
 /// Marker for a host with no input events (a headless server, a test).
 struct no_events {};
+
 
 template <Program P, class Event = no_events, platform::Clock C = platform::steady_clock>
 class kernel {
@@ -398,15 +418,20 @@ private:
     void add_router_impl(const R& r, meta::list<Ds...>) {
         ([&] {
             if constexpr (RouterDescriptor<Ds> && std::same_as<R, payload_t<Ds, msg_type>>) {
-                // A router can only see events of the host's type. A router
-                // for some other event kind is a program/host mismatch,
+                // A router sees events of ONE type (key, mouse, signal...).
+                // It fits this host when that type is the host's event type,
+                // or one alternative of it when the host produces a variant
+                // (a terminal: keys, mouse, resize; a GUI: clicks, keys,
+                // window events). Anything else is a program/host mismatch,
                 // rejected at compile time rather than silently never firing.
-                static_assert(std::convertible_to<const event_type&,
-                                                  const typename Ds::event_type&>,
+                using RE = typename Ds::event_type;
+                static_assert(::jaal::detail::host_ev::routable_v<event_type, RE>,
                               "jaal: a subscription routes events this host doesn't "
-                              "produce (router event_type doesn't match the host's)");
+                              "produce (its event_type is neither the host's event "
+                              "type nor one of the host's variant alternatives)");
                 routers_.push_back([r](const event_type& ev, std::vector<msg_type>& out) {
-                    if (auto m = Ds::route(r, ev)) out.push_back(std::move(*m));
+                    if (const RE* e = ::jaal::detail::host_ev::as<RE>(ev))
+                        if (auto m = Ds::route(r, *e)) out.push_back(std::move(*m));
                 });
             }
         }(), ...);
