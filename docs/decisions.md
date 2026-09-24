@@ -550,3 +550,44 @@ docs/concurrency.md §2: the program compiles, the bad outcome can't happen.
 
 **Measured.** `features_test` + `stream_stop_test`, 200 runs each on clang
 and tsan: 0 failures (was 75/300 on clang, ~1/40 on tsan).
+
+## D33. `registration::modify(interest)` is part of the Reactor concept
+
+**Decision.** A registration can change what its handle waits for, keeping
+its token: `reg.modify(interest::read_write)`. It's in the `Reactor`
+concept, so every backend has it and the conformance suite holds all four to
+the same behaviour.
+
+**Why.** Found by writing a real socket host (`examples/server.cpp`). A
+write to a socket takes what fits and returns `EAGAIN`; the host must then
+wait for writability, and stop waiting once its buffer drains. Without
+`modify` the only way is to drop the registration and watch again, which:
+
+- costs two syscalls instead of one, per direction change, per connection;
+- leaves the handle unwatched in between, so readiness arriving in the gap
+  is lost;
+- forces the host to re-derive the token and re-insert into its own map.
+
+Every non-trivial socket host hits this on its first partial write, so it
+belongs in the concept rather than in each host.
+
+**On the registration, not the reactor.** The registration already owns the
+handle's place in the reactor (its slot, its token, its lifetime). Putting
+`modify` on the reactor would mean naming the handle again, and would let a
+host modify a registration it doesn't own.
+
+**Per backend.** kqueue: delete the filters no longer wanted, then add the
+new ones (delete first, so a failed add can't leave the old filter live).
+epoll: one `EPOLL_CTL_MOD`, same `data.u64`. poll: the pollfd array is built
+per `wait()`, so it's a field update. Windows
+(`WaitForMultipleObjects`): there is no read/write interest, so it validates
+the registration and succeeds, changing nothing — host code that adds write
+interest on `EAGAIN` stays portable and simply keeps being woken.
+
+**The trap it introduces, and the test for it.** An idle socket is always
+writable, so a host that adds write interest and forgets to remove it spins
+at 100% CPU. That's a symptom nobody notices in a unit test, so
+`tests/platform/modify_test.cpp` fills a real socket buffer, checks
+writability is reported after `modify`, and then checks the reactor goes
+QUIET after modifying back — plus that pending readability survives a
+modify (which a drop-and-re-watch can lose).

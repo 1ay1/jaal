@@ -84,6 +84,38 @@ kqueue_reactor::registration& kqueue_reactor::registration::operator=(registrati
 }
 kqueue_reactor::registration::~registration() { release(); }
 
+result<void> kqueue_reactor::registration::modify(interest what) {
+    auto s = s_.lock();
+    if (!s || slot_ >= s->slots.size() || !s->slots[slot_].live)
+        return std::unexpected(error::make(std::errc::invalid_argument,
+                                           "modify: registration is empty"));
+    auto& sl = s->slots[slot_];
+    if (sl.what == what) return {};
+
+    // kqueue holds one filter per direction, so this is a delete of the
+    // filters no longer wanted and an add of the new ones. Adding first
+    // would leave the old filter live if the add failed.
+    struct kevent evs[2];
+    int n = 0;
+    void* udata = reinterpret_cast<void*>(static_cast<std::uintptr_t>(slot_) + 1);
+    if (wants_read(sl.what)  && !wants_read(what))
+        EV_SET(&evs[n++], sl.fd, EVFILT_READ,  EV_DELETE, 0, 0, nullptr);
+    if (wants_write(sl.what) && !wants_write(what))
+        EV_SET(&evs[n++], sl.fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+    if (n > 0) ::kevent(s->kq, evs, n, nullptr, 0, nullptr);   // fd may be gone: fine
+
+    n = 0;
+    if (!wants_read(sl.what)  && wants_read(what))
+        EV_SET(&evs[n++], sl.fd, EVFILT_READ,  EV_ADD, 0, 0, udata);
+    if (!wants_write(sl.what) && wants_write(what))
+        EV_SET(&evs[n++], sl.fd, EVFILT_WRITE, EV_ADD, 0, 0, udata);
+    if (n > 0 && ::kevent(s->kq, evs, n, nullptr, 0, nullptr) != 0)
+        return std::unexpected(error::from_errno(errno, "kevent modify"));
+
+    sl.what = what;
+    return {};
+}
+
 kqueue_reactor::kqueue_reactor(std::shared_ptr<state> s) noexcept : s_(std::move(s)) {}
 kqueue_reactor::kqueue_reactor(kqueue_reactor&&) noexcept            = default;
 kqueue_reactor& kqueue_reactor::operator=(kqueue_reactor&&) noexcept = default;

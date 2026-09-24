@@ -78,6 +78,18 @@ wait_reactor::registration& wait_reactor::registration::operator=(registration&&
 }
 wait_reactor::registration::~registration() { release(); }
 
+result<void> wait_reactor::registration::modify(interest) {
+    auto s = s_.lock();
+    if (!s || slot_ >= s->slots.size() || !s->slots[slot_].live)
+        return std::unexpected(error::make(std::errc::invalid_argument,
+                                           "modify: registration is empty"));
+    // WaitForMultipleObjects signals on a handle's own state; there is no
+    // read/write interest to set (watch() ignores it too). Accepting the
+    // call keeps host code portable: a socket host that adds write interest
+    // on EAGAIN compiles and runs here, and simply keeps being woken.
+    return {};
+}
+
 // ── reactor ─────────────────────────────────────────────────────────────
 wait_reactor::wait_reactor(std::shared_ptr<state> s) noexcept : s_(std::move(s)) {}
 wait_reactor::wait_reactor(wait_reactor&&) noexcept            = default;

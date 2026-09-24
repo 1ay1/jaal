@@ -12,9 +12,14 @@ itself is documented at the top of
 [`kernel/run.hpp`](../include/jaal/kernel/run.hpp); this page is the worked
 version, in the order you'll actually need it.
 
-**[`examples/host.cpp`](../examples/host.cpp) is every piece below, in one
-file that compiles and runs.** It's built as part of the examples, so it
-can't drift from the library.
+Two worked hosts, both built as part of the examples so they can't drift
+from the library:
+
+- **[`examples/host.cpp`](../examples/host.cpp)** — every piece below in one
+  small file: one input handle, a router, one effect of its own.
+- **[`examples/server.cpp`](../examples/server.cpp)** — the other shape: a
+  TCP server with many handles coming and going, line framing, and writes
+  that block (§3b).
 
 ## The shape of it
 
@@ -159,6 +164,58 @@ the rule exists ([D13](decisions.md#d13-re-subscribe-between-events)).
 Readiness is level-triggered ([D15](decisions.md#d15-level-triggered-readiness)):
 if you don't drain the fd, you'll be told again. That's deliberate — a partial
 read is not a lost event.
+
+## 3b. Writes that don't finish
+
+Reading is the easy direction. A write to a socket takes as much as the send
+buffer has room for and then returns `EAGAIN`, so a host that writes has to
+keep the leftovers and finish later. Two things belong to the host, not the
+program:
+
+- an **output buffer** per handle, holding what the socket wouldn't take
+- a **write interest** that follows whether that buffer is empty
+
+`registration::modify(interest)` is the second one. It changes what a handle
+waits for, keeping its token:
+
+```cpp
+void flush(conn& c) {
+    while (!c.out.empty()) {
+        const auto n = ::write(c.fd, c.out.data(), c.out.size());
+        if (n > 0) { c.out.erase(0, std::size_t(n)); continue; }
+        if (n < 0 && errno == EINTR) continue;
+        break;                                  // EAGAIN: the rest waits
+    }
+    const bool want_write = !c.out.empty();
+    if (want_write == c.watching_write) return;  // interest already right
+    const auto what = want_write ? jaal::interest::read_write : jaal::interest::read;
+    if (c.reg.modify(what)) c.watching_write = want_write;
+}
+```
+
+Then `on_ready` calls `flush` whenever `r.writable`, and the program's write
+effect appends to `c.out` and calls `flush` too. The program never learns
+that a write blocked; it returns a `reply` effect and the host decides when
+the bytes go out.
+
+**Take the write interest away again.** Leaving it on looks harmless — you
+just get extra wakeups — but an idle socket is *always* writable, so the
+reactor reports it every time round the loop and the program spins at 100%
+CPU doing nothing. That's what the second half of
+`tests/platform/modify_test.cpp` checks.
+
+Why `modify` rather than dropping the registration and re-watching: the
+re-watch costs two syscalls instead of one, and between them the handle is
+unwatched, so readiness that arrives in the gap is lost. `modify` is in the
+`Reactor` concept, so all four backends provide it and the conformance suite
+holds them to the same behaviour (on Windows, where
+`WaitForMultipleObjects` has no read/write interest, it succeeds and changes
+nothing — host code stays portable).
+
+**[`examples/server.cpp`](../examples/server.cpp)** is a full TCP line-echo
+server built this way: one registration per connection, line framing in the
+host, and this exact backpressure. Send it `flood` and it writes a megabyte
+through a socket that blocks halfway.
 
 ## 4. Drawing
 

@@ -222,6 +222,70 @@ int registration_outlives_reactor() {
     return 0;
 }
 
+// ── modify() ────────────────────────────────────────────────────────────
+// The socket-host case: a write blocks, so the host adds write interest;
+// the buffer drains, so it takes it away again. Dropping and re-watching
+// would cost two syscalls and lose readiness in between.
+
+template <pf::Reactor R>
+int modify_keeps_the_token_and_the_registration() {
+    auto r = R::create().value();
+    channel c;
+    auto reg = c.watch(r, 77).value();
+    if (!reg.modify(pf::interest::read_write)) return 81;
+    c.write1();
+    auto a = r.wait(1s).value();
+    if (a.timeout || a.count != 1) return 82;
+    if (a.ready[0].token != 77) return 83;          // same token, same slot
+    if (!a.ready[0].readable) return 84;
+    // and back again, still one registration for this handle
+    if (!reg.modify(pf::interest::read)) return 85;
+    auto b = r.wait(1s).value();
+    if (b.timeout || b.count != 1 || b.ready[0].token != 77) return 86;
+    return 0;
+}
+
+template <pf::Reactor R>
+int modify_to_the_same_interest_is_fine() {
+    auto r = R::create().value();
+    channel c;
+    auto reg = c.watch(r, 5).value();
+    if (!reg.modify(pf::interest::read)) return 87;  // no change: still ok
+    if (!reg.modify(pf::interest::read)) return 88;  // and idempotent
+    c.write1();
+    auto a = r.wait(1s).value();
+    if (a.timeout || a.count != 1 || a.ready[0].token != 5) return 89;
+    return 0;
+}
+
+template <pf::Reactor R>
+int modify_on_an_empty_registration_is_an_error() {
+    typename R::registration empty;
+    auto e = empty.modify(pf::interest::read);
+    if (e) return 90;                               // must not "succeed"
+    if (e.error().code != std::errc::invalid_argument) return 91;
+    // a moved-from registration is empty too
+    auto r = R::create().value();
+    channel c;
+    auto reg = c.watch(r, 1).value();
+    auto moved = std::move(reg);
+    if (reg.modify(pf::interest::read)) return 92;
+    if (!moved.modify(pf::interest::read)) return 93;   // the new owner still works
+    return 0;
+}
+
+template <pf::Reactor R>
+int modify_after_the_reactor_is_gone_is_an_error() {
+    channel c;
+    std::optional<typename R::registration> keep;
+    {
+        auto r = R::create().value();
+        keep.emplace(c.watch(r, 1).value());
+    }
+    if (keep->modify(pf::interest::read_write)) return 94;   // reports, never crashes
+    return 0;
+}
+
 #if !defined(_WIN32)
 extern "C" void noop_handler(int) {}
 
@@ -284,6 +348,10 @@ int suite(const char* name) {
         huge_timeout_doesnt_wrap<R>, readiness_with_token<R>, hangup_is_reported<R>,
         unwatch_on_drop<R>, readiness_persists_until_drained<R>,
         registration_outlives_reactor<R>,
+        modify_keeps_the_token_and_the_registration<R>,
+        modify_to_the_same_interest_is_fine<R>,
+        modify_on_an_empty_registration_is_an_error<R>,
+        modify_after_the_reactor_is_gone_is_an_error<R>,
 #if !defined(_WIN32)
         eintr_doesnt_end_wait<R>, wake_is_signal_safe<R>,
 #endif

@@ -61,10 +61,19 @@ struct wait_result {
 // the waker fires, or the deadline passes.
 //
 //   watch(handle, interest, token)  → registration (RAII: dropping it unwatches)
+//   reg.modify(interest)            → change what that handle waits for
 //   wake()                          → thread-safe, async-signal-safe, coalescing
 //   wait(timeout_ms)                → wait_result
 //
 // timeout: nullopt = wait indefinitely; 0 = poll without blocking.
+//
+// modify() is on the registration because that's what owns the handle's
+// place in the reactor. It's the difference between a toy and a real socket
+// host: a write that returns EAGAIN has to start waiting for writability
+// and stop again once the buffer drains, and doing that by dropping and
+// re-watching costs two syscalls and loses any readiness in between. The
+// token never changes (the host's map from token to connection stays put);
+// only the interest does.
 //
 // ONE registration per handle. Watching a handle that's already watched
 // fails with std::errc::file_exists on every backend. epoll can't hold one
@@ -84,6 +93,9 @@ concept Reactor =
         { r.watch(h, i, tok) } -> std::same_as<result<typename R::registration>>;
         { r.wait(t) } -> std::same_as<result<wait_result>>;
         { cr.waker() } -> std::same_as<typename R::waker_ref>;
+    }
+    && requires(typename R::registration& reg, interest i) {
+        { reg.modify(i) } -> std::same_as<result<void>>;
     }
     && requires(const typename R::waker_ref& w) {
         { w.wake() } noexcept;

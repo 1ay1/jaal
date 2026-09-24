@@ -71,6 +71,22 @@ epoll_reactor::registration& epoll_reactor::registration::operator=(registration
 }
 epoll_reactor::registration::~registration() { release(); }
 
+result<void> epoll_reactor::registration::modify(interest what) {
+    auto s = s_.lock();
+    if (!s || slot_ >= s->slots.size() || !s->slots[slot_].live)
+        return std::unexpected(error::make(std::errc::invalid_argument,
+                                           "modify: registration is empty"));
+    auto& sl = s->slots[slot_];
+    epoll_event ev{};
+    ev.events = EPOLLRDHUP;                              // level-triggered
+    if (wants_read(what))  ev.events |= EPOLLIN;
+    if (wants_write(what)) ev.events |= EPOLLOUT;
+    ev.data.u64 = std::uint64_t{slot_} + 1;              // same token, same slot
+    if (::epoll_ctl(s->ep, EPOLL_CTL_MOD, sl.fd, &ev) != 0)
+        return std::unexpected(error::from_errno(errno, "epoll_ctl mod"));
+    return {};
+}
+
 epoll_reactor::epoll_reactor(std::shared_ptr<state> s) noexcept : s_(std::move(s)) {}
 epoll_reactor::epoll_reactor(epoll_reactor&&) noexcept            = default;
 epoll_reactor& epoll_reactor::operator=(epoll_reactor&&) noexcept = default;

@@ -51,6 +51,12 @@ public:
         registration(const registration&)            = delete;
         registration& operator=(const registration&) = delete;
         ~registration();
+
+        /// Change what this handle waits for, keeping its token. For a
+        /// socket host: add write when a send blocks, drop it when the
+        /// buffer drains. A default-constructed (or moved-from)
+        /// registration returns std::errc::invalid_argument.
+        [[nodiscard]] result<void> modify(interest what);
     private:
         friend class poll_reactor;
         registration(std::weak_ptr<state> s, std::uint32_t slot) noexcept

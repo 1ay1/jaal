@@ -138,6 +138,12 @@ covered by static assertions.
 
 ### Platform
 
+One `Reactor` concept, four backends, one conformance suite. A host watches
+a handle with `watch(handle, interest, token)`, keeps the registration
+(dropping it unwatches), and changes what that handle waits for with
+`registration::modify(interest)` — the call a socket host needs when a write
+blocks and again when its buffer drains. Readiness is level-triggered.
+
 | | Linux | macOS / BSD | Windows |
 |---|---|---|---|
 | reactor | epoll (+ poll) | kqueue | WaitForMultipleObjects |
@@ -204,6 +210,11 @@ These are **deliberate** — each one is someone else's job or a later layer.
 - **Protocols and I/O batteries.** No HTTP client, no TCP helpers, no file
   watching, no database. They're effects and sources a library can add
   with `pure_fx` / `router` / custom sources. jaal's core stays small.
+  The line is the reactor: jaal gives a host everything it needs to wait on
+  handles and change what it waits for (`watch`, `modify`, level-triggered
+  readiness), and [`examples/server.cpp`](../examples/server.cpp) shows a
+  TCP server built on exactly that — but the buffering, framing, TLS and
+  protocol live in the host or a library above it.
 - **Actors.** One program per kernel. Many programs messaging each other,
   with supervision, fits the design (a `Sink` becomes an address) but isn't
   built.

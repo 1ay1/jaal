@@ -130,6 +130,17 @@ poll_reactor::registration& poll_reactor::registration::operator=(registration&&
 
 poll_reactor::registration::~registration() { release(); }
 
+result<void> poll_reactor::registration::modify(interest what) {
+    auto s = s_.lock();
+    if (!s || slot_ >= s->slots.size() || !s->slots[slot_].live)
+        return std::unexpected(error::make(std::errc::invalid_argument,
+                                           "modify: registration is empty"));
+    // poll() takes its array by argument, so there's nothing registered in
+    // the kernel to change: the next wait() builds pollfd from this.
+    s->slots[slot_].what = what;
+    return {};
+}
+
 // ── reactor ─────────────────────────────────────────────────────────────
 poll_reactor::poll_reactor(std::shared_ptr<state> s) noexcept : s_(std::move(s)) {}
 poll_reactor::poll_reactor(poll_reactor&&) noexcept            = default;
