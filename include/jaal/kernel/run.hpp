@@ -26,6 +26,12 @@
 //       // 3→4. one of the host's handles is ready: read it and emit events
 //       void on_ready(jaal::host_context<my_host>& cx, const jaal::readiness& r);
 //
+//       // a signal arrived. Called BEFORE it's routed to the program, for
+//       // signals that are the host's business: a terminal host answers
+//       // sig::resize by asking the terminal its new size and emitting a
+//       // resize event, since the program can't ask the terminal itself.
+//       void on_signal(jaal::host_context<my_host>& cx, jaal::sig s);
+//
 //       // 5. after each step that changed the model: draw
 //       template <class K> void present(K& kernel);
 //
@@ -346,6 +352,14 @@ int run(H& host, run_options opt, durable<P> d) {
             if (r.token == detail::run::kSignalToken) {
                 if (!guard.signals()) continue;
                 for (auto s : guard.signals()->take()) {
+                    // The HOST sees it first. Some signals are the host's
+                    // business before they're the program's: SIGWINCH means
+                    // "the terminal changed size", and only the host can ask
+                    // the terminal for its new size and hand the program a
+                    // resize event it can use. Without this a terminal host
+                    // had no way to learn about a resize at all — it only
+                    // sees its own handles, and the signal pipe isn't one.
+                    if constexpr (requires { host.on_signal(cx, s); }) host.on_signal(cx, s);
                     const auto produced = k.route(KE{signal_event{signal_set{s}}}, fwd);
                     if (produced == 0 && opt.default_signal_exit
                         && (s == sig::interrupt || s == sig::terminate || s == sig::hangup))
