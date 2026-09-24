@@ -89,10 +89,18 @@ Rules:
 
 - Every operation has `static_assert` tests in `tests/meta/`. A test that
   compiles is a test that passed.
-- Negative tests ("this must not compile") run through a CMake
-  `try_compile` harness, so rejected programs are tested too.
-- Complexity is kept linear in pack size. No recursive instantiation where a
-  fold expression works, so compile time stays flat as rows grow.
+- Negative tests ("this must not compile") are small targets left out of
+  the normal build. A ctest entry builds each one and expects it to fail,
+  optionally with a specific diagnostic.
+- No recursive instantiation anywhere: every operation is a fold or a single
+  pack expansion, so long lists never hit the template depth limit.
+- Cost: `size`, `at`, `member_of`, `index_of`, `concat`, `transform` and
+  `filter` are linear. `unique`, `dedup`, `subset_of` and `minus` are
+  quadratic in comparisons, which is inherent. That's fine for effect rows
+  (10 to 30 entries) and would not be for hundreds of types.
+- Type equality uses the `__is_same` builtin, not `std::is_same_v`. The
+  variable template instantiates once per compared pair, and that made a
+  600-type `unique` take 38 s on GCC 16.
 
 ## 3. core: the types apps see
 
