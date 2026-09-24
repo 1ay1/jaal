@@ -2,8 +2,10 @@
 
 #include <jaal/core/core_fx.hpp>
 #include <jaal/host/headless.hpp>
+#include <jaal/kernel/timeline.hpp>
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <variant>
@@ -44,6 +46,19 @@ struct App {
 #if JAAL_CASE == 1
 // the program wants scroll events; the host only produces keys and clicks
 jaal::headless<App, std::variant<Key, Click>> h;
+#elif JAAL_CASE == 2
+// a model that shares a mutable Doc: a copy isn't a snapshot, so a
+// timeline over it would show the wrong past
+struct Shared {
+    struct Doc { int words = 0; };
+    struct Model { std::shared_ptr<Doc> doc; };
+    struct Edit {};
+    using Msg = std::variant<Edit>;
+    using Cmd = jaal::CoreCmd<Msg>;
+    static Model init() { return {std::make_shared<Doc>()}; }
+    static std::pair<Model, Cmd> update(Model m, Msg) { ++m.doc->words; return {m, Cmd::none()}; }
+};
+jaal::timeline<Shared> t({});
 #else
 #  error "unknown JAAL_CASE"
 #endif

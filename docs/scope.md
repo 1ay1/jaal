@@ -15,6 +15,29 @@ hosts. Its distinguishing feature is that the contracts of an Elm program
 (effects are data, state changes only in `update`, work crossing threads
 can't hold borrowed memory) are checked by the compiler, not by convention.
 
+## Is it still Elm?
+
+The core is: `init`, `update : Msg -> Model -> (Model, Cmd)`, `subscribe :
+Model -> Sub`, effects as data the runtime runs, one message at a time,
+subscriptions diffed by key. The newer pieces sit AROUND that loop, not in
+it. `sim` swaps who runs the effects, `timeline` and `replay` just fold
+recorded messages through `update`, `diff` compares two models.
+
+Where it differs from Elm, and why:
+
+| Elm | jaal | why |
+|---|---|---|
+| `update` is pure by the language | pure by convention; replay and sim show violations | C++ can't prove purity |
+| models are immutable values | models are values you move through `update`; `Frozen` is required where it matters (`timeline`, `shared<T>`) | C++ has no deep immutability by default |
+| `view` is part of the program | optional; a host that draws asks for it | jaal also runs servers and tools with no screen |
+| `Task` / `Cmd` from a fixed library | `task` runs your C++ on another thread; `stream` is a keyed subscription running your code | the effects are open-ended, but what crosses threads is checked (`Sendable`) |
+| no exceptions | a throwing `update` is a fault; `skip` keeps the old model, `stop` quits | C++ code can throw |
+| effects run by the runtime only | a host adds its own effect types (rows) | terminals, sockets, GUIs each need their own |
+
+What jaal won't add, because it would stop being Elm: re-entrant `update`,
+`await` inside `update`, shared mutable state between `update` and
+background work, or effects that run during replay.
+
 ## Offers
 
 ### The Elm core

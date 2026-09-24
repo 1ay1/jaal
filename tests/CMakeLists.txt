@@ -106,6 +106,8 @@ jaal_compile_fail(NAME scope_nursery_private SOURCE compile_fail/scope.cpp CASE 
 # kernel / hosts
 jaal_compile_fail(NAME router_event_not_produced SOURCE compile_fail/kernel.cpp CASE 1
                   MATCH "jaal: a subscription routes events this host doesn't produce")
+jaal_compile_fail(NAME timeline_needs_frozen_model SOURCE compile_fail/kernel.cpp CASE 2
+                  MATCH "is not Frozen: it contains '[^']*shared_ptr[^']*', a pointer-like owner")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering

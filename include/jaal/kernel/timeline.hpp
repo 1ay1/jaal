@@ -20,6 +20,8 @@
 // reached is cached).
 //
 // Effects are never run (same rule as replay): they are the run's outputs.
+//
+// The Model must be Frozen: a deep value, so a copy is a real snapshot.
 
 #include <cstddef>
 #include <functional>
@@ -30,6 +32,7 @@
 #include <vector>
 
 #include "../core/diff.hpp"
+#include "../core/frozen.hpp"
 #include "../core/program.hpp"
 
 namespace jaal {
@@ -38,6 +41,12 @@ template <Program P>
     requires std::copy_constructible<typename P::Model>
           && std::copy_constructible<typename P::Msg>
 class timeline {
+    // Snapshots are copies. That's only a snapshot if the model is a VALUE:
+    // a model holding shared_ptr<Doc> would have every snapshot share one
+    // Doc, and stepping back would show today's Doc. Frozen rules that out
+    // (no shared/unique owners, pointers, views or `mutable`).
+    static_assert((require_frozen<typename P::Model>(), true));
+
 public:
     using model_type = typename P::Model;
     using msg_type   = typename P::Msg;
