@@ -109,3 +109,23 @@ add_test(NAME banlist
                  -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/lint/allowlist.txt
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/lint/banlist.cmake)
 set_tests_properties(banlist PROPERTIES LABELS "static")
+
+# ── macOS compile check ──────────────────────────────────────────────────
+# There's no Mac here, so the darwin backends can't RUN in this suite. zig
+# ships macOS libc headers, so they can at least COMPILE for arm64 macOS on
+# every build. That catches missing includes and wrong kqueue calls; it
+# proves nothing about behaviour.
+if(NOT APPLE)
+    find_program(JAAL_ZIG zig)
+    if(JAAL_ZIG)
+        foreach(src darwin/kqueue_reactor posix/poll_reactor)
+            string(REPLACE "/" "_" tname "${src}")
+            add_test(NAME macos_compile.${tname}
+                     COMMAND ${JAAL_ZIG} c++ -target aarch64-macos -std=c++2c
+                             -I${PROJECT_SOURCE_DIR}/include -Wall -Wextra
+                             -c ${PROJECT_SOURCE_DIR}/src/platform/${src}.cpp
+                             -o ${CMAKE_CURRENT_BINARY_DIR}/macos_${tname}.o)
+            set_tests_properties(macos_compile.${tname} PROPERTIES LABELS "cross")
+        endforeach()
+    endif()
+endif()

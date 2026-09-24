@@ -65,6 +65,11 @@ struct wait_result {
 //   wait(timeout_ms)                → wait_result
 //
 // timeout: nullopt = wait indefinitely; 0 = poll without blocking.
+//
+// ONE registration per handle. Watching a handle that's already watched
+// fails with std::errc::file_exists on every backend. epoll can't hold one
+// fd twice, and letting poll/WFMO allow it would make programs that work
+// on one OS fail on another.
 template <class R>
 concept Reactor =
     requires {

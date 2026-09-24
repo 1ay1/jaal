@@ -151,6 +151,10 @@ poll_reactor::waker_ref poll_reactor::waker() const noexcept {
 result<poll_reactor::registration>
 poll_reactor::watch(handle fd, interest what, std::uint64_t token) {
     if (fd < 0) return std::unexpected(error::make(std::errc::bad_file_descriptor, "watch: bad fd"));
+    for (auto& sl : s_->slots)
+        if (sl.live && sl.fd == fd)
+            return std::unexpected(error::make(std::errc::file_exists,
+                                               "watch: fd already watched by this reactor"));
     std::uint32_t idx;
     if (!s_->free.empty()) {
         idx = s_->free.back();

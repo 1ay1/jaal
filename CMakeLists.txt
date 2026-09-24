@@ -43,8 +43,15 @@ include(JaalWarnings)
 # ONLY in src/platform/<os>/, so they never leak into user code. The
 # library is STATIC; there's no stable ABI to promise yet.
 set(JAAL_PLATFORM_SOURCES "")
-if(UNIX)
+if(WIN32)
+    list(APPEND JAAL_PLATFORM_SOURCES src/platform/windows/wait_reactor.cpp)
+elseif(UNIX)
     list(APPEND JAAL_PLATFORM_SOURCES src/platform/posix/poll_reactor.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND JAAL_PLATFORM_SOURCES src/platform/linux/epoll_reactor.cpp)
+    elseif(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD")
+        list(APPEND JAAL_PLATFORM_SOURCES src/platform/darwin/kqueue_reactor.cpp)
+    endif()
 endif()
 
 add_library(jaal STATIC ${JAAL_PLATFORM_SOURCES})
