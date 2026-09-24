@@ -1,0 +1,92 @@
+{
+  "version": 8,
+  "cmakeMinimumRequired": { "major": 3, "minor": 29, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "JAAL_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Debug, fast iteration (ccache, lld/mold, split DWARF)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "JAAL_SPLIT_DWARF": "OFF"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI: warnings are errors, unity build",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "JAAL_WERROR": "ON",
+        "JAAL_UNITY": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Address + UB sanitizers",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "Thread sanitizer",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer"
+      }
+    },
+    {
+      "name": "mingw",
+      "displayName": "Windows cross-compile via llvm-mingw",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_SYSTEM_NAME": "Windows",
+        "CMAKE_CXX_COMPILER": "x86_64-w64-mingw32-clang++",
+        "JAAL_SPLIT_DWARF": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev",     "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "ci",      "configurePreset": "ci" },
+    { "name": "asan",    "configurePreset": "asan" },
+    { "name": "tsan",    "configurePreset": "tsan" },
+    { "name": "mingw",   "configurePreset": "mingw" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 12 }
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 0 }
+    }
+  ]
+}
