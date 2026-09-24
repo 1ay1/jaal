@@ -55,6 +55,37 @@ same as for any other program.
 
 Full example: [examples/ticker.cpp](examples/ticker.cpp).
 
+## Building
+
+Needs GCC 16 or clang 22 (C++26), CMake 3.29+, Ninja.
+
+```sh
+cmake --preset dev          # debug; uses ccache and mold/lld when installed
+cmake --build --preset dev
+ctest --preset dev
+```
+
+Other presets: `clang`, `asan`, `tsan`, `release`, `mingw` (Windows cross
+build with llvm-mingw; tests run under wine).
+
+## What's tested where
+
+| | Linux | Windows | macOS |
+|---|---|---|---|
+| core, kernel | runs | runs (wine) | compiles |
+| reactor | epoll + poll, run | wait_reactor, run under wine | kqueue, compiles only |
+| signals | run | handler run directly; not yet via a real console | compiles only |
+
+macOS has not been run on real hardware yet, and Windows has only run
+under wine. Both are open.
+
+## Using it from CMake
+
+```cmake
+add_subdirectory(jaal)                  # or: find_package(jaal)
+target_link_libraries(app PRIVATE jaal::jaal)
+```
+
 ## License
 
 MIT
