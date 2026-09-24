@@ -38,19 +38,34 @@ endif()
 include(JaalWarnings)
 
 # ── the library ──────────────────────────────────────────────────────────
-# Header-only for now: core and kernel are templates over the user's Msg.
-# It becomes a STATIC library when the platform backends (src/platform/)
-# land; the target name and alias stay the same.
-add_library(jaal INTERFACE)
+# core/ and kernel/ are header-only templates over the user's Msg. The
+# platform backends are compiled: OS headers (<poll.h>, <windows.h>) live
+# ONLY in src/platform/<os>/, so they never leak into user code. The
+# library is STATIC; there's no stable ABI to promise yet.
+set(JAAL_PLATFORM_SOURCES "")
+if(UNIX)
+    list(APPEND JAAL_PLATFORM_SOURCES src/platform/posix/poll_reactor.cpp)
+endif()
+
+add_library(jaal STATIC ${JAAL_PLATFORM_SOURCES})
 add_library(jaal::jaal ALIAS jaal)
 
 file(GLOB_RECURSE JAAL_HEADERS CONFIGURE_DEPENDS
      ${PROJECT_SOURCE_DIR}/include/jaal/*.hpp)
-target_sources(jaal INTERFACE
+target_sources(jaal PUBLIC
     FILE_SET HEADERS
     BASE_DIRS ${PROJECT_SOURCE_DIR}/include
     FILES     ${JAAL_HEADERS})
-target_compile_features(jaal INTERFACE cxx_std_23)
+target_compile_features(jaal PUBLIC cxx_std_23)
+find_package(Threads REQUIRED)
+target_link_libraries(jaal PUBLIC Threads::Threads)
+# jaal's own sources get the strict warnings. Taken as a genex over the
+# private target's options rather than linking it: a PRIVATE link on a
+# STATIC library still lands in the install export set.
+target_compile_options(jaal PRIVATE
+    $<TARGET_PROPERTY:jaal_warnings,INTERFACE_COMPILE_OPTIONS>)
+# A static library with no sources on some platform is still valid.
+set_target_properties(jaal PROPERTIES LINKER_LANGUAGE CXX)
 
 # ── tests / examples / bench ─────────────────────────────────────────────
 if(JAAL_BUILD_TESTS)
