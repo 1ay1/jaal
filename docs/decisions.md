@@ -727,3 +727,45 @@ program safe to refactor.
 variant<variant<CEnter, CBack, CSubmit>> -> variant<CEnter, CBack, CSubmit>
 -> CSubmit); add: static Cmd update(Model&, CSubmit)` — which is the domain
 whose file you open. (`tests/compile_fail/kernel.cpp` case 8.)
+
+## D37. Re-subscribe is linear, and the benchmark says so
+
+**Decision.** Every per-subscription lookup on the reconcile path is O(1),
+and `bench/bench.cpp` measures ns-per-subscription at 16 / 64 / 256 so a
+regression shows up as a rising column rather than a slow app.
+
+**What was wrong.** Three independent quadratic terms, all with the same
+symptom: a UI whose model drives one subscription per visible row got slower
+the more it showed. Measured 8 → 256 timers: 32x the work, **295x the time**
+(79 → 728 ns per timer).
+
+1. `running_sources::reconcile` scanned `want_` for each source to find
+   duplicates, and `running_` for each source to decide keep-vs-start.
+2. `next_ordinal` scanned a flat list of ordinal bases per source. Invisible
+   in the old benchmark because its 8 timers all had *distinct* intervals and
+   the list stayed short; with hundreds it dominated. Isolating it was the
+   turn of the investigation: with one shared base the cost was flat at
+   41 ns/sub, with N distinct bases it rose to 349 ns/sub.
+3. `timer_heap::replace_payload` scanned the heap for an id, and `reconcile`
+   calls it once per KEPT timer — so n timers meant n scans of n entries.
+   `cancel` was worse: an O(n) erase plus a `make_heap` over everything.
+
+**What fixed it.** Flat, open-addressed indexes beside the existing vectors
+above a threshold (16), and an id→slot map in the timer heap so
+`replace_payload` is O(1) and `cancel` is O(log n) (swap the hole with the
+last entry, sift it). Below the threshold nothing changes: a linear scan of a
+handful of contiguous keys beats any hash, and small subscription sets are
+the common case.
+
+**The mistake worth recording.** My first index used `std::unordered_map` and
+`clear()` + `reserve()` each cycle. That turned 0.14 allocations per reconcile
+into **196** — three per subscription, every cycle — because `clear()` frees
+every node and `reserve()` re-allocates the buckets. It was *slower* than the
+quadratic scan it replaced at small sizes. A node-based map is the wrong shape
+for a table rebuilt every frame; the flat vector reuses its buffer and
+allocates nothing in a steady state.
+
+**Result.** Per-timer cost is flat and slightly *improves* with scale (86 →
+71 ns), because the work per source is now cache-friendly rather than a
+scan. At 256 timers: **186 us → 18 us, 10x.** `fold` is ~10 ns (was ~19 in
+the docs, and 68 ns before in-place update, D31).

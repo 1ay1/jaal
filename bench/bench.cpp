@@ -183,6 +183,56 @@ void bench_sim() {
                 ns / 1e3, 1e9 / ns);
 }
 
+// ── reconcile, as the subscription count grows ─────────────────────────
+// The number that matters isn't the absolute cost, it's the SHAPE: ns per
+// timer must stay flat. Three separate quadratic terms used to live on this
+// path (the reconciler's duplicate scan, its ordinal scan, and the timer
+// heap's replace_payload), and the symptom was the same each time — a UI
+// with one subscription per visible row got slower the more it showed. At
+// 8 -> 256 timers that was 32x the work for 295x the time.
+//
+// If a future change reintroduces one, the per-timer column climbs and this
+// benchmark says so.
+template <int N>
+struct ManyTimers {
+    struct Model { std::uint64_t n = 0; };
+    struct Tick {}; struct Poke {};
+    using Msg = std::variant<Tick, Poke>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    template <class M> static Cmd update(Model& m, M) { ++m.n; return {}; }
+    static Sub subscribe(const Model&) {
+        std::vector<Sub> v;
+        v.reserve(N);
+        // Distinct intervals: N distinct ordinal bases, the worst case.
+        for (int i = 1; i <= N; ++i)
+            v.push_back(Sub::every(std::chrono::milliseconds(100 * i), Tick{}));
+        return Sub::batch(std::move(v));
+    }
+};
+
+template <int N>
+void bench_reconcile_at(std::size_t iters) {
+    jaal::headless<ManyTimers<N>> h;
+    auto& k = h.kernel();
+    k.dispatch(typename ManyTimers<N>::Poke{});     // warm: start the timers
+    k.step(h.record());
+    const double ns = ns_per(iters, [&] {
+        for (std::size_t i = 0; i < iters; ++i) {
+            k.dispatch(typename ManyTimers<N>::Poke{});
+            k.step(h.record());
+        }
+    });
+    std::printf("  %-14s %10d subs  %9.1f ns/reconcile  %7.1f ns/sub\n",
+                "  scaling", N, ns, ns / N);
+}
+
+void bench_reconcile_scaling() {
+    bench_reconcile_at<16>(50'000);
+    bench_reconcile_at<64>(20'000);
+    bench_reconcile_at<256>(5'000);
+}
+
 }  // namespace
 
 int main() {
@@ -198,6 +248,7 @@ int main() {
     bench_cross_thread();
     bench_idle_step();
     bench_reconcile();
+    bench_reconcile_scaling();
     bench_sim();
     return 0;
 }

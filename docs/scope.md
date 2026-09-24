@@ -190,12 +190,21 @@ Release build, one core, from `bench/` (`jaal_bench`):
 
 | path | cost |
 |---|---|
-| one message through `update`, no effects | ~19 ns |
-| one message with an effect (`after`) | ~45 ns |
-| cross-thread send + drain + fold, 4 producers | ~195 ns |
-| a `step` with nothing to do | ~3.6 ns |
-| a message that changes the model, plus re-subscribe of 8 timers | ~660 ns |
-| a whole sim run: start, 3 inputs, 3 tasks, 2 invariants, shutdown | ~1.1 us (~900k seeds/s) |
+| one message through `update`, no effects | ~10 ns (97M/s) |
+| one message with an effect (`after`) | ~29 ns |
+| cross-thread send + drain + fold, 4 producers | ~84 ns |
+| a `step` with nothing to do | ~7 ns |
+| a message that changes the model, plus re-subscribe of 8 timers | ~725 ns |
+| the same, 256 timers | ~18 us, i.e. **~72 ns per timer** |
+| a whole sim run: start, 3 inputs, 3 tasks, 2 invariants, shutdown | ~1.4 us (~700k seeds/s) |
+
+Re-subscribe is **linear in the number of subscriptions**, and the benchmark
+has a scaling row to keep it that way. It wasn't: three separate quadratic
+terms sat on that path (the reconciler's duplicate scan, its ordinal scan,
+and the timer heap's `replace_payload`, which scanned the heap once per kept
+timer). A UI with one subscription per visible row therefore got slower the
+more it showed — 8 → 256 timers was 32x the work for 295x the time. Now the
+per-timer cost is flat, and 256 timers cost 18 us instead of 186 us.
 
 For comparison, the C prior art (`~/projects/tea`) measured ~54 ns for its
 fold round trip and ~234 ns cross-thread with 4 producers. These are
