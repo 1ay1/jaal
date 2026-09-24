@@ -35,6 +35,13 @@
 //       // 5. after each step that changed the model: draw
 //       template <class K> void present(K& kernel);
 //
+//       // optional: a frame present() couldn't finish (a renderer that
+//       // backed off a congested terminal). While true, present() is called
+//       // again even with no model change, and wait_hint() bounds how long
+//       // the loop sleeps before that retry.
+//       bool owes_frame() const;
+//       std::optional<std::chrono::milliseconds> wait_hint() const;
+//
 //       // effects/sources beyond core: handle(E), start_source/stop_source
 //
 //       // teardown, before the kernel finishes (restore the terminal, ...)
@@ -211,6 +218,21 @@ struct forward_host {
 template <class H>
 using kernel_event_t = typename detail::run::with_signals<typename H::event_type>::type;
 
+namespace detail::run {
+/// Does the host still owe a frame it tried to draw and couldn't finish?
+/// A host that defers (a terminal renderer backing off a congested tty)
+/// says so with owes_frame(); present() is then called again even though the
+/// model hasn't changed, so the deferred frame gets its retry.
+template <class H>
+bool host_owes_frame(const H& h) {
+    if constexpr (requires { { h.owes_frame() } -> std::convertible_to<bool>; })
+        return h.owes_frame();
+    else
+        return false;
+}
+}  // namespace detail::run
+using detail::run::host_owes_frame;
+
 struct run_options {
     kernel::options kernel{};
     /// Stop with 128+signo on interrupt/terminate/hangup that the program
@@ -334,11 +356,23 @@ int run(H& host, run_options opt, durable<P> d) {
     for (;;) {
         auto t = k.step(fwd);
         if constexpr (requires { host.present(k); })
-            if (t.model_changed || t.folded == 0) host.present(k);
+            if (t.model_changed || t.folded == 0 || host_owes_frame(host)) host.present(k);
         if (t.quit()) break;
 
-        const auto timeout = kernel::timeout_from<platform::steady_clock>(
+        auto timeout = kernel::timeout_from<platform::steady_clock>(
             k.clock().now(), k.next_deadline());
+        // The host may owe work of its own that no handle will announce: a
+        // renderer that coalesced a frame (the terminal was congested) and
+        // needs to be asked again shortly, or bytes still queued for a slow
+        // tty. It says how soon with wait_hint(); the loop waits no longer.
+        // Found running maya on jaal in a real pty: maya's renderer defers a
+        // frame and relies on its own loop to retry within a few ms, so under
+        // jaal every keystroke drew the PREVIOUS model — the owed frame sat
+        // unpainted until the next event came along.
+        if constexpr (requires { { host.wait_hint() } -> std::convertible_to<std::optional<std::chrono::milliseconds>>; }) {
+            if (const std::optional<std::chrono::milliseconds> h = host.wait_hint())
+                timeout = timeout ? std::min(*timeout, *h) : *h;
+        }
         auto res = reactor->wait(timeout);
         if (!res) {
             std::fprintf(stderr, "jaal: reactor wait failed: %.*s\n",

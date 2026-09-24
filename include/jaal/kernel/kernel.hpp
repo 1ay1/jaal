@@ -330,7 +330,13 @@ public:
         for (auto& m : routed_) pending_.push_back({0, std::move(m)});
         routed_.clear();
         const auto produced = pending_.size() - before;
-        fold_pending(host);
+        // The fold happens HERE, not in the next step() — so step() will find
+        // nothing pending and report model_changed = false, and a drawing
+        // host would never redraw for this event. Found by driving maya's
+        // terminal host in a real pty: every keystroke updated the model and
+        // none of them reached the screen until an unrelated timer happened
+        // to force a frame. So the change is carried to the next turn.
+        if (fold_pending(host)) changed_since_turn_ = true;
         reconcile(host);
         return produced;
     }
@@ -378,6 +384,10 @@ public:
             && !task_faults_->pending.load(std::memory_order_acquire)
             && !subs_dirty_
             && (timers_.empty() || clock_.now() < *timers_.next_deadline())) {
+            // Nothing to DO — but a route() since the last turn may have
+            // changed the model, and the host must still hear about it or
+            // it never redraws. Reporting it is free; skipping it isn't.
+            t.model_changed = std::exchange(changed_since_turn_, false);
             return t;
         }
         now_cached_ = false;                  // a new step: time has moved
@@ -414,7 +424,7 @@ public:
         // 4. re-subscribe if the model changed
         reconcile(host);
 
-        t.model_changed = changed;
+        t.model_changed = changed || std::exchange(changed_since_turn_, false);
         t.exit          = exit_;
         if (opt_.trace) {
             trace_event e{trace_kind::step};
@@ -1138,6 +1148,9 @@ private:
     std::size_t         duplicates_ = 0;
     std::optional<int>  exit_;           // set = quitting, with this code
     bool                subs_dirty_ = true;
+    // A route() between two steps changed the model; the next turn reports
+    // it (see route()).
+    bool                changed_since_turn_ = false;
     // The last subs_key, when the program declares one. Empty = "no known
     // key": the next change always runs subscribe().
     [[no_unique_address]] typename subs_key_slot<P>::type subs_key_{};

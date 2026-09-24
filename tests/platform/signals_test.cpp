@@ -124,6 +124,32 @@ int respects_inherited_ignore() {
     return 0;
 }
 
+int an_ignored_resize_is_still_watched() {
+    // The other half of the rule above. SIGWINCH's default action is already
+    // "do nothing", so SIG_IGN on it isn't anybody's instruction — it's a
+    // leftover. maya's terminal layer sets it (kqueue can observe an ignored
+    // signal; a self-pipe can't), and honouring it made jaal deaf to every
+    // resize. So a stopping signal's SIG_IGN is respected and SIGWINCH's is
+    // not.
+    struct sigaction ign {}, old {};
+    ign.sa_handler = SIG_IGN;
+    sigemptyset(&ign.sa_mask);
+    ::sigaction(SIGWINCH, &ign, &old);
+    {
+        auto s = pf::posix_signals::install({sig::resize}).value();
+        if (!s.watching().contains(sig::resize)) return 51;  // must NOT be left deaf
+        ::raise(SIGWINCH);
+        bool got = false;
+        for (int i = 0; i < 100 && !got; ++i) {
+            got = s.take().contains(sig::resize);
+            if (!got) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!got) return 52;                               // and actually delivered
+    }
+    ::sigaction(SIGWINCH, &old, nullptr);
+    return 0;
+}
+
 int teardown_under_fire() {
     // Tear sources down while another thread floods the process with
     // signals. The handler must never write into a closed fd, because the
@@ -172,6 +198,7 @@ int main() {
     ::signal(SIGWINCH, SIG_DFL);
     int (*const checks[])() = {basic, coalesces, two_sources_both_see_it,
                                restores_previous_handler, respects_inherited_ignore,
+                               an_ignored_resize_is_still_watched,
                                teardown_under_fire};
     for (auto f : checks)
         if (int r = f()) {

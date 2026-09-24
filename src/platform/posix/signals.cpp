@@ -89,6 +89,28 @@ extern "C" void on_signal(int sig) {
     errno = saved_errno;
 }
 
+// Should an inherited SIG_IGN for signal i be left alone?
+//
+// For the signals that STOP a process — SIGINT, SIGTERM, SIGHUP — yes.
+// Ignoring one of those is a deliberate instruction from whoever started us
+// (`nohup` ignores SIGHUP; a shell ignores SIGINT for a background job) that
+// means "don't let this kill you". Overriding it would make jaal programs
+// die where every other program survives.
+//
+// For SIGWINCH and SIGCHLD, NO. Their default ACTION is already to do
+// nothing, so SIG_IGN is not an instruction to anyone — it's just a value a
+// library happened to leave there. Honouring it made jaal deaf to resizes:
+// found running maya on jaal, whose terminal layer sets SIGWINCH to SIG_IGN
+// (kqueue can still observe an ignored signal, but a self-pipe can't), so
+// every resize was silently dropped. SIGCHLD is worse: SIG_IGN on it changes
+// SEMANTICS (children are reaped automatically, and wait() then fails with
+// ECHILD), so a stray SIG_IGN there breaks anything that waits on children.
+// Installing our handler restores the normal behaviour on both.
+bool honour_inherited_ignore(unsigned i) {
+    const int s = native_of(i);
+    return s == SIGINT || s == SIGTERM || s == SIGHUP;
+}
+
 // Is signal i currently ignored by inheritance (nohup, a background job)?
 bool inherited_ignore(unsigned i) {
     struct sigaction cur {};
@@ -144,9 +166,10 @@ result<posix_signals> posix_signals::install(signal_set wanted) {
     for (unsigned i = 0; i < signal_count; ++i) {
         const auto sg = static_cast<sig>(i);
         if (!wanted.contains(sg)) continue;
-        // nohup / background jobs: an inherited SIG_IGN stays ignored,
-        // unless we already own the handler (then it isn't inherited).
-        if (!g_installed[i] && inherited_ignore(i)) continue;
+        // nohup / background jobs: an inherited SIG_IGN on a STOPPING signal
+        // stays ignored, unless we already own the handler (then it isn't
+        // inherited). See honour_inherited_ignore for why only those.
+        if (!g_installed[i] && honour_inherited_ignore(i) && inherited_ignore(i)) continue;
         if (!add_handler(i)) continue;
         got.add(sg);
     }
