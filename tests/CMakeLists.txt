@@ -29,6 +29,7 @@ jaal_static_test(core_sendable_test core/sendable_test.cpp)
 # Frozen/shared have static checks AND runtime behaviour (lifetime, many
 # readers), so they're a normal test: build, then run.
 jaal_test(core_frozen_test core/frozen_test.cpp)
+jaal_test(core_cmd_test core/cmd_test.cpp)
 
 # ── compile-fail tests ───────────────────────────────────────────────────
 jaal_compile_fail(NAME meta_at_oob        SOURCE compile_fail/meta.cpp CASE 1)
@@ -64,6 +65,20 @@ jaal_compile_fail(NAME shared_no_null     SOURCE compile_fail/frozen.cpp CASE 5
                   MATCH "shared<Doc>::shared\\(\\)|no matching constructor")
 jaal_compile_fail(NAME shared_no_rawptr   SOURCE compile_fail/frozen.cpp CASE 6
                   MATCH "const Doc ?\\*")
+
+# Cmd / rows / tasks
+jaal_compile_fail(NAME cmd_effect_not_in_row SOURCE compile_fail/cmd.cpp CASE 1
+                  MATCH "jaal: this effect is not in the Cmd's row")
+jaal_compile_fail(NAME cmd_no_narrowing      SOURCE compile_fail/cmd.cpp CASE 2
+                  MATCH "jaal: can't convert to a Cmd with fewer effects")
+jaal_compile_fail(NAME task_no_capture       SOURCE compile_fail/cmd.cpp CASE 3
+                  MATCH "jaal: a task body must not capture anything")
+jaal_compile_fail(NAME task_arg_sendable     SOURCE compile_fail/cmd.cpp CASE 4
+                  MATCH "jaal: a task argument is not Sendable")
+jaal_compile_fail(NAME task_map_captureless  SOURCE compile_fail/cmd.cpp CASE 5
+                  MATCH "jaal: Cmd::map on a Cmd holding a task needs a captureless mapper")
+jaal_compile_fail(NAME sink_msg_sendable     SOURCE compile_fail/cmd.cpp CASE 6
+                  MATCH "jaal: a Sink's Msg must be Sendable")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering
