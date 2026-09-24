@@ -182,5 +182,73 @@ int main() {
 }
 
 #else
-int main() { return 0; }
+
+#include <jaal/platform/windows/console_signals.hpp>
+#include <jaal/platform/windows/wait_reactor.hpp>
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#include <windows.h>
+
+namespace {
+
+bool wait_signalled(void* h, std::chrono::milliseconds t) {
+    auto r = pf::wait_reactor::create().value();
+    auto reg = r.watch(h, pf::interest::read, 1).value();
+    return r.wait(t).value().count == 1;
+}
+
+int win_basic() {
+    auto s = pf::console_signals::install(
+        {signal::interrupt, signal::hangup, signal::resize}).value();
+    // resize isn't a console control event: honestly left out
+    if (s.watching() != signal_set{signal::interrupt, signal::hangup}) return 201;
+    if (!s.take().empty()) return 202;
+
+    // delivered on another thread, as Windows does
+    std::jthread t([] { pf::test::console_ctrl(CTRL_C_EVENT); });
+    t.join();
+    if (!wait_signalled(s.handle(), 1s)) return 203;
+    if (s.take() != signal_set{signal::interrupt}) return 204;
+    if (wait_signalled(s.handle(), 0ms)) return 205;     // event reset by take()
+    return 0;
+}
+
+int win_mapping_and_coalesce() {
+    auto s = pf::console_signals::install(
+        {signal::interrupt, signal::terminate, signal::hangup}).value();
+    for (int i = 0; i < 20; ++i) pf::test::console_ctrl(CTRL_BREAK_EVENT);
+    pf::test::console_ctrl(CTRL_SHUTDOWN_EVENT);
+    pf::test::console_ctrl(CTRL_CLOSE_EVENT);
+    if (s.take() != signal_set{signal::interrupt, signal::terminate, signal::hangup}) return 211;
+    return 0;
+}
+
+int win_two_sources() {
+    auto a = pf::console_signals::install({signal::interrupt}).value();
+    auto b = pf::console_signals::install({signal::interrupt, signal::hangup}).value();
+    pf::test::console_ctrl(CTRL_C_EVENT);
+    if (a.take() != signal_set{signal::interrupt}) return 221;
+    if (b.take() != signal_set{signal::interrupt}) return 222;
+    pf::test::console_ctrl(CTRL_CLOSE_EVENT);
+    if (!a.take().empty()) return 223;
+    if (b.take() != signal_set{signal::hangup}) return 224;
+    return 0;
+}
+
+}  // namespace
+
+int main() {
+    int (*const checks[])() = {win_basic, win_mapping_and_coalesce, win_two_sources};
+    for (auto f : checks)
+        if (int r = f()) {
+            std::fprintf(stderr, "signals_test: check %d failed\n", r);
+            return 1;
+        }
+    std::printf("signals_test[windows]: %d checks passed\n", 3);
+    return 0;
+}
 #endif

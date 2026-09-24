@@ -44,7 +44,9 @@ include(JaalWarnings)
 # library is STATIC; there's no stable ABI to promise yet.
 set(JAAL_PLATFORM_SOURCES "")
 if(WIN32)
-    list(APPEND JAAL_PLATFORM_SOURCES src/platform/windows/wait_reactor.cpp)
+    list(APPEND JAAL_PLATFORM_SOURCES
+         src/platform/windows/wait_reactor.cpp
+         src/platform/windows/console_signals.cpp)
 elseif(UNIX)
     list(APPEND JAAL_PLATFORM_SOURCES
          src/platform/posix/poll_reactor.cpp

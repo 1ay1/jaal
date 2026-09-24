@@ -5,3 +5,8 @@
 # [support.signal]); the loop-side install/uninstall bookkeeping is under a
 # mutex that the handler never takes.
 platform/posix/signals.cpp: mutex atomic
+
+# Same shape on Windows: the console control handler runs on a thread
+# Windows creates and touches only atomics; install/uninstall use a mutex.
+# std::thread appears only as this_thread::yield in the teardown wait.
+platform/windows/console_signals.cpp: mutex atomic
