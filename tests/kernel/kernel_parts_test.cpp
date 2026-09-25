@@ -118,6 +118,26 @@ static int timer_tests() {
     if (!h.cancel(id) || !h.empty()) return 26;
     if (h.cancel(id)) return 27;                    // already gone
 
+    // repeating, noticed LATE every time (the loop's wait rounds up, a
+    // step takes time): it must still fire at its own rate. It used to
+    // re-arm from `now`, adding the lateness to every period: a 16 ms
+    // timer noticed 1.3 ms late ran every 17.3 ms (57.8 Hz, not 62.5).
+    {
+        fired.clear();
+        auto t = h.every(c.now(), 16ms, Msg{5});
+        const auto t0 = c.now();
+        for (int i = 0; i < 1000; ++i) {
+            const auto due = *h.next_deadline();
+            c.advance((due - c.now()) + 1300us);   // always 1.3 ms late
+            h.collect_due(c.now(), fired);
+        }
+        const auto elapsed = c.now() - t0;
+        // 1000 ticks at 16 ms = 16 s; lateness must not accumulate.
+        if (fired.size() != 1000) return 40;
+        if (elapsed > 16s + 2ms) return 41;
+        (void)h.cancel(t);
+    }
+
     // ordering: earliest first, whatever order they were armed in
     fired.clear();
     h.after(c.now(), 30ms, Msg{3});

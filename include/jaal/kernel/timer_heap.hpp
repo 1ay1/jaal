@@ -33,9 +33,9 @@
 // the hole with the last entry and sifts that entry into place, which is
 // O(log n) and touches two cache lines.
 //
-// Ordering rule, unchanged: a repeating timer re-arms from NOW, not from its
-// old deadline. A loop stalled for ten periods fires an `every` ONCE and
-// carries on, rather than delivering ten backdated ticks (D22).
+// Ordering rule: a repeating timer keeps PHASE (re-arms from its deadline),
+// but a loop stalled for more than a period fires an `every` ONCE and
+// resyncs, rather than delivering backdated ticks (D22).
 //
 // Entries have stable ids so the reconciler can cancel one by key without
 // caring where it sits in the heap.
@@ -166,15 +166,24 @@ public:
         return heap_.front().when;
     }
 
-    /// Pop every timer due at `now` into `out`. Repeating ones re-arm from
-    /// NOW (no catch-up storm) and stay in the heap.
+    /// Pop every timer due at `now` into `out`. Repeating ones stay in the
+    /// heap and re-arm one period after their DEADLINE, not after `now`: the
+    /// loop always notices a timer a little late (the wait rounds up, the
+    /// step before it takes time), and re-arming from `now` added that
+    /// lateness to every period. A 16 ms `every` ran at 54.7 Hz where 62.5
+    /// was asked. Keeping phase fixes the rate exactly.
+    ///
+    /// D22 is kept: if the timer is more than a whole period late (the loop
+    /// stalled), it fires ONCE and resyncs to now + period, instead of
+    /// delivering the missed ticks as a catch-up storm.
     void collect_due(time_point now, std::vector<Payload>& out) {
         while (!heap_.empty() && heap_.front().when <= now) {
             auto e = std::move(heap_.front());
             pop_root();
             out.push_back(e.payload);
             if (e.period > duration::zero()) {
-                e.when = saturate_add<Clock>(now, e.period);
+                const auto next = saturate_add<Clock>(e.when, e.period);
+                e.when = next > now ? next : saturate_add<Clock>(now, e.period);
                 push(std::move(e));
             } else {
                 free_id(e.id);
