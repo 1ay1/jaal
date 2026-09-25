@@ -53,6 +53,9 @@ if(UNIX)
     if(NOT APPLE)
         target_link_libraries(platform_same_tty_test PRIVATE util)
     endif()
+    # owned_handle against real descriptors: closed exactly once, and
+    # observably still open when it was moved, released or only borrowed.
+    jaal_test(platform_handle_test platform/handle_test.cpp)
 endif()
 jaal_test(platform_signals_test platform/signals_test.cpp)
 jaal_test(kernel_run_test kernel/run_test.cpp)
@@ -124,6 +127,28 @@ jaal_compile_fail(NAME task_map_captureless  SOURCE compile_fail/cmd.cpp CASE 5
                   MATCH "jaal: Cmd::map on a Cmd holding a task needs a captureless mapper")
 jaal_compile_fail(NAME sink_msg_sendable     SOURCE compile_fail/cmd.cpp CASE 6
                   MATCH "jaal: a Sink's Msg must be Sendable")
+
+# owned_handle: the double-close and raw-int paths must not compile. These
+# are ordinary type errors rather than jaal diagnostics, so each is pinned
+# to the reason — otherwise a typo would make the case "pass".
+jaal_compile_fail(NAME handle_no_copy       SOURCE compile_fail/handle.cpp CASE 1
+                  MATCH "deleted (function|constructor)[^\n]*owned_handle")
+jaal_compile_fail(NAME handle_no_copy_assign SOURCE compile_fail/handle.cpp CASE 2
+                  MATCH "deleted[^\n]*operator=|use of deleted function")
+jaal_compile_fail(NAME handle_no_implicit_move SOURCE compile_fail/handle.cpp CASE 3
+                  MATCH "deleted (function|constructor)|no (known conversion|matching function)")
+jaal_compile_fail(NAME handle_no_adopt_int  SOURCE compile_fail/handle.cpp CASE 4
+                  MATCH "could not convert|no (known conversion|matching function)")
+jaal_compile_fail(NAME handle_no_decay_int  SOURCE compile_fail/handle.cpp CASE 5
+                  MATCH "cannot convert|no viable conversion")
+jaal_compile_fail(NAME handle_borrow_no_close SOURCE compile_fail/handle.cpp CASE 6
+                  MATCH "no member named")
+jaal_compile_fail(NAME handle_borrow_no_release SOURCE compile_fail/handle.cpp CASE 7
+                  MATCH "no member named")
+jaal_compile_fail(NAME handle_borrow_not_owner SOURCE compile_fail/handle.cpp CASE 8
+                  MATCH "could not convert|no (known conversion|matching function)")
+jaal_compile_fail(NAME handle_owner_not_borrow SOURCE compile_fail/handle.cpp CASE 9
+                  MATCH "could not convert|no (known conversion|matching function)")
 
 # scope / guarded
 jaal_compile_fail(NAME guarded_no_escape  SOURCE compile_fail/scope.cpp CASE 1

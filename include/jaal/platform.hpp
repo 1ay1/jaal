@@ -7,6 +7,7 @@
 //   native_reactor   epoll (Linux), kqueue (macOS/BSD), WaitForMultipleObjects
 //                    (Windows), poll (other POSIX)
 //   native_signals   signals as events, never as handler callbacks
+//   owned_handle     an OS handle as a linear resource (move-only, one close)
 //   steady_clock / sim_clock
 //
 // NO OS headers anywhere in this tree: they live only in src/platform/<os>/,
@@ -19,5 +20,6 @@
 
 #include "platform/clock.hpp"
 #include "platform/concepts.hpp"
+#include "platform/handle.hpp"
 #include "platform/select.hpp"
 #include "platform/signal.hpp"
