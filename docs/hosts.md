@@ -226,9 +226,13 @@ template <class K> void present(K& kernel) {
 }
 ```
 
-`present` is called after any step that changed the model, and when the loop
-is otherwise idle. jaal has no opinion about what a frame is: coalescing,
-damage tracking and vsync are yours.
+`present` is called after any step that changed the model. jaal has no
+opinion about what a frame is: damage tracking and vsync are yours.
+
+To cap how often it's called, set `run_options::min_present_interval`
+(16ms is 60 frames a second). A frame that comes too soon isn't dropped:
+it's owed, and drawn when the gap is up, with whatever the model is by
+then ([D40](decisions.md#d40-drawing-can-be-paced-and-a-paced-frame-is-owed-not-dropped)).
 
 Two optional hooks on the *program* help a drawing host:
 

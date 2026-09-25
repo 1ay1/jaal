@@ -244,6 +244,18 @@ struct run_options {
     /// that wants its bugs to be reproducible logs it here and passes it
     /// back as random_seed to replay the same draws. Unset = not reported.
     std::function<void(std::uint64_t)> on_seed;
+
+    /// The shortest gap between two present() calls. 0 = draw after every
+    /// step that changed the model (the default). A draw that comes too
+    /// soon is not dropped: it is OWED, the loop wakes when the gap is up,
+    /// and present() then draws the model as it is at that moment. So a
+    /// burst of output spread over many wakes is a few frames, not one per
+    /// wake, and the last change always reaches the screen. 16ms caps a
+    /// host at 60 frames a second. (docs/decisions.md D40)
+    ///
+    /// The first frame and the frame after quit are never held back: a
+    /// program's first screen and its last one are both drawn at once.
+    std::chrono::milliseconds min_present_interval{0};
 };
 
 /// Durability for run<P>(): a model to resume from, and a journal hook.
@@ -356,6 +368,10 @@ int run(H& host, run_options opt, durable<P> d) {
     // The first frame is drawn unconditionally: a program whose init()
     // changed nothing still has a screen to show.
     bool first_frame = true;
+    // Pacing (run_options::min_present_interval, D40). A frame that was due
+    // but came too soon is owed, and drawn when `next_present` arrives.
+    std::optional<platform::steady_clock::time_point> next_present;
+    bool frame_owed = false;
 
     for (;;) {
         auto t = k.step(fwd);
@@ -365,15 +381,29 @@ int run(H& host, run_options opt, durable<P> d) {
         // event the program ignored (a key its router maps to nullopt) was
         // drawn anyway. Measured with maya's host: 1500 frames for 1500
         // ignored keys, 67 us of CPU per key against the old loop's 20.
-        if constexpr (requires { host.present(k); })
-            if (t.model_changed || host_owes_frame(host) || first_frame) {
+        if constexpr (requires { host.present(k); }) {
+            if (t.model_changed || host_owes_frame(host)) frame_owed = true;
+            const auto now = platform::steady_clock{}.now();
+            const bool paced = opt.min_present_interval.count() > 0;
+            const bool due = !paced || !next_present || now >= *next_present;
+            if (first_frame || t.quit() || (frame_owed && due)) {
                 first_frame = false;
+                frame_owed = false;
                 host.present(k);
+                if (paced) next_present = now + opt.min_present_interval;
             }
+        }
         if (t.quit()) break;
 
         auto timeout = kernel::timeout_from<platform::steady_clock>(
             k.clock().now(), k.next_deadline());
+        // An owed frame is a deadline like a timer: wake for it.
+        if (frame_owed && next_present) {
+            const auto until = std::chrono::ceil<std::chrono::milliseconds>(
+                *next_present - platform::steady_clock{}.now());
+            const auto w = std::max(until, std::chrono::milliseconds{0});
+            timeout = timeout ? std::min(*timeout, w) : w;
+        }
         // The host may owe work of its own that no handle will announce: a
         // renderer that coalesced a frame (the terminal was congested) and
         // needs to be asked again shortly, or bytes still queued for a slow

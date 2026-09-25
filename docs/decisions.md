@@ -857,3 +857,42 @@ source. `tests/kernel/answer_test.cpp` pins the ordering
 (`send`, answer, `send`) and shows that an unanswering and an answering
 effect can live on one host. A mutation that drops the answer fails it.
 `compile_fail.host_answer_not_msg` pins the diagnostic.
+
+## D40. Drawing can be paced, and a paced frame is owed, not dropped
+
+**Decision.** `run_options::min_present_interval` sets the shortest gap
+between two `present()` calls. Zero (the default) keeps today's
+behaviour: draw after every step that changed the model. When it's set, a
+frame that comes too soon is *owed*: the loop treats the moment the gap is
+up as a deadline, like a timer, wakes for it even if nothing else happens,
+and `present()` then draws the model as it is at that moment. The first
+frame and the frame after quit are never held back.
+
+**Why.** A program's model can change far more often than anyone can see.
+A terminal app streaming a build log gets a message per chunk of output,
+each on its own wakeup, and drew a full frame for every one: hundreds of
+frames a second, each a diff and a write the user never saw. A host can
+throttle itself, but then it has to know when to come back, and the
+"came back" part is the bug: a throttle that drops the frame instead of
+deferring it leaves the screen one or two changes stale until some
+unrelated event happens to draw again. That is maya's old "the last line
+of output shows up when I press a key" report.
+
+Pacing belongs in the loop because only the loop knows when it would
+otherwise sleep. The owed frame is one more deadline next to the timers,
+so it costs nothing when nothing is owed and can't be forgotten when
+something is.
+
+**Considered.**
+- *Leave it to the host.* Every drawing host would reimplement it, and
+  the version that drops frames is the easy one to write.
+- *Pace by skipping steps.* Delays the program's handling of input to save
+  drawing, which is backwards: update is cheap, drawing is not.
+- *vsync / an external clock.* A host that has one (a compositor's page
+  flip, a GPU swap) already paces itself with its own events and leaves
+  this at zero.
+
+(`tests/kernel/pacing_test.cpp`: unpaced draws every change; paced draws
+few frames, never two inside the gap; and a burst followed by silence is
+still drawn about one gap later, with no event to prompt it.)
+
