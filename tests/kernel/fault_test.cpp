@@ -157,6 +157,42 @@ int subscribe_fault_keeps_subs() {
     return 0;
 }
 
+// ── 4b. a view fault: the host drew and it threw ────────────────────────
+// jaal never calls the view, so only the host can report this. The model is
+// untouched by a failed draw: skip keeps the program running (the last good
+// frame stays on screen), stop quits with fault_exit_code.
+
+int view_fault_skips_and_stops() {
+    {   // skip: reported, model kept, program alive
+        recorded rec;
+        jaal::kernel::options opt;
+        opt.on_fault = fault_policy::skip;
+        opt.faults   = rec.handler();
+        jaal::headless<Fragile> h(opt);
+        h.send(Fragile::Add{"x"});
+        h.kernel().view_faulted(std::make_exception_ptr(std::runtime_error("draw blew up")));
+        if (rec.faults.size() != 1)                         return 451;
+        if (rec.faults[0].site != fault_site::view)         return 452;
+        if (!rec.faults[0].model_kept)                      return 453;
+        if (rec.faults[0].stopping)                         return 454;
+        if (h.model().lines.size() != 4)                    return 455;
+        h.send(Fragile::Add{"y"});                          // still running
+        if (h.model().lines.size() != 5)                    return 456;
+    }
+    {   // stop (the default): quits with fault_exit_code
+        recorded rec;
+        jaal::kernel::options opt;
+        opt.faults = rec.handler();
+        jaal::headless<Fragile> h(opt);
+        h.kernel().view_faulted(std::make_exception_ptr(std::runtime_error("draw blew up")));
+        if (rec.faults.size() != 1)                         return 461;
+        if (rec.faults[0].site != fault_site::view)         return 462;
+        if (!rec.faults[0].stopping)                         return 463;
+        if (!h.kernel().quitting())                          return 464;
+    }
+    return 0;
+}
+
 // ── 5. shutdown can't hang on a task that ignores its stop token ────────
 struct Stubborn {
     struct Model {};
@@ -209,6 +245,7 @@ int throwing_handler() {
 int main() {
     int (*const checks[])() = {skip_keeps_model, stop_quits, task_fault_reported,
                                task_fault_stops_by_default, subscribe_fault_keeps_subs,
+                               view_fault_skips_and_stops,
                                shutdown_bounded, throwing_handler};
     for (auto f : checks)
         if (int r = f()) {
