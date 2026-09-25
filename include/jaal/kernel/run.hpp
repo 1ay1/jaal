@@ -393,7 +393,12 @@ int run(H& host, run_options opt, durable<P> d) {
                 if (paced) next_present = now + opt.min_present_interval;
             }
         }
-        if (t.quit()) break;
+        // present() can itself end the program: a host that reports a view
+        // fault (kernel::view_faulted) with the stop policy calls stop() from
+        // in there. Ask the kernel, not the stale turn — otherwise the loop
+        // goes on to wait for input that will never come, and a program whose
+        // draw throws hangs instead of quitting.
+        if (t.quit() || k.quitting()) break;
 
         auto timeout = kernel::timeout_from<platform::steady_clock>(
             k.clock().now(), k.next_deadline());
