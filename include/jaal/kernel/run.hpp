@@ -353,10 +353,23 @@ int run(H& host, run_options opt, durable<P> d) {
 
     if constexpr (requires { host.attach(cx); }) host.attach(cx);
 
+    // The first frame is drawn unconditionally: a program whose init()
+    // changed nothing still has a screen to show.
+    bool first_frame = true;
+
     for (;;) {
         auto t = k.step(fwd);
+        // Draw when the model changed, or when the host says it owes a frame
+        // (an animation tick, a deferred write). NOT on every step that
+        // folded nothing: that clause made every idle wakeup a frame, so an
+        // event the program ignored (a key its router maps to nullopt) was
+        // drawn anyway. Measured with maya's host: 1500 frames for 1500
+        // ignored keys, 67 us of CPU per key against the old loop's 20.
         if constexpr (requires { host.present(k); })
-            if (t.model_changed || t.folded == 0 || host_owes_frame(host)) host.present(k);
+            if (t.model_changed || host_owes_frame(host) || first_frame) {
+                first_frame = false;
+                host.present(k);
+            }
         if (t.quit()) break;
 
         auto timeout = kernel::timeout_from<platform::steady_clock>(
