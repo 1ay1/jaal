@@ -22,7 +22,7 @@ option(JAAL_UNITY          "Unity build (for CI; slower incremental)"    OFF)
 
 # ── language level ───────────────────────────────────────────────────────
 # C++26 where the compiler advertises it, C++23 otherwise (MSVC). The public
-# target only REQUIRES C++23, so consumers on 23 still work.
+# target requires 26 too (23 on MSVC): see target_compile_features below.
 # A CMake older than the compiler (e.g. CMake 3.31 with AppleClang 21) doesn't
 # list cxx_std_26 even though the compiler takes -std=c++2c; the build then
 # silently drops to C++23 and leans on -Wc++26-extensions. For jaal's OWN
@@ -81,7 +81,17 @@ target_sources(jaal PUBLIC
     FILE_SET HEADERS
     BASE_DIRS ${PROJECT_SOURCE_DIR}/include
     FILES     ${JAAL_HEADERS})
-target_compile_features(jaal PUBLIC cxx_std_23)
+# Consumers need what jaal's headers need. The Sendable/Frozen checks read a
+# struct's fields with C++26 structured binding packs; below C++26 they can't,
+# so a consumer at C++23 compiled every program into a wall of "not Sendable"
+# errors about its own messages. Require 26 where the compiler has it, so a
+# consumer's target is raised to it automatically. MSVC keeps 23 (it has no
+# binding packs yet and jaal runs it on shallow rules).
+if(NOT MSVC)
+    target_compile_features(jaal PUBLIC cxx_std_26)
+else()
+    target_compile_features(jaal PUBLIC cxx_std_23)
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(jaal PUBLIC Threads::Threads)
 # jaal's own sources get the strict warnings. Taken as a genex over the

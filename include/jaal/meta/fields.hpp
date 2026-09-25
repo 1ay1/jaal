@@ -40,6 +40,16 @@ namespace jaal::meta {
 #  define JAAL_HAS_FIELDS 0
 #endif
 
+// Without this, every struct looks opaque, so jaal's Sendable and Frozen
+// checks reject EVERY program with "a class jaal can't see inside" pointing
+// at the user's first message type. That diagnoses the wrong thing: the
+// program is fine, the language level isn't. Say so directly. MSVC is the
+// exception jaal still supports on shallow rules; everything else needs
+// C++26.
+#if !JAAL_HAS_FIELDS && !defined(_MSC_VER)
+#  error "jaal needs C++26 structured binding packs (P1061) to check messages are Sendable: build with -std=c++26 (or -std=c++2c) on GCC 16+ or clang 22+."
+#endif
+
 inline constexpr bool has_fields_support = JAAL_HAS_FIELDS;
 
 // ── aggregate_struct ─────────────────────────────────────────────────────
