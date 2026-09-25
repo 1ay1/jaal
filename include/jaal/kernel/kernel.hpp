@@ -353,6 +353,16 @@ public:
         pending_.clear();
     }
 
+    /// Report an exception the HOST caught while drawing the model (jaal
+    /// never calls the view itself: only the host knows what drawing means).
+    /// The model is untouched by a failed draw, so fault_policy::skip keeps
+    /// the program alive with the last good frame on screen; the default
+    /// policy (stop) quits with fault_exit_code, having reported it. Either
+    /// way the host's teardown runs, so the terminal is given back.
+    void view_faulted(std::exception_ptr e) noexcept {
+        fault_raised(fault_site::view, std::move(e), /*model_kept=*/true);
+    }
+
     // ── one turn ────────────────────────────────────────────────────────
     template <class H>
     turn step(H& host) {

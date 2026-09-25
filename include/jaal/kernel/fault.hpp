@@ -43,6 +43,7 @@ enum class fault_policy : std::uint8_t { stop, skip };
 enum class fault_site : std::uint8_t {
     update,        // P::update threw
     subscribe,     // P::subscribe threw
+    view,          // the host's view/draw of the model threw
     effect,        // a host handle()/start_source() threw on the loop
     task,          // a task (pool or isolated) threw on a worker thread
 };
@@ -51,6 +52,7 @@ enum class fault_site : std::uint8_t {
     switch (s) {
         case fault_site::update:    return "update";
         case fault_site::subscribe: return "subscribe";
+        case fault_site::view:      return "view";
         case fault_site::effect:    return "effect";
         case fault_site::task:      return "task";
     }
