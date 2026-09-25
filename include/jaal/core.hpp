@@ -26,6 +26,7 @@
 #include "core/frozen.hpp"
 #include "core/fx.hpp"
 #include "core/program.hpp"
+#include "core/report.hpp"
 #include "core/rng.hpp"
 #include "core/router.hpp"
 #include "core/row.hpp"

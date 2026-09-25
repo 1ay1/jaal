@@ -223,6 +223,39 @@ public:
         return std::holds_alternative<None>(inner);
     }
 
+    // ── resolving an effect ─────────────────────────────────────────────────
+    /// Replace every D effect (batches included) with the Cmd `f` makes of
+    /// it, and take D out of the row. What `f` returns must fit the smaller
+    /// row, so a resolved effect can't reappear.
+    ///
+    /// This is how an effect meant for someone ELSE is settled at the
+    /// boundary where that someone is known: child<> resolves a child's
+    /// `report` into a `send` of the parent's message. The result no longer
+    /// mentions `report`, so it fits the parent's row, which never had it.
+    template <Effect D, class F>
+        requires in_row<D, row_type>
+    [[nodiscard]] auto resolve(F f) &&
+        -> basic_cmd<Msg, row_minus<row_type, make_row<D>>> {
+        using To = basic_cmd<Msg, row_minus<row_type, make_row<D>>>;
+        static_assert(std::is_convertible_v<std::invoke_result_t<F&, payload_t<D, Msg>>, To>,
+                      "jaal: resolve<D>(f): f must return a Cmd without D in its row");
+        return std::visit([&]<class X>(X&& x) -> To {
+            using U = std::remove_cvref_t<X>;
+            if constexpr (std::same_as<U, None>) {
+                return To{};
+            } else if constexpr (std::same_as<U, Batch>) {
+                std::vector<To> out;
+                out.reserve(x.cmds.size());
+                for (auto& c : x.cmds) out.push_back(std::move(c).template resolve<D>(f));
+                return To::batch(std::move(out));
+            } else if constexpr (std::same_as<U, payload_t<D, Msg>>) {
+                return To(f(std::forward<X>(x)));
+            } else {
+                return To(std::forward<X>(x));   // any other effect, unchanged
+            }
+        }, std::move(inner));
+    }
+
     /// Does this basic_cmd (including inside batches) contain an effect of kind D?
     template <Effect D>
         requires in_row<D, row_type>

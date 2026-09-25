@@ -99,13 +99,26 @@ std::string key_of(const Id& id) {
 }  // namespace detail::kids
 
 /// A keyed list of child programs. See the header comment.
-template <Program Child, class Parent, class Wrap>
+///
+/// `From`, when given, is a case of Parent::Msg with two fields, `id` and
+/// `out`: `struct FromTab { int id; Tab::Out out; };`. Every
+/// `Cmd::report(...)` a child returns arrives as From, carrying WHICH child
+/// reported, folded into the parent in the same step (D41). A child whose Cmd
+/// can report must be given a From.
+template <Program Child, class Parent, class Wrap, class From = detail::childx::no_from>
     requires detail::kids::keyed_wrap<Wrap>
 class children {
 public:
     using msg_type   = detail::kids::msg_of<Wrap>;
     using id_type    = detail::kids::id_of<Wrap>;
     using model_type = typename Child::Model;
+
+    static constexpr bool reports =
+        !std::is_void_v<detail::childx::report_of<typename Child::Cmd>>;
+    static_assert(!reports || !std::is_same_v<From, detail::childx::no_from>,
+                  "jaal::children: these children can report (their Cmd has fx::report), "
+                  "so give children<> a fourth argument: the case of Parent::Msg their "
+                  "reports arrive as, e.g. `struct FromTab { int id; Tab::Out out; };`");
 
     static_assert(std::same_as<msg_type, typename Child::Msg>,
                   "jaal::children: Wrap::msg must be the child's Msg type");
@@ -129,13 +142,35 @@ public:
         return PM{Wrap{id, std::move(m)}};
     }
 
+private:
+    /// A child's Cmd as the parent's: each Msg wrapped with the id, then each
+    /// report turned into a send of From{id, out}. The id is captured by
+    /// value into the resolver, which runs here, on the loop thread, before
+    /// the Cmd goes anywhere; nothing that reaches a worker holds it.
+    template <class C>
+    static auto lift(const id_type& id, C c) {
+        auto mapped = std::move(c).map_with(id, &wrap<>);
+        if constexpr (reports) {
+            using PM = typename Parent::Msg;
+            static_assert(detail::childx::is_alt<PM, From>::value,
+                          "jaal::children<..., From>: From must be a case of Parent::Msg");
+            return detail::childx::resolve_reports(std::move(mapped), [&id](auto out) {
+                return PM{From{id, std::move(out)}};
+            });
+        } else {
+            return mapped;
+        }
+    }
+
+public:
+
     // ── the list ────────────────────────────────────────────────────────
     /// Add a child under `id`, running its init(). Replaces any child
     /// already there (and so drops that one's subscriptions).
     static auto add(map& ms, id_type id) {
         auto [model, cmd] = prog::init<Child>();
         ms.insert_or_assign(id, std::move(model));
-        return std::move(cmd).map_with(id, &wrap<>);
+        return lift(id, std::move(cmd));
     }
 
     /// Add under the next free integer id, and hand it back. Only for an
@@ -173,11 +208,11 @@ public:
     template <class W>
         requires std::same_as<std::remove_cvref_t<W>, Wrap>
     static auto update(map& ms, W&& w) {
-        using out = decltype(prog::update<Child>(std::declval<model_type&>(), w.msg)
-                                 .map_with(w.id, &wrap<>));
+        using out = decltype(lift(w.id, prog::update<Child>(std::declval<model_type&>(), w.msg)));
         auto it = ms.find(w.id);
         if (it == ms.end()) return out::none();
-        return prog::update<Child>(it->second, std::forward<W>(w).msg).map_with(w.id, &wrap<>);
+        const id_type id = w.id;
+        return lift(id, prog::update<Child>(it->second, std::forward<W>(w).msg));
     }
 
     /// Every child's subscriptions, batched, each keyed under its own id so

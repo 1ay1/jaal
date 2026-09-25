@@ -40,6 +40,7 @@ jaal_test(core_routing_test core/routing_test.cpp)
 jaal_test(core_child_test core/child_test.cpp)
 jaal_test(core_rng_test core/rng_test.cpp)
 jaal_test(core_children_test core/children_test.cpp)
+jaal_test(core_report_test core/report_test.cpp)
 jaal_test(core_debounce_test core/debounce_test.cpp)
 jaal_test(kernel_parts_test kernel/kernel_parts_test.cpp)
 jaal_test(kernel_test kernel/kernel_test.cpp)
@@ -158,6 +159,12 @@ jaal_compile_fail(NAME teardown_key_not_forgeable SOURCE compile_fail/kernel.cpp
 # a host effect that answers must answer with the program's Msg
 jaal_compile_fail(NAME host_answer_not_msg SOURCE compile_fail/kernel.cpp CASE 9
                   MATCH "jaal: a host handle\\(\\) that returns something must return the program's Msg")
+# a child's reports (D41): they can't be lost by forgetting to wire them,
+# and a child reports only what its Out lists
+jaal_compile_fail(NAME child_reports_need_from SOURCE compile_fail/kernel.cpp CASE 10
+                  MATCH "jaal::child: this child can report")
+jaal_compile_fail(NAME report_not_in_out SOURCE compile_fail/kernel.cpp CASE 11
+                  MATCH "jaal: this report isn't one of the child's Out cases")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering

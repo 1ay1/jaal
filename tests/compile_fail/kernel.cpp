@@ -147,6 +147,42 @@ void f() {
     k.dispatch(Pinger::Go{});
     k.step(h);
 }
+#elif JAAL_CASE == 10 || JAAL_CASE == 11
+// A child that reports (D41).
+struct Kid {
+    struct Model { int n = 0; };
+    struct Poke {};
+    using Msg = std::variant<Poke>;
+    struct Done {};
+    struct Other {};
+    using Out = std::variant<Done>;
+    using Cmd = jaal::Cmd<Msg, jaal::fx::report<Out>>;
+#  if JAAL_CASE == 10
+    static Cmd update(Model&, Poke) { return Cmd::report(Done{}); }
+#  else
+    // 11: reporting something the child's Out doesn't list
+    static Cmd update(Model&, Poke) { return Cmd::report(Other{}); }
+#  endif
+};
+struct Parent {
+    struct ToKid { Kid::Msg msg; };
+    struct FromKid { Kid::Out out; };
+    using Msg = std::variant<ToKid, FromKid>;
+    using Cmd = jaal::Cmd<Msg>;
+#  if JAAL_CASE == 10
+    // 10: embedded WITHOUT saying where its reports go
+    using K = jaal::child<Kid, Parent, ToKid>;
+#  else
+    using K = jaal::child<Kid, Parent, ToKid, FromKid>;
+#  endif
+    struct Model { Kid::Model kid; };
+    static Cmd update(Model& m, ToKid t) { return K::update(m.kid, std::move(t)); }
+    static Cmd update(Model&, FromKid) { return {}; }
+};
+void f() {
+    Parent::Model m;
+    (void)Parent::update(m, Parent::ToKid{Kid::Poke{}});
+}
 #else
 #  error "unknown JAAL_CASE"
 #endif

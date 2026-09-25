@@ -896,3 +896,57 @@ something is.
 few frames, never two inside the gap; and a burst followed by silence is
 still drawn about one gap later, with no event to prompt it.)
 
+## D41. A child reports to its parent through an effect, typed by the child
+
+**Decision.** A child that has something to tell whoever embeds it lists
+what in its type, `using Out = std::variant<Saved, Closed>;`, adds
+`jaal::fx::report<Out>` to its Cmd, and returns `Cmd::report(Saved{...})`.
+`child<>` and `children<>` take a fourth argument, the case of the parent's
+Msg a report arrives as (`struct FromEditor { Editor::Out out; };`, or with
+`int id;` for a list), and turn each report into a send of that message,
+folded into the parent in the same step. The parent handles it with an
+ordinary `update` overload.
+
+**Why.** child<> and children<> routed messages down and nothing up. A
+parent that needed to know "the editor saved" had to look inside the
+child's model after each message and notice the change. That was the most
+repeated workaround in component code and a real bug class: look too early
+and you miss it, look on every message and you see it twice.
+
+Why these shapes:
+
+- *An effect, not a callback.* A report is data the child returns, like
+  every other effect, so `given` records it, replay skips nothing, and the
+  child is still tested alone.
+- *Resolved at the embedding, not in the kernel.* Only child<> knows the
+  parent's Msg, so that's where a report becomes one. `Cmd::resolve<D>`
+  replaces every `report` with a `send` and takes `report` out of the row,
+  so the result fits the parent's Cmd, which never mentioned it. The kernel
+  didn't change.
+- *Can't be dropped silently.* A child whose row has `report`, embedded
+  without saying where reports go, is a compile error that names the fix.
+  A report of something the child didn't list in `Out` is a compile error
+  too.
+- *Same step.* A report folds before the next message, like `Cmd::send`,
+  so the parent sees the child as of the report.
+- *One level at a time.* A parent that wants to tell ITS parent reports in
+  turn. Nothing skips a level, so each boundary decides what goes up.
+
+A program run at the root has no parent; reports it returns are dropped by
+the kernel. That's the one place a report goes nowhere, and it's the
+program's own choice to be embedded or not.
+
+**Considered.**
+- *Mark some Msg cases as outgoing.* Mixes the child's input and output in
+  one type, and the parent can't tell from the types which is which.
+- *Parent polls the child model (what people did).* The bug class above.
+- *A report callback given to the child.* Capture of the parent in the
+  child, which D2 and the task rules exist to prevent.
+
+(`tests/core/report_test.cpp`: a report reaches the parent with the
+child's state as of the report; a report next to another effect doesn't
+lose either; children<> says which child; two levels deep works. A
+mutation that resolves reports into nothing fails it.
+`compile_fail.child_reports_need_from` and `compile_fail.report_not_in_out`
+pin the two diagnostics.)
+

@@ -46,6 +46,7 @@
 #include <variant>
 
 #include "program.hpp"
+#include "report.hpp"
 #include "stream.hpp"
 #include "sub.hpp"
 
@@ -79,12 +80,69 @@ decltype(auto) inner(Wrap&& w) noexcept {
     return std::forward<decltype(msg)>(msg);
 }
 
+/// The report descriptor in a Cmd's row, if it has one; `void` otherwise.
+template <class Row> struct report_in;
+template <class... Ds>
+struct report_in<row<Ds...>> {
+    template <class D, class Acc> struct pick { using type = Acc; };
+    template <class Out, class Acc> struct pick<fx::report<Out>, Acc> { using type = fx::report<Out>; };
+    template <class Acc, class... Rest> struct fold { using type = Acc; };
+    template <class Acc, class D, class... Rest>
+    struct fold<Acc, D, Rest...> : fold<typename pick<D, Acc>::type, Rest...> {};
+    using type = typename fold<void, Ds...>::type;
+};
+template <class Cmd>
+using report_of = typename report_in<typename Cmd::row_type>::type;
+
+/// No From: this child reports nothing, or is not embedded as a reporter.
+struct no_from {};
+
+/// Turn every report in `c` (already mapped to the PARENT's Msg) into a send
+/// of the parent message `to_parent(out)` builds. A report's payload
+/// doesn't mention Msg, so it crossed `map` untouched, and only here, where
+/// the parent's Msg is the Cmd's Msg, can the send be built. A Cmd without
+/// `report` in its row passes through.
+template <class Cmd, class ToParent>
+auto resolve_reports(Cmd c, ToParent to_parent) {
+    using R = report_of<Cmd>;
+    if constexpr (std::is_void_v<R>) {
+        return c;
+    } else {
+        using M = typename Cmd::msg_type;
+        using To = basic_cmd<M, row_minus<typename Cmd::row_type, make_row<R>>>;
+        return std::move(c).template resolve<R>(
+            [&](payload_t<R, M> p) -> To { return To::send(to_parent(std::move(p.out))); });
+    }
+}
+
 }  // namespace detail::childx
 
-template <Program Child, class Parent, class Wrap>
+/// One child program in a fixed slot of its parent.
+///
+/// `From`, when given, is a case of Parent::Msg holding one field: the
+/// child's `Out`. Every `Cmd::report(...)` the child returns becomes that
+/// message, folded into the parent in the same step (see report.hpp). A
+/// child whose Cmd can report MUST be given a From, so a report can't be
+/// silently lost by forgetting to wire it.
+template <Program Child, class Parent, class Wrap, class From = detail::childx::no_from>
 struct child {
     using model_type = typename Child::Model;
     using msg_type   = typename Child::Msg;
+
+    static constexpr bool reports =
+        !std::is_void_v<detail::childx::report_of<typename Child::Cmd>>;
+    static_assert(!reports || !std::is_same_v<From, detail::childx::no_from>,
+                  "jaal::child: this child can report (its Cmd has fx::report), so give "
+                  "child<> a fourth argument: the case of Parent::Msg its reports arrive "
+                  "as, e.g. `struct FromEditor { Editor::Out out; };`");
+
+    /// Child::Out -> Parent::Msg, as the From case.
+    template <class PM = typename Parent::Msg, class Out>
+    static PM to_parent(Out out) {
+        static_assert(detail::childx::is_alt<PM, From>::value,
+                      "jaal::child<..., From>: From must be a case of Parent::Msg");
+        return PM{From{std::move(out)}};
+    }
 
     /// Child::Msg → Parent::Msg. Captureless, so it may run on task threads.
     template <class PM = typename Parent::Msg>
@@ -98,16 +156,31 @@ struct child {
     [[nodiscard]] static auto init(model_type& slot) {
         auto [m, c] = prog::init<Child>();
         slot = std::move(m);
-        return std::move(c).map(&wrap<>);
+        return lift(std::move(c));
     }
 
     /// Run the child's update on `slot`, in place; return its Cmd, mapped.
     template <class W>
         requires std::same_as<std::remove_cvref_t<W>, Wrap>
     [[nodiscard]] static auto update(model_type& slot, W&& w) {
-        return prog::update<Child>(slot, msg_type(detail::childx::inner(std::forward<W>(w))))
-            .map(&wrap<>);
+        return lift(
+            prog::update<Child>(slot, msg_type(detail::childx::inner(std::forward<W>(w)))));
     }
+
+private:
+    /// The child's Cmd, as the parent's: every Msg wrapped, then every
+    /// report turned into a send of the From case.
+    template <class C>
+    static auto lift(C c) {
+        auto mapped = std::move(c).map(&wrap<>);
+        if constexpr (reports)
+            return detail::childx::resolve_reports(
+                std::move(mapped), [](auto out) { return to_parent(std::move(out)); });
+        else
+            return mapped;
+    }
+
+public:
 
     /// The child's subscriptions, mapped, with stream keys under `prefix/`.
     [[nodiscard]] static auto subscribe(const model_type& m, std::string_view prefix) {
