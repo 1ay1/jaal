@@ -85,6 +85,23 @@ private:
         else if constexpr (meta::aggregate_struct<T>)
             return all_in<Policy, typename push<T, Seen>::type,
                           typename Policy::template field_list<T>>{};
+        else if constexpr (!meta::has_fields_support && std::is_class_v<T>)
+            // SHALLOW RULES. Without P1061 (MSVC today) aggregate_struct is
+            // false for EVERY type, so this branch is the only one a plain
+            // message struct can reach. Rejecting here rejects every program
+            // ever written against jaal — which is what MSVC did: a Sink's
+            // Msg "must be Sendable", culprit = the user's first message
+            // type, on code that is perfectly correct and compiles on GCC
+            // and clang.
+            //
+            // meta/fields.hpp already promises the fallback ("callers fall
+            // back to shallow rules") and only #errors on non-MSVC; this is
+            // where that promise has to be kept. We can't PROVE the type is
+            // fine without seeing its fields, so accept it and let the
+            // compilers that can see inside do the proving. The deep check
+            // still runs in CI on the GCC and clang legs, which is where the
+            // guarantee actually comes from.
+            return yes{};
         else
             return no<T>{};          // can't see inside: not proven fine
     }
