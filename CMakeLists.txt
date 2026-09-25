@@ -87,8 +87,23 @@ target_sources(jaal PUBLIC
 # errors about its own messages. Require 26 where the compiler has it, so a
 # consumer's target is raised to it automatically. MSVC keeps 23 (it has no
 # binding packs yet and jaal runs it on shallow rules).
-if(NOT MSVC)
+if(NOT MSVC AND "cxx_std_26" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
     target_compile_features(jaal PUBLIC cxx_std_26)
+elseif(NOT MSVC)
+    # A CMake older than the compiler (CMake 3.31 with AppleClang 21) doesn't
+    # know cxx_std_26, and REQUIRING a feature it doesn't know is a hard
+    # configure error for every consumer (maya's MAYA_WITH_JAAL build broke on
+    # exactly this). Require 23, and hand consumers the flag the compiler
+    # takes instead, so they still compile jaal's headers as C++26.
+    target_compile_features(jaal PUBLIC cxx_std_23)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-std=c++2c" JAAL_CONSUMER_HAS_CXX2C)
+    if(JAAL_CONSUMER_HAS_CXX2C)
+        target_compile_options(jaal PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++2c>)
+    else()
+        message(WARNING "jaal: this compiler has no C++26 (-std=c++2c): consumers "
+                        "will fail Sendable checks on their messages")
+    endif()
 else()
     target_compile_features(jaal PUBLIC cxx_std_23)
 endif()
