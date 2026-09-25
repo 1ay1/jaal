@@ -319,6 +319,18 @@ struct task {
                   && (!(TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...)))
         static Self task(Body, Args...) { explain<Body, Args...>(); return Self{}; }
 
+        // ...and the same for the isolated spelling. Without this overload
+        // a bad isolated task fails as a raw "no matching function" dump
+        // naming every candidate, instead of the one line that says which
+        // rule was broken — the diagnostic IS the guarantee here, since a
+        // programmer who can't see the rule will work around it.
+        template <class Body, class... Args>
+            requires (!(TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...)))
+        static Self task_isolated(Body, Args...) {
+            explain<Body, Args...>();
+            return Self{};
+        }
+
     private:
         template <class Body, class... Args>
         static Self make(placement where, Body body, Args... args) {

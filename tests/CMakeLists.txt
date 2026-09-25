@@ -34,6 +34,7 @@ jaal_static_test(layering_umbrellas layering/umbrellas.cpp)
 # Frozen/shared have static checks AND runtime behaviour (lifetime, many
 # readers), so they're a normal test: build, then run.
 jaal_test(core_frozen_test core/frozen_test.cpp)
+jaal_test(core_loop_bound_test core/loop_bound_test.cpp)
 jaal_test(core_cmd_test core/cmd_test.cpp)
 jaal_test(core_sub_test core/sub_test.cpp)
 jaal_test(core_routing_test core/routing_test.cpp)
@@ -125,8 +126,30 @@ jaal_compile_fail(NAME task_arg_sendable     SOURCE compile_fail/cmd.cpp CASE 4
                   MATCH "jaal: a task argument is not Sendable")
 jaal_compile_fail(NAME task_map_captureless  SOURCE compile_fail/cmd.cpp CASE 5
                   MATCH "jaal: Cmd::map on a Cmd holding a task needs a captureless mapper")
+
+# task_isolated is a SEPARATE factory from task. It must carry the same
+# contract — "isolated" is about which thread runs it, not about how much
+# is checked. These would pass silently if a refactor relaxed one and not
+# the other.
+jaal_compile_fail(NAME isolated_no_capture   SOURCE compile_fail/task_isolated.cpp CASE 1
+                  MATCH "jaal: a task body must not capture anything")
+jaal_compile_fail(NAME isolated_arg_sendable SOURCE compile_fail/task_isolated.cpp CASE 2
+                  MATCH "jaal: a task argument is not Sendable")
+jaal_compile_fail(NAME isolated_body_shape   SOURCE compile_fail/task_isolated.cpp CASE 3
+                  MATCH "jaal: a task body must be callable as")
 jaal_compile_fail(NAME sink_msg_sendable     SOURCE compile_fail/cmd.cpp CASE 6
                   MATCH "jaal: a Sink's Msg must be Sendable")
+
+# A Sink is a weak handle to the loop's mailbox, minted only by the kernel.
+# Forging one would hand a worker a route into loop state that the loop
+# never agreed to — so the private ctor and private member are the
+# guarantee, and these are what say so.
+jaal_compile_fail(NAME sink_ctor_private     SOURCE compile_fail/sink.cpp CASE 1
+                  MATCH "private|is not accessible|no matching function")
+jaal_compile_fail(NAME sink_box_private      SOURCE compile_fail/sink.cpp CASE 2
+                  MATCH "private|is not accessible|no member named")
+jaal_compile_fail(NAME sink_box_no_upgrade   SOURCE compile_fail/sink.cpp CASE 3
+                  MATCH "private|is not accessible|no member named")
 
 # owned_handle: the double-close and raw-int paths must not compile. These
 # are ordinary type errors rather than jaal diagnostics, so each is pinned
@@ -149,6 +172,18 @@ jaal_compile_fail(NAME handle_borrow_not_owner SOURCE compile_fail/handle.cpp CA
                   MATCH "could not convert|no (known conversion|matching function)")
 jaal_compile_fail(NAME handle_owner_not_borrow SOURCE compile_fail/handle.cpp CASE 9
                   MATCH "could not convert|no (known conversion|matching function)")
+
+# loop_bound / loop_token — state only the loop thread may touch.
+# The guarantee is that a worker cannot name it: get() demands a token, the
+# kernel is the only minter, and a token can't be copied or moved out.
+jaal_compile_fail(NAME loop_bound_needs_token   SOURCE compile_fail/loop_bound.cpp CASE 1
+                  MATCH "no matching function|too few arguments")
+jaal_compile_fail(NAME loop_token_not_forgeable SOURCE compile_fail/loop_bound.cpp CASE 2
+                  MATCH "converting to .*loop_key|no matching function|explicit")
+jaal_compile_fail(NAME loop_token_not_movable   SOURCE compile_fail/loop_bound.cpp CASE 3
+                  MATCH "deleted (function|constructor)")
+jaal_compile_fail(NAME loop_token_not_copyable  SOURCE compile_fail/loop_bound.cpp CASE 4
+                  MATCH "deleted (function|constructor)")
 
 # scope / guarded
 jaal_compile_fail(NAME guarded_no_escape  SOURCE compile_fail/scope.cpp CASE 1
