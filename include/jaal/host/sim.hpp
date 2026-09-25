@@ -235,8 +235,16 @@ private:
 };
 
 // The host: records effects like headless, and supplies the sim executor.
-template <class Msg>
+//
+// `Event` is declared, never produced: the sim drives a program through
+// MESSAGES, not input. It has to be nameable anyway, because the kernel
+// type-checks a program's routers against the host's event_type — so a
+// program whose subscribe() routes key events (any TUI) would otherwise
+// fail to instantiate here with "routes events this host doesn't produce".
+template <class Msg, class Event = kernel::no_events>
 struct host : recorder {
+    using event_type = Event;
+
     host(world& w) : w_(w) {}
 
     template <class M>
@@ -251,15 +259,24 @@ struct host : recorder {
 
 }  // namespace detail::simx
 
-// ── sim ──────────────────────────────────────────────────────────────────
-template <Program P>
+// ── sim ──────────────────────────────────────────────────────────────
+//
+// `Event` names the event type the program's routers expect. The sim never
+// produces one — it drives the program with messages — but the kernel
+// checks routers against the host's event_type, so a TUI program (whose
+// subscribe() routes keys) has to say what those are:
+//
+//     jaal::sim<App, maya::terminal_events> s{seed};
+//
+// A program with no routers leaves it at the default.
+template <Program P, class Event = kernel::no_events>
     requires std::copy_constructible<typename P::Msg>
 class sim {
 public:
     using model_type  = typename P::Model;
     using msg_type    = typename P::Msg;
     using duration    = platform::sim_clock::duration;
-    using kernel_type = kernel::kernel<P, kernel::no_events, platform::sim_clock>;
+    using kernel_type = kernel::kernel<P, Event, platform::sim_clock>;
     using report_type = sim_report<P>;
 
     explicit sim(std::uint64_t seed, sim_options opt = {})
@@ -380,7 +397,7 @@ private:
     std::uint64_t              seed_;
     report_type                report_;      // before k_: init's messages are recorded into it
     detail::simx::world        world_;
-    detail::simx::host<msg_type> host_;
+    detail::simx::host<msg_type, Event> host_;
     std::vector<named_check>   checks_;
     kernel_type                k_;           // last: its executor refers to world_ and host_
 };
@@ -395,13 +412,16 @@ struct explore_report {
 
 /// Run `scenario` (which sets up inputs and checks on a fresh sim) once per
 /// seed in [first, first + count). Stops at the first broken invariant.
-template <Program P, class Scenario>
-    requires std::invocable<Scenario&, sim<P>&>
+///
+/// `Event` matches sim's: name the program's router event type, or leave it
+/// for a program with no routers.
+template <Program P, class Event = kernel::no_events, class Scenario>
+    requires std::invocable<Scenario&, sim<P, Event>&>
 explore_report<P> explore(std::uint64_t first, std::size_t count, sim_options opt,
                           Scenario scenario) {
     explore_report<P> out;
     for (std::size_t i = 0; i < count; ++i) {
-        sim<P> s(first + i, opt);
+        sim<P, Event> s(first + i, opt);
         scenario(s);
         auto r = s.run();
         ++out.runs;
