@@ -162,25 +162,7 @@ public:
     [[nodiscard]] bool same_sources(const basic_sub<Msg, row_type>& next) const {
         std::vector<key> seen;
         std::vector<std::pair<key, std::uint32_t>> ords;
-        next.for_each([&]<class X>(const X& x) {
-            ([&] {
-                if constexpr (SourceDescriptor<Ds> && std::same_as<X, payload_t<Ds, Msg>>) {
-                    auto k = Ds::key(x);
-                    if constexpr (detail::rec::numbered_source<Ds>) {
-                        auto base = k;
-                        base.ordinal = 0;
-                        const key bk{tagged_key<Ds>{base}};
-                        std::uint32_t n = 0;
-                        bool found = false;
-                        for (auto& [ok, c] : ords)
-                            if (ok == bk) { n = c++; found = true; break; }
-                        if (!found) ords.emplace_back(bk, 1u);
-                        k.ordinal = n;
-                    }
-                    seen.push_back(key{tagged_key<Ds>{std::move(k)}});
-                }
-            }(), ...);
-        });
+        next.for_each([&]<class X>(const X& x) { (collect_key<Ds>(x, seen, ords), ...); });
         if (seen.size() != running_.size()) return false;
         for (auto& k : seen)
             if (!find(running_, k)) return false;
@@ -188,6 +170,34 @@ public:
     }
 
 private:
+    // One descriptor's contribution to same_sources(). A member template
+    // rather than a lambda nested in a pack expansion: GCC 16 rejects the
+    // lambda form ("parameter packs not expanded") when its body holds a
+    // structured binding. Same logic, spelled the way every compiler takes.
+    template <class D, class X>
+    static void collect_key(const X& x, std::vector<key>& seen,
+                            std::vector<std::pair<key, std::uint32_t>>& ords) {
+        if constexpr (SourceDescriptor<D> && std::same_as<X, payload_t<D, Msg>>) {
+            auto k = D::key(x);
+            if constexpr (detail::rec::numbered_source<D>) {
+                auto base = k;
+                base.ordinal = 0;
+                const key bk{tagged_key<D>{base}};
+                std::uint32_t n = 0;
+                bool found = false;
+                for (auto& entry : ords)
+                    if (entry.first == bk) {
+                        n = entry.second++;
+                        found = true;
+                        break;
+                    }
+                if (!found) ords.emplace_back(bk, 1u);
+                k.ordinal = n;
+            }
+            seen.push_back(key{tagged_key<D>{std::move(k)}});
+        }
+    }
+
     struct entry { key k; payload p; };
 
     /// Sources per side above which the flat scans get a hash index. Chosen
