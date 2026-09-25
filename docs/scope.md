@@ -52,6 +52,7 @@ background work, or effects that run during replay.
 | `map` / `map_with` | re-target a child's `Cmd`/`Sub` at the parent's `Msg` (components) |
 | `child<C, Parent, Wrap>` | embed program `C` in a fixed slot: `init`/`update` in place, mapped `subscribe`, stream keys prefixed so two copies don't clash. Its messages arrive as the parent's `Wrap` case |
 | `children<C, Parent, Wrap>` | a keyed list of `C`: add, remove, route by id, per-child stream keys |
+| `fx::report<Out>` | a child tells its parent something, typed by `Out`; child<>/children<> deliver it as the parent case given as their 4th argument (D41) |
 
 ### Built-in effects and sources (no host code needed)
 
@@ -71,6 +72,7 @@ subscription lifecycle. Everything else is a library on top of `task` and
 | `random(f)` | effect | draws from the kernel's seeded generator as a Msg (reproducible) |
 | `child<C, Parent, Wrap>` | composition | one child program in a fixed slot |
 | `children<C, Parent, Wrap>` | composition | a keyed LIST of child programs; stream keys are per child |
+| `fx::report<Out>` | composition | a child reports to its parent in the same step; a reporting child embedded without a place for reports does not compile |
 | `debounce<T>` / `throttle` | model values | "settle before acting" and "at most once per interval" |
 | `every(d, msg)` | source | repeating timer; keeps its phase across model changes |
 | `stream(key, body, args...)` | source | long-running work; runs while subscribed, cancelled when not |
