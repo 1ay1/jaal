@@ -177,7 +177,34 @@ result<wait_result> wait_reactor::wait(std::optional<std::chrono::milliseconds> 
             if (sl.pipe) {
                 DWORD avail = 0;
                 if (::PeekNamedPipe(sl.h, nullptr, 0, nullptr, &avail, nullptr)) {
-                    if (avail == 0) continue;
+                    if (avail == 0) {
+                        // Empty, but is the writer still there? PeekNamedPipe
+                        // reports SUCCESS with avail == 0 for BOTH "open and
+                        // idle" and "already at EOF", so this branch can't
+                        // just `continue` -- on a pipe that is empty and
+                        // closed we would wait forever for bytes that can
+                        // never come. That is the `type NUL | prog.exe` hang:
+                        // cmd.exe hands over an ANONYMOUS pipe, writes
+                        // nothing, and closes. The failing-peek branch below
+                        // never fires because the peek keeps succeeding.
+                        //
+                        // A zero-byte ReadFile distinguishes them without
+                        // consuming anything: on a live pipe it returns TRUE
+                        // (nothing to do), on a closed one it fails with
+                        // ERROR_BROKEN_PIPE / ERROR_HANDLE_EOF.
+                        DWORD got = 0;
+                        if (::ReadFile(sl.h, nullptr, 0, &got, nullptr))
+                            continue;                 // open and idle: keep waiting
+                        const DWORD e = ::GetLastError();
+                        if (e != ERROR_BROKEN_PIPE && e != ERROR_HANDLE_EOF)
+                            continue;                 // some other transient: keep waiting
+                        auto& rd = out.ready[out.count++];
+                        rd.token = sl.token;
+                        rd.readable = true;
+                        rd.hangup = true;
+                        any = true;
+                        continue;
+                    }
                     auto& rd = out.ready[out.count++];
                     rd.token = sl.token;
                     rd.readable = true;
