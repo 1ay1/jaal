@@ -138,7 +138,25 @@ result<std::uint32_t> add_slot(auto& s, HANDLE h, std::uint64_t token, bool pipe
 
 result<wait_reactor::registration>
 wait_reactor::watch(handle h, interest, std::uint64_t token) {
-    auto idx = add_slot(*s_, static_cast<HANDLE>(h), token, false);
+    // ASK THE OS what this handle is rather than assuming it's waitable.
+    //
+    // A byte-mode pipe is not a readiness object: WaitForMultipleObjects on
+    // one does not block until data arrives, so a pipe in the wait list is
+    // either a busy-spin or a permanent hang depending on what else is in
+    // there. That's why watch_pipe() exists — but it only helps a caller who
+    // already KNOWS the handle is a pipe, and the callers that matter don't:
+    // maya hands us whatever stdin happens to be, and under mintty/MSYS2 (or
+    // any `prog.exe < file`, or `type NUL | prog.exe`) that is a pipe rather
+    // than a console handle. Those launches hung: agentty printed its version
+    // and then waited forever for a pipe that WaitForMultipleObjects will
+    // never report on.
+    //
+    // GetFileType is one syscall and it cannot be wrong about this, so the
+    // reactor classifies the handle itself. watch_pipe() stays for a caller
+    // that wants to force the pipe path, but nobody now has to know.
+    const bool is_pipe =
+        ::GetFileType(static_cast<HANDLE>(h)) == FILE_TYPE_PIPE;
+    auto idx = add_slot(*s_, static_cast<HANDLE>(h), token, is_pipe);
     if (!idx) return std::unexpected(idx.error());
     return registration(std::weak_ptr<state>(s_), *idx);
 }
