@@ -87,4 +87,15 @@ if(errors)
     message(FATAL_ERROR "banned concurrency primitives:\n  ${msg}\n"
             "Use jaal's safe types, or add the file to ${ALLOW} with a reason.")
 endif()
+# A check that scanned nothing is not a check that passed. ROOT is used as a
+# glob prefix, so a relative or misspelled path silently matches zero files and
+# every violation in the tree reads as clean -- the one failure mode that looks
+# exactly like success. Refuse instead.
+if(nfiles EQUAL 0)
+    message(FATAL_ERROR
+            "banlist scanned 0 files under ROOT=${ROOT}\n"
+            "Nothing was checked, so this is a failure, not a pass. Pass an "
+            "ABSOLUTE path (file(GLOB_RECURSE) resolves a relative ROOT "
+            "against the cwd, which for `cmake -P` is wherever it was invoked).")
+endif()
 message(STATUS "banlist ok (${nfiles} files)")
