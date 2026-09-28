@@ -280,11 +280,22 @@ template <Program P, class H> int run(H& host, run_options opt, durable<P> d);
 
 /// What a host gets from run(): the reactor to watch its handles with, and
 /// a way to hand events to the program.
-template <class H>
-class host_context {
+///
+/// Templated on the EVENT type, not on `H`. The scar this closes:
+/// `host_context<H>` used to be an alias for `H`, so a derived host that
+/// inherited `attach(host_context<Base>&)` from a base couldn't be called
+/// with the `host_context<Derived>&` that jaal materialised — the
+/// `if constexpr (requires { ... })` probe returned false and the hook was
+/// silently skipped. Keying on the event type instead means every host in
+/// the same hierarchy shares one `host_context` type (they all have the
+/// same event_type, or they aren't in the same hierarchy), so inheritance
+/// works the way you'd expect. check_hosts<H,P,K>() still catches
+/// signature drift; this just removes the false conflict.
+template <class Event>
+class basic_host_context {
 public:
     using reactor = platform::native_reactor;
-    using event   = typename H::event_type;
+    using event   = Event;
 
     /// Watch a handle. Keep the registration: dropping it unwatches. The
     /// token passed to on_ready() is `token` (host tokens can't collide
@@ -305,19 +316,111 @@ public:
 
 private:
     template <Program P2, class H2> friend int run(H2&, run_options, durable<P2>);
-    host_context(reactor& r, std::function<void(const event&)> e, std::function<void(int)> s)
+    basic_host_context(reactor& r, std::function<void(const event&)> e, std::function<void(int)> s)
         : r_(r), emit_(std::move(e)), stop_(std::move(s)) {}
     reactor&                           r_;
     std::function<void(const event&)>  emit_;
     std::function<void(int)>           stop_;
 };
 
+/// The context type spelled the way host code writes it: `host_context<H>`.
+/// It's an alias for `basic_host_context<H::event_type>`, so
+/// `host_context<Base>` and `host_context<Derived>` are THE SAME TYPE when
+/// Derived inherits Base's event_type — which fixes the derived-host
+/// inheritance trap the review flagged.
+template <class H>
+using host_context = basic_host_context<typename H::event_type>;
+
 /// Run P on the native platform with host H. Returns the exit code.
+// ── host optional hooks: near-miss detection ────────────────────────────
+//
+// Every hook below is called with `if constexpr (requires { ... })` —
+// silently skipped when the callable shape doesn't fit. That once bit
+// maya's `terminal_host::attach`: it took `host_context<base_host>&`
+// instead of `host_context<terminal_host>&`, so a derived context never
+// matched, attach never ran, and agentty took no keys until a user filed
+// a bug.
+//
+// The trick from core/program.hpp's check_hooks: pair each
+// `if constexpr (requires-shape)` with a separate "does H even name this
+// member?" probe. Then, once, at kernel::run start, static_assert that
+// (declares && !shape) is impossible — the host has this member but its
+// signature has drifted. Missing entirely is fine (the host opted out).
+
+namespace detail::run {
+
+template <class H> concept host_declares_attach     = requires { &H::attach; };
+template <class H> concept host_declares_on_ready   = requires { &H::on_ready; };
+template <class H> concept host_declares_on_signal  = requires { &H::on_signal; };
+template <class H> concept host_declares_present    = requires { &H::present; };
+template <class H> concept host_declares_release    = requires { &H::release; };
+template <class H> concept host_declares_wait_hint  = requires { &H::wait_hint; };
+template <class H> concept host_declares_owes_frame = requires { &H::owes_frame; };
+
+template <class H, class P, class K>
+consteval void check_hosts() {
+    if constexpr (host_declares_attach<H>) {
+        static_assert(requires(H& h, host_context<H>& c) { h.attach(c); },
+            "jaal: H::attach is declared but its signature doesn't accept "
+            "host_context<H>&. Since host_context is aliased on event_type, "
+            "this typically means the hook was written for a host whose "
+            "event_type differs from H's, or the parameter list is otherwise "
+            "wrong. Expected: void attach(jaal::host_context<H>&).");
+    }
+    if constexpr (host_declares_on_ready<H>) {
+        static_assert(
+            requires(H& h, host_context<H>& c, const readiness& r) { h.on_ready(c, r); },
+            "jaal: H::on_ready is declared but its signature doesn't match. "
+            "Expected: void on_ready(jaal::host_context<H>&, const jaal::readiness&).");
+    }
+    if constexpr (host_declares_on_signal<H>) {
+        static_assert(
+            requires(H& h, host_context<H>& c, sig s) { h.on_signal(c, s); },
+            "jaal: H::on_signal is declared but its signature doesn't match. "
+            "Expected: void on_signal(jaal::host_context<H>&, jaal::sig).");
+    }
+    if constexpr (host_declares_present<H>) {
+        static_assert(requires(H& h, K& k) { h.present(k); },
+            "jaal: H::present is declared but its signature doesn't match. "
+            "Expected: template<class K> void present(K&) — K is the kernel "
+            "type run<P>() constructs. A wrong shape means the host never "
+            "draws.");
+    }
+    if constexpr (host_declares_release<H>) {
+        static_assert(requires(H& h) { h.release(); },
+            "jaal: H::release is declared but its signature doesn't match. "
+            "Expected: void release() — no arguments. A wrong shape means "
+            "teardown skips the host's shutdown step (leaves the terminal in "
+            "a bad mode, closes the wrong handles).");
+    }
+    if constexpr (host_declares_wait_hint<H>) {
+        static_assert(
+            requires(H& h) {
+                { h.wait_hint() } -> std::convertible_to<std::optional<std::chrono::milliseconds>>;
+            },
+            "jaal: H::wait_hint is declared but its signature doesn't match. "
+            "Expected: std::optional<std::chrono::milliseconds> wait_hint() const. "
+            "A wrong shape means the loop won't wake for the host's deferred "
+            "frames — keystrokes will draw the PREVIOUS model until an "
+            "unrelated event arrives (real bug seen when maya ran on jaal).");
+    }
+    if constexpr (host_declares_owes_frame<H>) {
+        static_assert(
+            requires(const H& h) { { h.owes_frame() } -> std::convertible_to<bool>; },
+            "jaal: H::owes_frame is declared but its signature doesn't match. "
+            "Expected: bool owes_frame() const.");
+    }
+}
+
+}  // namespace detail::run
+
+
 template <Program P, class H>
 int run(H& host, run_options opt, durable<P> d) {
     using KE = kernel_event_t<H>;
     using K  = kernel::kernel<P, KE, platform::steady_clock>;
     namespace pf = platform;
+    detail::run::check_hosts<H, P, K>();
 
     auto reactor = pf::native_reactor::create();
     if (!reactor) {

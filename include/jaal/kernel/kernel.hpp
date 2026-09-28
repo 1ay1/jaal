@@ -283,6 +283,7 @@ public:
                                       std::function<void()> wake = {},
                                       std::function<void(const msg_type&)> record = {}) {
         require_host_for<H, P>();
+        detail::prog::check_hooks<P>();
         auto [m, c] = prog::init<P>();
         return kernel(host, std::move(m), std::move(c), std::move(clock), opt,
                       std::move(wake), std::move(record));
@@ -305,6 +306,7 @@ public:
                                            std::function<void()> wake = {},
                                            std::function<void(const msg_type&)> record = {}) {
         require_host_for<H, P>();
+        detail::prog::check_hooks<P>();
         return kernel(host, std::move(model), std::move(resume_cmd), std::move(clock), opt,
                       std::move(wake), std::move(record));
     }

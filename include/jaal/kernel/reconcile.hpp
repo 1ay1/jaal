@@ -159,6 +159,13 @@ public:
     /// gets wrong. (Payloads aren't compared: a payload is a Msg, and Msg
     /// needn't be equality-comparable.) Used by the debug check in
     /// kernel::reconcile; not on any hot path.
+    ///
+    /// Limitation: a subs_key that leaves out a field which affects only a
+    /// source's PAYLOAD (same key, different Msg value) slips through this
+    /// check. Making it stricter would need Msg to be equality-comparable,
+    /// which jaal deliberately doesn't require. In practice a payload-only
+    /// drift shows up the first time the source fires the old Msg after the
+    /// model change, which is loud enough in a UI to catch during dev.
     [[nodiscard]] bool same_sources(const basic_sub<Msg, row_type>& next) const {
         std::vector<key> seen;
         std::vector<std::pair<key, std::uint32_t>> ords;

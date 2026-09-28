@@ -2,7 +2,9 @@
 
 #include <jaal/core/core_fx.hpp>
 #include <jaal/core/child.hpp>
+#include <jaal/core/program.hpp>
 #include <jaal/host/headless.hpp>
+#include <jaal/kernel/run.hpp>
 #include <jaal/kernel/teardown.hpp>
 #include <jaal/kernel/timeline.hpp>
 
@@ -183,6 +185,84 @@ void f() {
     Parent::Model m;
     (void)Parent::update(m, Parent::ToKid{Kid::Poke{}});
 }
+#elif JAAL_CASE == 12
+// A drifted init: pair-returning shape from an older jaal. Without the
+// near-miss check this compiles and the kernel silently value-initialises
+// the Model — the exact bug that hit AgenttyApp.
+struct DriftInit {
+    struct Model { int n = 0; };
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, S) { return {}; }
+    static std::pair<Model, Cmd> init() { return {Model{42}, {}}; }
+};
+template void jaal::detail::prog::check_hooks<DriftInit>();
+#elif JAAL_CASE == 13
+// A drifted subscribe: takes Model& (mutable), not const&. Const Model&
+// won't bind, so has_subscribe fails and jaal thinks the program has no
+// subscriptions — every timer/stream silently doesn't arm.
+struct DriftSub {
+    struct Model {};
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    static Cmd update(Model&, S) { return {}; }
+    static Sub subscribe(Model&) { return {}; }  // wrong: must accept const&
+};
+template void jaal::detail::prog::check_hooks<DriftSub>();
+#elif JAAL_CASE == 14
+// A drifted subs_key: takes Model& (mutable) instead of const&. The
+// concept fails, subs_key gets ignored, subscribe() re-runs every message.
+struct DriftKey {
+    struct Model {};
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = jaal::Sub<Msg>;
+    static Cmd update(Model&, S) { return {}; }
+    static Sub subscribe(const Model&) { return {}; }
+    static int subs_key(Model&) { return 0; }  // wrong: must be const Model&
+};
+template void jaal::detail::prog::check_hooks<DriftKey>();
+#elif JAAL_CASE == 15
+// A drifted host attach: takes host_context<BaseHost>& where BaseHost has
+// a DIFFERENT event_type. Since host_context is now aliased on the event
+// type, this is the true "wrong context" drift — still silently skipped
+// without the check, still caught by check_hosts.
+struct BaseHost { using event_type = std::variant<double>; };
+struct DriftHost {
+    using event_type = std::variant<int>;
+    void attach(jaal::host_context<BaseHost>&) {}  // wrong event_type
+};
+struct HostApp {
+    struct Model {};
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, S) { return {}; }
+};
+template void jaal::detail::run::check_hosts<
+    DriftHost, HostApp, jaal::kernel::kernel<HostApp, std::variant<int>>>();
+#elif JAAL_CASE == 16
+// A drifted wait_hint: returns bare int instead of
+// std::optional<milliseconds>. Silently skipped by the `if constexpr`
+// probe today — the loop won't wake for the host's deferred frames, so
+// keystrokes draw the PREVIOUS model.
+struct WHHost {
+    using event_type = std::variant<int>;
+    int wait_hint() const { return 0; }            // wrong: must be optional<ms>
+};
+struct HostApp16 {
+    struct Model {};
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, S) { return {}; }
+};
+template void jaal::detail::run::check_hosts<
+    WHHost, HostApp16, jaal::kernel::kernel<HostApp16, std::variant<int>>>();
 #else
 #  error "unknown JAAL_CASE"
 #endif

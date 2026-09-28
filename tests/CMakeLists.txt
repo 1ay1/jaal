@@ -233,6 +233,26 @@ jaal_compile_fail(NAME child_reports_need_from SOURCE compile_fail/kernel.cpp CA
 jaal_compile_fail(NAME report_not_in_out SOURCE compile_fail/kernel.cpp CASE 11
                   MATCH "jaal: this report isn't one of the child's Out cases")
 
+# optional-hook near-miss (init/subscribe/subs_key with drifted signature).
+# Without check_hooks<P>() these would silently pass and the kernel would
+# use the default (blank Model, no subs) — the AgenttyApp::init bug. The
+# static_assert names the hook by name so the message is actionable.
+jaal_compile_fail(NAME hook_drifted_init     SOURCE compile_fail/kernel.cpp CASE 12
+                  MATCH "P::init is declared but its signature doesn't match")
+jaal_compile_fail(NAME hook_drifted_subscribe SOURCE compile_fail/kernel.cpp CASE 13
+                  MATCH "P::subscribe is declared but its signature doesn't")
+jaal_compile_fail(NAME hook_drifted_subs_key SOURCE compile_fail/kernel.cpp CASE 14
+                  MATCH "P::subs_key is declared but doesn't satisfy HasSubsKey")
+
+# host optional hooks: the exact scar that hit maya's terminal_host::attach
+# (took host_context<base>& instead of the derived context, silently
+# skipped by jaal::run, agentty took no keys). Same near-miss trick as
+# check_hooks, applied to the host side.
+jaal_compile_fail(NAME host_drifted_attach   SOURCE compile_fail/kernel.cpp CASE 15
+                  MATCH "H::attach is declared but its signature doesn't accept")
+jaal_compile_fail(NAME host_drifted_wait_hint SOURCE compile_fail/kernel.cpp CASE 16
+                  MATCH "H::wait_hint is declared but its signature doesn't match")
+
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering
          COMMAND ${CMAKE_COMMAND}

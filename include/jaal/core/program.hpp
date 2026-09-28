@@ -231,6 +231,36 @@ concept has_init = requires(typename P::Model& m) {
     { P::init(m) } -> std::convertible_to<typename P::Cmd>;
 };
 
+// ── near-miss detection for optional hooks ─────────────────────────────
+//
+// Every optional hook (init, subscribe, subs_key, view, visual_hash,
+// needs_warmup) is detected with a requires-test on the exact callable
+// shape. A hook whose SIGNATURE has drifted silently reads as "the program
+// doesn't have that hook" and jaal uses the default — a value-initialised
+// Model, no subscriptions, subs re-run every step. This has bitten twice:
+// AgenttyApp::init once returned std::pair<Model,Cmd> from an older shape
+// (settings loaded then thrown away because the kernel value-initialised a
+// fresh Model), and maya's terminal_host::attach took a base host_context
+// instead of the derived one (attach never ran, no keys got in).
+//
+// So each optional hook gets a companion probe: does P *declare* a member
+// with that name at all? &P::name works when the member exists and isn't
+// overloaded, which is the shape a drifted hook takes. If the probe is
+// true and the shape check is false, the program wrote the hook with the
+// wrong signature — a static_assert names the hook and shows the expected
+// shape. If the probe is false too, the program legitimately opted out.
+//
+// The check runs once, in check_hooks<P>() from kernel::start, so a bad
+// signature fails at kernel construction with a message that points at the
+// hook — not on the first missed subscribe half an hour into the session.
+
+template <class P> concept declares_init         = requires { &P::init; };
+template <class P> concept declares_subscribe    = requires { &P::subscribe; };
+template <class P> concept declares_subs_key     = requires { &P::subs_key; };
+template <class P> concept declares_view         = requires { &P::view; };
+template <class P> concept declares_visual_hash  = requires { &P::visual_hash; };
+template <class P> concept declares_needs_warmup = requires { &P::needs_warmup; };
+
 // The runtime half of the plan. `route` is the one function that decides
 // where a message goes, and it asks plan_of the same question the concept
 // did — so a program that compiles dispatches exactly where the check said.
@@ -362,6 +392,62 @@ template <class P>
 concept HasNeedsWarmup = requires(const typename P::Model& m) {
     { P::needs_warmup(m) } -> std::convertible_to<bool>;
 };
+
+namespace detail::prog {
+
+// ── check_hooks<P>() ────────────────────────────────────────────────────
+//
+// Called from kernel::start. For each optional hook, if the program
+// DECLARES a member with that name but the callable shape doesn't match
+// what jaal will actually invoke, fail here with a message that names the
+// hook and the expected signature. If the member isn't declared at all,
+// stay silent — the program legitimately opted out.
+//
+// Doing this once, at kernel construction, means "my init/subscribe/view
+// silently didn't run" becomes a compile error at the line where the
+// program is handed to the kernel, not a mystery weeks later.
+
+template <class P>
+consteval void check_hooks() {
+    if constexpr (declares_init<P>) {
+        static_assert(has_init<P>,
+            "jaal: P::init is declared but its signature doesn't match "
+            "the shape jaal calls. Expected: static Cmd init(Model&). "
+            "An older shape (e.g. std::pair<Model,Cmd> init()) is silently "
+            "skipped, leaving the kernel to value-initialise the Model — "
+            "every field your init() set gets thrown away.");
+    }
+    if constexpr (declares_subscribe<P>) {
+        static_assert(has_subscribe<P>,
+            "jaal: P::subscribe is declared but its signature doesn't "
+            "match. Expected: static Sub subscribe(const Model&) where Sub "
+            "is a jaal::Sub<Msg,...>. A wrong shape means jaal thinks the "
+            "program has no subscriptions — timers never arm, streams never "
+            "start, on_signal never fires.");
+    }
+    if constexpr (declares_subs_key<P>) {
+        static_assert(::jaal::HasSubsKey<P>,
+            "jaal: P::subs_key is declared but doesn't satisfy HasSubsKey. "
+            "Expected: static auto subs_key(const Model&) returning a "
+            "copyable, equality-comparable value. A wrong shape means the "
+            "key is ignored and subscribe() re-runs every message — correct, "
+            "but wastes the fast path this hook exists to give you.");
+    }
+    if constexpr (declares_visual_hash<P>) {
+        static_assert(::jaal::HasVisualHash<P>,
+            "jaal: P::visual_hash is declared but its signature doesn't "
+            "match. Expected: static std::uint64_t visual_hash(const Model&). "
+            "A wrong shape means the host redraws on every model change — "
+            "the point of the hook is lost.");
+    }
+    if constexpr (declares_needs_warmup<P>) {
+        static_assert(::jaal::HasNeedsWarmup<P>,
+            "jaal: P::needs_warmup is declared but its signature doesn't "
+            "match. Expected: static bool needs_warmup(const Model&).");
+    }
+}
+
+}  // namespace detail::prog
 
 // ── calling a program: the only place that does ──────────────────────────
 namespace prog {

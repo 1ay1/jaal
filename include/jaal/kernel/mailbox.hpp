@@ -53,10 +53,12 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -205,6 +207,13 @@ public:
     /// A new origin, live until retire(). Loop thread.
     [[nodiscard]] origin_id open_origin() {
         std::lock_guard lk(m_);
+        // origin_id is 64-bit and only advances — the wrap point is
+        // 2^64 origins in one process. Reachable only by a very long-lived
+        // server that opens a stream per request; if it happens the reused
+        // id resurrects a "retired" origin and its messages start being
+        // accepted again. Cheap to catch here.
+        assert(last_origin_ < std::numeric_limits<origin_id>::max() &&
+               "jaal: origin_id would wrap; process opened 2^64 origins");
         const origin_id id = ++last_origin_;
         live_.insert(id);
         return id;
