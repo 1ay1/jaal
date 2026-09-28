@@ -29,7 +29,11 @@ if(NOT ROOT OR NOT ALLOW)
 endif()
 
 # name → regex. Names are what the allowlist refers to.
-set(ban_thread      "std::j?thread[^_]")
+# ban_thread catches jthread/thread references EXCEPT `std::thread::id` /
+# `std::thread::hardware_concurrency()` (using the class as a namespace).
+# Everything else — declarations, constructors, container element types,
+# emplace_back<std::jthread> — is a thread the file is managing.
+set(ban_thread      "std::j?thread([^_:]|$)")
 set(ban_detach      "\\.detach\\(\\)")
 set(ban_async       "std::async[^_]")
 set(ban_mutex       "std::(shared_|recursive_|timed_)?mutex[^_]")
@@ -56,26 +60,61 @@ foreach(line IN LISTS allow_lines)
     set(allow_${key} "${names}")
 endforeach()
 
+# Find every source file in ROOT. The check is line-oriented, but doing that
+# line split in CMake is a trap: file(STRINGS) treats `;` as a list separator
+# so a run of `;`-ending C++ lines collapses into ONE giant string, and the
+# greedy `//.*` strip below then discards everything past the first inline
+# comment in that merged blob — measured on one 779-line file, STRINGS
+# produced 166 items with a 30 KB monster among them and the scanner missed
+# every `std::thread` in the run_block_body it hid. file(READ) + MATCHALL /
+# REPLACE hit the same class of failures at the escape boundary.
+#
+# Delegate line boundaries to `grep`, which is line-oriented by definition.
+# One `execute_process` per file per ban name is bounded work (a few dozen
+# names × a few hundred files) and cannot lose data at a `;`. Each call
+# returns matching lines with their line numbers, which we then filter
+# against comment-only lines (prose about std::thread isn't a use) and the
+# per-file allowlist. grep is present on every platform jaal supports.
 file(GLOB_RECURSE files RELATIVE ${ROOT} ${ROOT}/*.hpp ${ROOT}/*.cpp)
+find_program(GREP_EXE grep REQUIRED)
 set(errors "")
 foreach(f IN LISTS files)
     string(MAKE_C_IDENTIFIER "${f}" key)
     set(allowed "${allow_${key}}")
-    file(STRINGS ${ROOT}/${f} lines)
-    set(n 0)
-    foreach(line IN LISTS lines)
-        math(EXPR n "${n} + 1")
-        # skip comment-only lines: prose about std::thread isn't a use
-        if(line MATCHES "^[ \t]*//")
+    foreach(name IN LISTS ban_names)
+        execute_process(
+            COMMAND ${GREP_EXE} -nE "${ban_${name}}" ${ROOT}/${f}
+            OUTPUT_VARIABLE hits
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE grep_rc
+            ERROR_QUIET)
+        # rc=1 means no match (fine); rc=0 means one or more; rc>1 is an
+        # error. Any non-empty output is a candidate; filter out comment-only
+        # lines and allowlisted uses.
+        if(NOT hits)
             continue()
         endif()
-        string(REGEX REPLACE "//.*" "" code "${line}")
-        foreach(name IN LISTS ban_names)
-            if(code MATCHES "${ban_${name}}")
-                list(FIND allowed "${name}" idx)
-                if(idx EQUAL -1)
-                    list(APPEND errors "${f}:${n}: '${name}' not allowed here: ${line}")
-                endif()
+        string(ASCII 1 _sc)
+        string(REPLACE ";" "${_sc}" hits "${hits}")
+        string(REGEX MATCHALL "[^\n]+" hit_lines "${hits}")
+        foreach(hl IN LISTS hit_lines)
+            string(REPLACE "${_sc}" ";" hl "${hl}")
+            # grep -n prefixes `<lineno>:`; strip that to get line content
+            string(REGEX MATCH "^([0-9]+):(.*)$" _ "${hl}")
+            set(lineno "${CMAKE_MATCH_1}")
+            set(content "${CMAKE_MATCH_2}")
+            # skip comment-only lines
+            if(content MATCHES "^[ \t]*//")
+                continue()
+            endif()
+            # skip if the hit is entirely inside a trailing `//` comment
+            string(REGEX REPLACE "//.*" "" code "${content}")
+            if(NOT code MATCHES "${ban_${name}}")
+                continue()
+            endif()
+            list(FIND allowed "${name}" idx)
+            if(idx EQUAL -1)
+                list(APPEND errors "${f}:${lineno}: '${name}' not allowed here: ${content}")
             endif()
         endforeach()
     endforeach()
