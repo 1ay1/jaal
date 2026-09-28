@@ -26,6 +26,9 @@
 
 #include <chrono>
 #include <csignal>
+#if !defined(_WIN32)
+#  include <signal.h>   // struct sigaction / ::sigaction (POSIX only)
+#endif
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -48,9 +51,21 @@ namespace {
 std::vector<std::string> log;
 
 bool sigint_is_default() {
+#if defined(_WIN32)
+    // Windows has no sigaction(). The CRT signal() returns the CURRENT
+    // handler while installing the new one, so query-and-restore reads the
+    // live disposition without disturbing it. jaal's teardown restores the
+    // default (or leaves it ignored), which is what this pins.
+    using handler_t = void (*)(int);
+    handler_t prev = std::signal(SIGINT, SIG_DFL);
+    if (prev == SIG_ERR) return true;
+    std::signal(SIGINT, prev);          // put back exactly what was there
+    return prev == SIG_DFL || prev == SIG_IGN;
+#else
     struct sigaction sa {};
     ::sigaction(SIGINT, nullptr, &sa);
     return sa.sa_handler == SIG_DFL || sa.sa_handler == SIG_IGN;
+#endif
 }
 
 struct Quick {

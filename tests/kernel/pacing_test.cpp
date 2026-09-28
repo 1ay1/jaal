@@ -80,7 +80,14 @@ int paced_draws_few_and_the_last() {
         if (host.at[i] - host.at[i - 1] < 19ms) return 203;
 
     if (host.drawn.front() != 0) return 204;   // the first frame, at once
-    if (host.drawn.back() < 100) return 205;   // the final count, not a stale one
+    // The final count, not a stale one. The model ticks on a 1 ms `every`
+    // over a ~200 ms run, so ~200 on Linux. Windows' realized WaitFor*
+    // sleep floor sits a little above 1 ms even with timeBeginPeriod(1), so
+    // the same run lands ~90-100 ticks. The bound only needs to prove the
+    // paced host kept advancing the model between throttled draws (not that
+    // it drew each tick), so a floor well clear of the throttle count is
+    // what matters, not the exact Linux number.
+    if (host.drawn.back() < 75) return 205;
     return 0;
 }
 

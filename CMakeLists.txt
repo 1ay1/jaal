@@ -111,6 +111,11 @@ else()
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(jaal PUBLIC Threads::Threads)
+if(WIN32)
+    # winmm: timeBeginPeriod/timeEndPeriod, used by the wait_reactor to raise
+    # the process timer resolution to 1 ms so sub-frame timers are honoured.
+    target_link_libraries(jaal PUBLIC winmm)
+endif()
 # jaal's own sources get the strict warnings. Taken as a genex over the
 # private target's options rather than linking it: a PRIVATE link on a
 # STATIC library still lands in the install export set.

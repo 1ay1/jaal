@@ -10,13 +10,38 @@
 #  define NOMINMAX
 #endif
 #include <windows.h>
+#include <timeapi.h>   // timeBeginPeriod / timeEndPeriod (winmm)
 
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 namespace jaal::platform {
 
 namespace {
+
+// Windows' default timer/scheduler granularity is ~15.6 ms, so a
+// WaitForMultipleObjects call with a 1 ms timeout actually sleeps a full
+// tick — every jaal timer (Sub::every, Cmd::after, frame pacing, debounce)
+// quantises to 15 ms, and a 1 ms `every` fires ~12x in 200 ms instead of
+// ~200x. timeBeginPeriod(1) raises the global resolution to 1 ms so sub-
+// frame timing is honoured, matching the POSIX behaviour the kernel's
+// timer rules assume.
+//
+// It is a PROCESS-WIDE, refcounted setting: the first live reactor raises
+// it, the last one to go away lowers it (an unbalanced End would clobber
+// another component's request). Never left raised past the reactor's life
+// — a permanently high timer resolution costs power on laptops.
+std::atomic<int> g_timer_res_refs{0};
+
+void timer_res_acquire() noexcept {
+    if (g_timer_res_refs.fetch_add(1, std::memory_order_acq_rel) == 0)
+        ::timeBeginPeriod(1);
+}
+void timer_res_release() noexcept {
+    if (g_timer_res_refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        ::timeEndPeriod(1);
+}
 
 // Clamp a chrono timeout into WaitForMultipleObjects' DWORD. "No deadline"
 // and anything too big both become INFINITE. A raw cast would wrap a large
@@ -43,8 +68,11 @@ struct wait_reactor::state {
     std::vector<slot>          slots;
     std::vector<std::uint32_t> free;
 
+    state() { timer_res_acquire(); }
+
     ~state() {
         if (wake) ::CloseHandle(wake);
+        timer_res_release();
     }
 
     [[nodiscard]] std::size_t live_count() const noexcept {
@@ -195,39 +223,30 @@ result<wait_result> wait_reactor::wait(std::optional<std::chrono::milliseconds> 
             if (sl.pipe) {
                 DWORD avail = 0;
                 if (::PeekNamedPipe(sl.h, nullptr, 0, nullptr, &avail, nullptr)) {
-                    if (avail == 0) {
-                        // Empty, but is the writer still there? PeekNamedPipe
-                        // reports SUCCESS with avail == 0 for BOTH "open and
-                        // idle" and "already at EOF", so this branch can't
-                        // just `continue` -- on a pipe that is empty and
-                        // closed we would wait forever for bytes that can
-                        // never come. That is the `type NUL | prog.exe` hang:
-                        // cmd.exe hands over an ANONYMOUS pipe, writes
-                        // nothing, and closes. The failing-peek branch below
-                        // never fires because the peek keeps succeeding.
-                        //
-                        // A zero-byte ReadFile distinguishes them without
-                        // consuming anything: on a live pipe it returns TRUE
-                        // (nothing to do), on a closed one it fails with
-                        // ERROR_BROKEN_PIPE / ERROR_HANDLE_EOF.
-                        DWORD got = 0;
-                        if (::ReadFile(sl.h, nullptr, 0, &got, nullptr))
-                            continue;                 // open and idle: keep waiting
-                        const DWORD e = ::GetLastError();
-                        if (e != ERROR_BROKEN_PIPE && e != ERROR_HANDLE_EOF)
-                            continue;                 // some other transient: keep waiting
-                        auto& rd = out.ready[out.count++];
-                        rd.token = sl.token;
-                        rd.readable = true;
-                        rd.hangup = true;
-                        any = true;
-                        continue;
-                    }
+                    if (avail == 0)
+                        continue;                 // open and idle: keep waiting
+                    // Data is buffered and readable now.
                     auto& rd = out.ready[out.count++];
                     rd.token = sl.token;
                     rd.readable = true;
                 } else {
-                    // The writer closed its end: report it, never spin.
+                    // PeekNamedPipe FAILS the moment the writer closes its
+                    // end: on real Windows a broken/at-EOF anonymous pipe
+                    // returns FALSE with ERROR_BROKEN_PIPE (not SUCCESS with
+                    // avail == 0), so a closed pipe is caught HERE and never
+                    // spins. This is the `type NUL | prog.exe` hangup.
+                    //
+                    // We deliberately DON'T issue a zero-byte ReadFile to
+                    // disambiguate: that call BLOCKS on a real Windows
+                    // blocking anonymous pipe (mintty/MSYS2 stdin) until
+                    // bytes or EOF arrive, wedging the whole reactor. It only
+                    // appeared to work under wine, which returns from it
+                    // immediately -- the exact untested gap. Peek alone is
+                    // both sufficient and non-blocking.
+                    const DWORD e = ::GetLastError();
+                    if (e != ERROR_BROKEN_PIPE && e != ERROR_HANDLE_EOF
+                        && e != ERROR_PIPE_NOT_CONNECTED && e != ERROR_INVALID_HANDLE)
+                        continue;                 // transient: keep waiting
                     auto& rd = out.ready[out.count++];
                     rd.token = sl.token;
                     rd.readable = true;
