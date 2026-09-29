@@ -933,6 +933,7 @@ jaal/
 │   │   ├── fields.hpp            field types of an aggregate (binding packs)
 │   │   ├── fixed_string.hpp      NTTP strings for effect names
 │   │   ├── type_name.hpp         readable type names for diagnostics
+│   │   ├── declares.hpp          does a type name this member? (any shape)
 │   │   └── diagnose.hpp          named static_assert helpers
 │   │
 │   ├── core/                     the types apps write against

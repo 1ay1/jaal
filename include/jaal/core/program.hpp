@@ -55,6 +55,7 @@
 #include <variant>
 
 #include "../meta/diagnose.hpp"
+#include "../meta/declares.hpp"
 #include "../meta/type_name.hpp"
 #include "cmd.hpp"
 #include "core_fx.hpp"
@@ -244,22 +245,26 @@ concept has_init = requires(typename P::Model& m) {
 // instead of the derived one (attach never ran, no keys got in).
 //
 // So each optional hook gets a companion probe: does P *declare* a member
-// with that name at all? &P::name works when the member exists and isn't
-// overloaded, which is the shape a drifted hook takes. If the probe is
-// true and the shape check is false, the program wrote the hook with the
-// wrong signature — a static_assert names the hook and shows the expected
-// shape. If the probe is false too, the program legitimately opted out.
+// with that name at all? JAAL_DECLARES_MEMBER (meta/declares.hpp) answers
+// that on the NAME alone, so it sees a hook whatever shape it took —
+// including the drifted shape, which is the whole point. (The obvious
+// spelling, `requires { &P::init; }`, silently reports "absent" for a
+// template member or an overload set, so it cannot be used for a check
+// whose job is to catch wrong shapes.) If the probe is true and the shape
+// check is false, the program wrote the hook with the wrong signature — a
+// static_assert names the hook and shows the expected shape. If the probe
+// is false too, the program legitimately opted out.
 //
 // The check runs once, in check_hooks<P>() from kernel::start, so a bad
 // signature fails at kernel construction with a message that points at the
 // hook — not on the first missed subscribe half an hour into the session.
 
-template <class P> concept declares_init         = requires { &P::init; };
-template <class P> concept declares_subscribe    = requires { &P::subscribe; };
-template <class P> concept declares_subs_key     = requires { &P::subs_key; };
-template <class P> concept declares_view         = requires { &P::view; };
-template <class P> concept declares_visual_hash  = requires { &P::visual_hash; };
-template <class P> concept declares_needs_warmup = requires { &P::needs_warmup; };
+JAAL_DECLARES_MEMBER(declares_init,         init);
+JAAL_DECLARES_MEMBER(declares_subscribe,    subscribe);
+JAAL_DECLARES_MEMBER(declares_subs_key,     subs_key);
+JAAL_DECLARES_MEMBER(declares_view,         view);
+JAAL_DECLARES_MEMBER(declares_visual_hash,  visual_hash);
+JAAL_DECLARES_MEMBER(declares_needs_warmup, needs_warmup);
 
 // The runtime half of the plan. `route` is the one function that decides
 // where a message goes, and it asks plan_of the same question the concept
@@ -444,6 +449,19 @@ consteval void check_hooks() {
         static_assert(::jaal::HasNeedsWarmup<P>,
             "jaal: P::needs_warmup is declared but its signature doesn't "
             "match. Expected: static bool needs_warmup(const Model&).");
+    }
+    // view() is checked for CALLABILITY on the model only. Whether its
+    // return type is what the host draws is Viewable<P, Out>'s job, and Out
+    // isn't known here — the host checks that. But "view() cannot be called
+    // with the model at all" is unambiguous drift, and worth catching here
+    // because a headless run never asks Viewable and would not notice.
+    if constexpr (declares_view<P>) {
+        static_assert(requires(const typename P::Model& m) { P::view(m); },
+            "jaal: P::view is declared but its signature doesn't match. "
+            "Expected: static Out view(const Model&), where Out is whatever "
+            "the host draws (maya::Element for a terminal host). A view() "
+            "that can't be called with the model means the program cannot "
+            "draw at all.");
     }
 }
 

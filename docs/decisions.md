@@ -950,3 +950,67 @@ mutation that resolves reports into nothing fails it.
 `compile_fail.child_reports_need_from` and `compile_fail.report_not_in_out`
 pin the two diagnostics.)
 
+
+---
+
+## D42. An optional hook is detected by NAME, and a drifted one is an error
+
+**Decision.** Every optional hook — `init`, `subscribe`, `subs_key`,
+`view`, `visual_hash`, `needs_warmup` on a program; `attach`, `on_ready`,
+`on_signal`, `present`, `release`, `wait_hint`, `owes_frame` on a host — is
+detected twice. Once for its SHAPE, which is what decides whether jaal
+calls it, and once for its NAME, which is what decides whether the program
+meant to have one. `check_hooks<P>()` and `check_hosts<H,P,K>()` run at
+kernel construction and static_assert that `declares && !shape` is
+impossible: a hook that exists but doesn't fit is a build error naming the
+hook, not a silent absence.
+
+The name probe is `JAAL_DECLARES_MEMBER` (`meta/declares.hpp`). It mixes
+the type with a base declaring the same name and asks whether lookup is
+ambiguous. Ambiguity means the type declared it too — and because ambiguity
+doesn't care what the member looks like, the probe sees plain members,
+member templates, overload sets, inherited members, and drifted ones
+alike.
+
+**Why.** Optional hooks are detected with a requires-test, so a hook jaal
+can't call is indistinguishable from one that was never written. Both read
+as "this program opted out", and jaal proceeds quietly with a default. That
+is the worst failure shape available: the code is right there, it looks
+called, and the symptom lands somewhere else entirely.
+
+It shipped twice in the same month. agentty's `init` kept an older
+`pair<Model,Cmd> init()` signature after the hook became `Cmd init(Model&)`;
+the kernel value-initialised a blank Model and every setting and thread
+`init()` had just loaded was discarded. maya's `terminal_host::attach` took
+a `host_context` keyed on the host type, so a host deriving from it never
+matched the probe, `attach` never ran, and the program took no keyboard
+input. Neither was a typo a reviewer would catch — both were *stale*, correct
+against the previous version of the contract.
+
+The first attempt at this check probed the name with `requires { &P::f; }`,
+and that spelling is wrong in the one direction that matters. You cannot
+take the address of a member template (there's no single address) or of an
+overload set (it's ambiguous), so both report "no such member". jaal's own
+terminal host declares `present`, `present_frame` and `handle` as
+templates. The check was therefore blind to `present` on every real
+renderer: a host whose `present` drifted compiled clean and silently never
+drew a frame, which is precisely the bug the check existed to prevent. The
+poison-pill probe answers on the name alone and has no such hole.
+
+**Considered.**
+- *Make every hook required.* Kills the point of optional hooks — a program
+  with no subscriptions shouldn't write an empty `subscribe`.
+- *Reflection (P2996).* The direct way to ask "does this name exist", and
+  the right answer once it's broadly available. Not in our compiler floor.
+- *A concept per hook that programs opt into explicitly.* Opt-in checks are
+  not applied by the code that forgets them; a drifted hook is exactly the
+  case where nobody remembers to declare the opt-in.
+- *Leave it to tests.* A missing hook is invisible at runtime until the
+  behaviour it drives is exercised, and the symptom (a blank model, a dead
+  keyboard) points nowhere near the signature.
+
+(`compile_fail.hook_drifted_init` / `_subscribe` / `_subs_key` pin the
+program side, `_present` the member-template shape the address-of probe
+could not see, `_overloaded_view` the overload-set shape, and
+`_inherited_warmup` a hook drifted in a base. `host_drifted_attach` and
+`host_drifted_wait_hint` pin the host side.)

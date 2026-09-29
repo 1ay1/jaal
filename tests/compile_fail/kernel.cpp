@@ -263,6 +263,59 @@ struct HostApp16 {
 };
 template void jaal::detail::run::check_hosts<
     WHHost, HostApp16, jaal::kernel::kernel<HostApp16, std::variant<int>>>();
+#elif JAAL_CASE == 17
+// A drifted present(): the hook is a TEMPLATE, which is the shape every
+// real renderer uses (it takes the kernel type). The original probe was
+// `requires { &H::present; }`, and you cannot take the address of a member
+// template — so the probe answered "no such member" for EVERY host with a
+// present(), drifted or not, and this case compiled clean while the host
+// silently never drew a single frame. meta/declares.hpp probes the name
+// instead of its address, so the drift is visible now.
+struct PresentHost {
+    using event_type = std::variant<int>;
+    template <class K> void present(K&, int) {}   // wrong: present(K&)
+};
+struct HostApp17 {
+    struct Model {};
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, S) { return {}; }
+};
+template void jaal::detail::run::check_hosts<
+    PresentHost, HostApp17, jaal::kernel::kernel<HostApp17, std::variant<int>>>();
+#elif JAAL_CASE == 18
+// The same blind spot on the PROGRAM side, and via the other shape that
+// defeats an address-of probe: an OVERLOAD SET. `&P::view` is ambiguous
+// when view is overloaded, so the old probe read this program as having
+// no view() at all — and a program that cannot draw is not a program.
+struct OverloadView {
+    struct Model {};
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, S) { return {}; }
+    // Neither overload is the required `static Out view(const Model&)`.
+    static int view(int) { return 0; }
+    static int view(double) { return 0; }
+};
+template void jaal::detail::prog::check_hooks<OverloadView>();
+#elif JAAL_CASE == 19
+// A hook INHERITED from a base, drifted there. This is the maya/agentty
+// scar in its most general form: the drift is not even in the class you
+// are looking at. Name lookup finds a base's member, so the pill collides
+// with it and the check still fires.
+struct WarmupBase {
+    static int needs_warmup() { return 0; }   // wrong: bool(const Model&)
+};
+struct InheritedWarmup : WarmupBase {
+    struct Model {};
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model&, S) { return {}; }
+};
+template void jaal::detail::prog::check_hooks<InheritedWarmup>();
 #else
 #  error "unknown JAAL_CASE"
 #endif

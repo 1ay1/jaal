@@ -76,6 +76,7 @@
 
 #include "../core/program.hpp"
 #include "../core/sub.hpp"
+#include "../meta/declares.hpp"
 #include "../platform/clock.hpp"
 #include "../platform/select.hpp"
 #include "../platform/signal.hpp"
@@ -346,16 +347,26 @@ using host_context = basic_host_context<typename H::event_type>;
 // member?" probe. Then, once, at kernel::run start, static_assert that
 // (declares && !shape) is impossible — the host has this member but its
 // signature has drifted. Missing entirely is fine (the host opted out).
+//
+// The probe is JAAL_DECLARES_MEMBER (meta/declares.hpp), which answers on
+// the member's NAME and is blind to its shape. The obvious spelling,
+// `requires { &H::present; }`, is not: a template member has no single
+// address and an overload set is ambiguous, so both report "absent". Our
+// own terminal host declares present / present_frame / handle as
+// templates, so that spelling made the check structurally blind to
+// exactly the hooks it was added to protect — a host whose present()
+// drifted compiled clean and simply never drew a frame. See the header
+// for the mechanism.
 
 namespace detail::run {
 
-template <class H> concept host_declares_attach     = requires { &H::attach; };
-template <class H> concept host_declares_on_ready   = requires { &H::on_ready; };
-template <class H> concept host_declares_on_signal  = requires { &H::on_signal; };
-template <class H> concept host_declares_present    = requires { &H::present; };
-template <class H> concept host_declares_release    = requires { &H::release; };
-template <class H> concept host_declares_wait_hint  = requires { &H::wait_hint; };
-template <class H> concept host_declares_owes_frame = requires { &H::owes_frame; };
+JAAL_DECLARES_MEMBER(host_declares_attach,     attach);
+JAAL_DECLARES_MEMBER(host_declares_on_ready,   on_ready);
+JAAL_DECLARES_MEMBER(host_declares_on_signal,  on_signal);
+JAAL_DECLARES_MEMBER(host_declares_present,    present);
+JAAL_DECLARES_MEMBER(host_declares_release,    release);
+JAAL_DECLARES_MEMBER(host_declares_wait_hint,  wait_hint);
+JAAL_DECLARES_MEMBER(host_declares_owes_frame, owes_frame);
 
 template <class H, class P, class K>
 consteval void check_hosts() {

@@ -24,6 +24,7 @@ endfunction()
 
 # ── static tests: compiling IS passing ───────────────────────────────────
 jaal_static_test(meta_list_test meta/list_test.cpp)
+jaal_static_test(meta_declares_test meta/declares_test.cpp)
 jaal_static_test(core_sendable_test core/sendable_test.cpp)
 
 # Every layer umbrella (<jaal/core.hpp> and friends) must compile alone and
@@ -252,6 +253,20 @@ jaal_compile_fail(NAME host_drifted_attach   SOURCE compile_fail/kernel.cpp CASE
                   MATCH "H::attach is declared but its signature doesn't accept")
 jaal_compile_fail(NAME host_drifted_wait_hint SOURCE compile_fail/kernel.cpp CASE 16
                   MATCH "H::wait_hint is declared but its signature doesn't match")
+
+# The shapes an address-of probe CANNOT see: a member template and an
+# overload set. `requires { &H::present; }` is false for both, so the three
+# cases above passed while these silently did not — and present() is a
+# template on every real renderer, so the host-side check was blind to its
+# most important hook. meta/declares.hpp probes the NAME (poison-pill
+# ambiguity), which is shape-blind by construction. Case 19 pins the
+# inherited-hook path, the general form of the maya/agentty scar.
+jaal_compile_fail(NAME hook_drifted_present  SOURCE compile_fail/kernel.cpp CASE 17
+                  MATCH "H::present is declared but its signature doesn't match")
+jaal_compile_fail(NAME hook_overloaded_view  SOURCE compile_fail/kernel.cpp CASE 18
+                  MATCH "P::view is declared but its signature doesn't match")
+jaal_compile_fail(NAME hook_inherited_warmup SOURCE compile_fail/kernel.cpp CASE 19
+                  MATCH "P::needs_warmup is declared but its signature doesn't")
 
 # ── layering: a header may only include its own layer or layers below ───
 add_test(NAME layering
