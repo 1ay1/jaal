@@ -25,6 +25,7 @@ endfunction()
 # ── static tests: compiling IS passing ───────────────────────────────────
 jaal_static_test(meta_list_test meta/list_test.cpp)
 jaal_static_test(meta_declares_test meta/declares_test.cpp)
+jaal_static_test(core_task_gate_test core/task_gate_test.cpp)
 jaal_static_test(core_sendable_test core/sendable_test.cpp)
 
 # Every layer umbrella (<jaal/core.hpp> and friends) must compile alone and

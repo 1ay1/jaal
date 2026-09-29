@@ -522,8 +522,33 @@ stop that. It can make it visible:
    `thread_local` outside an allowlist file. The allowlist is the list of
    places a human has checked by hand. jaal's own `platform/` and `kernel/`
    are on it. In maya and agentty, that list starts long and shrinks.
+
+   Point it at **every tree in the chain**, not just jaal's. jaal running
+   the check over its own sources says nothing about a consumer: maya can
+   park render state in a `thread_local` and agentty can spawn a bare
+   thread beside the loop, and jaal will never see either. Both were
+   audited in 2026-09; agentty had been running it for a while, maya had
+   not, and maya is the layer with by far the most raw primitives (123
+   uses: the render caches, the palette publish, the markdown async
+   worker). Every one turned out to be deliberate and correct — which is
+   exactly the state in which a gate is cheap to adopt and worth having,
+   because the next one now has to be argued for.
+
+   Pair it with a **rot check** (`prune_allowlist.cmake`). The ban-list
+   only ever LOOKS UP the allowlist, so a grant whose justification is gone
+   is silently ignored rather than reported — the exemption outlives the
+   code, and the next person to add a mutex to that file inherits a pass
+   nobody granted them. Measured in agentty when it was added: 4 entries
+   named files that no longer existed, 28 granted primitives the file had
+   stopped using.
 2. **TSan and ASan presets** run the whole test suite. They already exist in
    CMakePresets.json.
+
+   Drive the **real** subsystems, not just models of them. A harness that
+   exercises a hand-written stand-in for a shared seam catches a mistake in
+   the PATTERN; only linking the actual translation units catches a mistake
+   in the CODE, and the two drift. agentty keeps both
+   (`race_harness_test` and `real_subsystem_race_test`) for that reason.
 3. **The simulated platform** runs concurrent tests under a seeded scheduler,
    so a race that shows up once in a thousand real runs shows up on a
    specific seed, every time.

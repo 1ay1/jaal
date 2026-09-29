@@ -41,6 +41,21 @@ namespace jaal {
 // ── task bodies ──────────────────────────────────────────────────────────
 
 /// F is a captureless callable taking (Sink<Msg>, stop_token, Args...).
+///
+/// This concept, ANDed with `Sendable` over the arguments, is the real
+/// question "is this a well-formed task" — and the only way to ask it.
+///
+///     template <class Body, class... Args>
+///     concept ok = TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...);
+///
+/// Do NOT probe with `requires { Cmd::task(body, args...); }`. That is
+/// always true, by design: the bad-input overload (`explain`, below) stays
+/// VIABLE so it can fire a static_assert naming the rule you broke, rather
+/// than dumping "no matching function" with every candidate. A
+/// requires-expression only reports substitution failure, and a
+/// static_assert in an instantiated body is a hard error instead — so the
+/// probe answers "fine" and the build then fails anyway at the call.
+/// tests/core/task_gate_test.cpp pins both halves of this.
 template <class F, class Msg, class... Args>
 concept TaskBody =
     std::is_convertible_v<F, void (*)(Sink<Msg>, std::stop_token, Args...)>;
