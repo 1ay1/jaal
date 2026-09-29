@@ -51,6 +51,7 @@ jaal_test(core_debounce_test core/debounce_test.cpp)
 jaal_test(kernel_parts_test kernel/kernel_parts_test.cpp)
 jaal_test(kernel_test kernel/kernel_test.cpp)
 jaal_test(kernel_scope_test kernel/scope_test.cpp)
+jaal_test(kernel_pool_isolated_wait_test kernel/pool_isolated_wait_test.cpp)
 jaal_test(platform_conformance platform/conformance.cpp)
 # modify() against a real socket send buffer. POSIX: uses socketpair().
 if(UNIX)

@@ -16,7 +16,9 @@
 //   * every task gets a std::stop_token, and shutdown requests stop on all
 //     of them.
 //   * shutdown is BOUNDED. A worker that doesn't return within the grace
-//     period is abandoned (detached) instead of blocking forever.
+//     period is abandoned (detached) instead of blocking forever. That
+//     applies to isolated tasks too: they are waited for inside the same
+//     grace, then abandoned if still stuck.
 //
 // Lifetime, the part that makes abandoning safe:
 //   Everything a worker touches (the queue, the lock, the counters) lives
@@ -25,6 +27,15 @@
 //   worker that finally returns after the pool is gone touches only memory
 //   it still owns. Without this, detaching would trade a hang for a
 //   use-after-free.
+//
+//   That argument covers JAAL's memory, and only jaal's. An isolated task
+//   is precisely where a program puts work that touches its OWN world --
+//   a process-wide cache, a function-local static, an open handle -- and
+//   jaal hands back no handle to join, so "never waited for" would make
+//   those statics outlive-able by a thread the program cannot wait on.
+//   Hence the bounded wait in shutdown(): a merely-busy task gets the
+//   microseconds it needs to see its stop_token, and only a genuinely
+//   wedged one is abandoned.
 
 #include <algorithm>
 #include <chrono>
@@ -75,26 +86,61 @@ public:
         {
             std::lock_guard lk(c_->m);
             if (c_->stopping) return;
+            ++c_->isolated_running;      // counted BEFORE the thread exists,
+                                         // so a shutdown racing this post
+                                         // still waits for it
         }
         try {
             // The thread co-owns the core, so it can report an error even
             // if it outlives the pool.
             std::jthread t([c = c_, j = std::move(j)](std::stop_token st) mutable {
                 run_guarded(*c, j, std::move(st));
+                {
+                    std::lock_guard lk(c->m);
+                    --c->isolated_running;
+                }
+                c->exited_cv.notify_all();
             });
             std::lock_guard lk(c_->m);
             c_->isolated.push_back(t.get_stop_source());
             t.detach();
         } catch (...) {
+            {
+                std::lock_guard lk(c_->m);
+                --c_->isolated_running;  // no thread was created
+            }
             post(std::move(j));      // the OS refused a thread: use the pool
         }
     }
 
     /// Ask every running task to stop, wait up to `grace` for the pool's
-    /// workers to return, and refuse new work. Returns how many workers were
-    /// ABANDONED (still running after the grace; detached, safely, see the
-    /// lifetime note above). Safe to call twice. Isolated threads are asked
-    /// to stop but never waited for.
+    /// workers AND any isolated tasks to return, and refuse new work.
+    /// Returns how many workers were ABANDONED (still running after the
+    /// grace; detached, safely, see the lifetime note above). Safe to call
+    /// twice.
+    ///
+    /// Isolated tasks are waited for too, inside the same grace.
+    ///
+    /// They used to be asked to stop and never waited for. That is safe for
+    /// anything jaal owns -- an abandoned worker only touches the shared
+    /// `core` it co-owns -- but an isolated task is where a program puts
+    /// work that talks to ITS OWN world: a process-wide cache, a function-
+    /// local static, a handle. Nothing in the type system says otherwise,
+    /// and "never waited for" makes the program's statics outlive-able by a
+    /// thread the program cannot join, because jaal hands back no handle.
+    ///
+    /// agentty hit exactly that: a `task_isolated` symbol scan walking a
+    /// `static vector<std::regex>` while main() returned and the CRT
+    /// destroyed it. TSan named it precisely -- `~_NFA` on the main thread
+    /// against `_M_dfs` on the worker -- and it reached users as an
+    /// intermittent abort on Linux and 0xC0000005 on Windows, at roughly
+    /// 7 launches in 10 when stdin was already at EOF.
+    ///
+    /// The bound is what keeps the original promise: a wedged syscall still
+    /// cannot hold the process open, it is abandoned at the deadline like
+    /// any stuck pool worker. What changes is that a task which is merely
+    /// BUSY now gets the microseconds it needs to notice its stop_token and
+    /// leave, instead of racing teardown by design.
     std::size_t shutdown(std::chrono::milliseconds grace = std::chrono::seconds(2)) {
         std::vector<std::jthread> workers;
         {
@@ -109,12 +155,17 @@ public:
         for (auto& w : workers) w.request_stop();
         c_->cv.notify_all();
 
-        // Wait for every worker to leave its loop, or for the grace to end.
+        // Wait for every worker to leave its loop AND every isolated task to
+        // return, or for the grace to end. One deadline covers both: the
+        // grace is a bound on teardown, not a per-thread budget.
         const std::size_t n = workers.size();
+        const auto deadline = std::chrono::steady_clock::now() + grace;
         bool all_out;
         {
             std::unique_lock lk(c_->m);
-            all_out = c_->exited_cv.wait_for(lk, grace, [&] { return c_->exited >= n; });
+            all_out = c_->exited_cv.wait_until(lk, deadline, [&] {
+                return c_->exited >= n && c_->isolated_running == 0;
+            });
         }
         if (all_out) {
             workers.clear();                 // every one has left: join is instant
@@ -123,7 +174,7 @@ public:
         std::size_t abandoned;
         {
             std::lock_guard lk(c_->m);
-            abandoned = n - std::min(c_->exited, n);
+            abandoned = (n - std::min(c_->exited, n)) + c_->isolated_running;
         }
         // Some are stuck. Detach all: joining even the finished ones one by
         // one would risk blocking on a stuck one first. They co-own `core`.
@@ -151,6 +202,12 @@ private:
         std::vector<std::stop_source> isolated;
         std::size_t                   idle     = 0;
         std::size_t                   exited   = 0;
+        // Isolated tasks currently running. shutdown() waits for this to
+        // reach zero inside the SAME grace it gives pool workers, so a task
+        // that co-owns nothing of jaal's -- an app static, a process-wide
+        // cache -- is not still reading it while main() returns and the CRT
+        // destroys it. See the note on shutdown().
+        std::size_t                   isolated_running = 0;
         unsigned                      max      = 4;
         bool                          stopping = false;
         error_fn                      on_error;
