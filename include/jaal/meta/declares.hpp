@@ -114,9 +114,25 @@ concept probeable_base =
         template <class T> struct mixin : T, pill {};                         \
                                                                               \
         /* The real probe: ambiguous lookup means T declared it too.       */ \
+        /*                                                                 */ \
+        /* The lookup happens in a DEPENDENT, UNEVALUATED operand, which   */ \
+        /* is load-bearing on MSVC. Spelled `&mixin<T>::MEMBER` directly,  */ \
+        /* MSVC resolves the member against the already-complete mixin at  */ \
+        /* parse time and reports the ambiguity as a hard error (C2385)    */ \
+        /* instead of the substitution failure the probe is built on, so   */ \
+        /* every host that DID declare the hook failed to compile. GCC     */ \
+        /* and clang treat it as SFINAE. Routing it through a function     */ \
+        /* template parameterised on the mixin keeps the lookup dependent  */ \
+        /* on U, so it is only performed during substitution, where all    */ \
+        /* three compilers agree ambiguity is a soft failure.              */ \
+        template <class U>                                                    \
+        static auto addr(int) -> decltype(&U::MEMBER, std::true_type{});      \
+        template <class U>                                                    \
+        static auto addr(...) -> std::false_type;                             \
+                                                                              \
         template <class T>                                                    \
         struct probe<T, true>                                                 \
-            : std::bool_constant<!requires { &mixin<T>::MEMBER; }> {};        \
+            : std::bool_constant<!decltype(addr<mixin<T>>(0))::value> {};     \
     }                                                                         \
     template <class T>                                                        \
     concept NAME = jaal_declares_##NAME##_detail::probe<T>::value
