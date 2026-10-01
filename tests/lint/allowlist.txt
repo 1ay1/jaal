@@ -11,7 +11,11 @@ core/fx.hpp: sink_access
 core/stream.hpp: sink_access
 # The kernel mints each stream run's generation-gated sink. `atomic`: a
 # lock-free "a task failed" flag, so an idle step doesn't take a lock.
-kernel/kernel.hpp: sink_access atomic
+#
+# (`sink_access` dropped: the kernel reaches the mailbox's sink through
+# inbox_.sink()/sink_from(), which is mailbox.hpp's grant, not a private
+# backdoor of its own.)
+kernel/kernel.hpp: atomic
 # given<P> runs tasks inline and mints a sink into a local vector for them.
 host/given.hpp: sink_access
 
@@ -20,16 +24,34 @@ host/given.hpp: sink_access
 # so a full blocking mailbox refuses a loop-thread post instead of
 # deadlocking on a drain only the loop can do.
 # `atomic`: a lock-free "maybe non-empty" hint so an idle drain skips the lock.
-kernel/mailbox.hpp: mutex sink_access thread atomic
+#
+# (`thread` dropped: the mailbox only names std::thread::ID, it never spawns
+# one. The banlist's `thread` pattern matches a spawn, so the grant was
+# always unused — it just went unreported until the rot check was wired up.)
+kernel/mailbox.hpp: mutex sink_access atomic
 # loop_key is defined here.
-kernel/loop.hpp: loop_key
+#
+# `thread_local`: the armed-loop-identity depth. "Am I on a loop thread?" is
+# per-thread BY DEFINITION, so this is the one correct representation — a
+# shared atomic could not answer the question for the thread that is asking.
+# It is a DEPTH rather than a bool so a kernel started inside another kernel's
+# fold (a child program, a nested run in a test) doesn't disarm the outer one
+# on the way out, and loop_identity is RAII so an exception escaping a fold
+# still disarms (a leaked identity would let a pool thread pass the check
+# later, once the kernel is gone).
+#
+# This is what makes loop_bound<T> usable at all: before it, a token could
+# only come from the kernel, the kernel passed one to nothing, and the count
+# of loop_bound<T> in jaal + maya + agentty was zero. See concurrency.md §4.5.
+kernel/loop.hpp: loop_key thread_local
 # The worker pool: threads, the job queue lock, and detached isolated threads.
 kernel/pool.hpp: thread detach mutex
 # scope: joins every helper thread; `observed` is an atomic flag per helper.
 kernel/scope.hpp: thread atomic
 # The "who waits on this thread" set that lets a mailbox refuse a post
 # that would deadlock (a scope helper sending to the loop that joins it).
-kernel/waits.hpp: thread thread_local
+# Same as mailbox.hpp: it names std::thread::id, it never spawns a thread.
+kernel/waits.hpp: thread_local
 # guarded<T>: the shared_mutex it wraps.
 kernel/guarded.hpp: mutex
 

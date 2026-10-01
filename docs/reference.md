@@ -521,9 +521,30 @@ inversion.
 
 ### `loop_bound<T>`
 
-State only the loop thread may touch. Reading needs a `loop_token`, which
-only the kernel mints and which can be **neither copied nor moved** — so it
-can't be smuggled into a task body.
+State only the loop thread may touch. Reaching the value needs a
+`loop_token`, which can be **neither copied nor moved** (so it can't be
+smuggled into a task body) and which cannot be forged: `loop_key`'s
+constructor is private.
+
+The kernel arms a per-thread identity for its whole lifetime, so on the loop
+you just call `with()`:
+
+```cpp
+jaal::kernel::loop_bound<Cache> g_cache;        // a render cache, say
+
+// In update() or view() — on the loop, so this works:
+g_cache.with([](Cache& c) { c.put(key, value); });
+auto hit = g_cache.with([&](Cache& c) { return c.get(key); });   // a COPY out
+```
+
+On a worker there is no token to be had, and the call **aborts** naming the
+rule rather than quietly returning that thread's own empty copy — the silent
+wrong answer is the bug this type exists to kill. Use `on_loop()` directly if
+you want the token, or `on_loop()` with no argument to just ask.
+
+`with()` won't let a reference or pointer into the state escape (these are
+usually evicting caches, so the handle would dangle); return an owning value
+— a copy, or a `shared_ptr<const T>`.
 
 Use it instead of `thread_local`.
 

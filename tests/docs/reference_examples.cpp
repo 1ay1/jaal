@@ -221,12 +221,24 @@ int main() {
         if (n != 1) return 2;
     }
 
-    // ── loop_bound<T>: the kernel's own path ─────────────────────────────
+    // ── loop_bound<T>: reachable on the loop, nowhere else ───────────────
     {
+        // loop_identity arms this thread as a loop thread. The kernel holds
+        // one for its whole lifetime, so a reducer or a view() just calls
+        // with() and the check passes. Off the loop there is no token to be
+        // had and with() aborts rather than quietly returning a different
+        // thread's value.
+        jaal::kernel::loop_identity arm;
+
         jaal::kernel::loop_bound<int> state{41};
-        jaal::kernel::loop_token tok{jaal::kernel::loop_key{}};
-        state.with(tok, [](int& v) { v += 1; });
-        if (state.get(tok) != 42) return 3;
+        state.with([](int& v) { v += 1; });
+        if (state.with([](const int& v) { return v; }) != 42) return 3;
+
+        // The explicit-token form, for code already holding proof.
+        jaal::kernel::on_loop([&](const jaal::kernel::loop_token& tok) {
+            state.get(tok) += 1;
+        });
+        if (state.with([](const int& v) { return v; }) != 43) return 3;
     }
 
     // ── debounce: a superseded token is not ready ────────────────────────

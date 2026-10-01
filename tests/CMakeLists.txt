@@ -181,15 +181,27 @@ jaal_compile_fail(NAME handle_owner_not_borrow SOURCE compile_fail/handle.cpp CA
 
 # loop_bound / loop_token — state only the loop thread may touch.
 # The guarantee is that a worker cannot name it: get() demands a token, the
-# kernel is the only minter, and a token can't be copied or moved out.
+# key's ctor is private so only the kernel and the checked on_loop() can mint
+# one, and a token can't be copied or moved out.
 jaal_compile_fail(NAME loop_bound_needs_token   SOURCE compile_fail/loop_bound.cpp CASE 1
                   MATCH "no matching function|too few arguments")
 jaal_compile_fail(NAME loop_token_not_forgeable SOURCE compile_fail/loop_bound.cpp CASE 2
                   MATCH "converting to .*loop_key|no matching function|explicit")
-jaal_compile_fail(NAME loop_token_not_movable   SOURCE compile_fail/loop_bound.cpp CASE 3
+# CASE 3 is the forge that USED to compile: loop_key's ctor was public, so
+# `loop_token t{loop_key{}}` handed any worker proof. Private ctor now.
+jaal_compile_fail(NAME loop_key_ctor_private    SOURCE compile_fail/loop_bound.cpp CASE 3
+                  MATCH "is private within this context|private")
+jaal_compile_fail(NAME loop_token_not_movable   SOURCE compile_fail/loop_bound.cpp CASE 4
                   MATCH "deleted (function|constructor)")
-jaal_compile_fail(NAME loop_token_not_copyable  SOURCE compile_fail/loop_bound.cpp CASE 4
+jaal_compile_fail(NAME loop_token_not_copyable  SOURCE compile_fail/loop_bound.cpp CASE 5
                   MATCH "deleted (function|constructor)")
+# on_loop() lends access the same way guarded<T>::with does, so it refuses to
+# let a reference into the protected data escape the callback.
+jaal_compile_fail(NAME loop_bound_no_escape     SOURCE compile_fail/loop_bound.cpp CASE 6
+                  MATCH "returns something that points into loop-bound state")
+# A loop_bound is pinned to one thread, so it must not ride into a worker.
+jaal_compile_fail(NAME loop_bound_not_sendable  SOURCE compile_fail/loop_bound.cpp CASE 7
+                  MATCH "not Sendable|thread-bound")
 
 # scope / guarded
 jaal_compile_fail(NAME guarded_no_escape  SOURCE compile_fail/scope.cpp CASE 1
@@ -292,6 +304,30 @@ add_test(NAME banlist_src
                  -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/lint/allowlist_src.txt
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/lint/banlist.cmake)
 set_tests_properties(banlist_src PROPERTIES LABELS "static")
+
+# ── allowlist rot: a grant that no longer earns its keep ──────────────────
+#
+# prune_allowlist.cmake lived here but was never REGISTERED, so nothing ran
+# it — and three grants had already gone stale unnoticed (kernel.hpp's
+# sink_access, mailbox.hpp's and waits.hpp's thread). That is the exact rot
+# the script exists to catch, sitting in the tree that owns the script.
+#
+# The banlist only ever LOOKS UP the allowlist, so a stale grant is silently
+# ignored rather than reported: the next person to add a std::mutex to one of
+# those files inherits a pass nobody granted them. Both halves have to run.
+add_test(NAME allowlist_tight
+         COMMAND ${CMAKE_COMMAND}
+                 -DROOT=${PROJECT_SOURCE_DIR}/include/jaal
+                 -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/lint/allowlist.txt
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/lint/prune_allowlist.cmake)
+set_tests_properties(allowlist_tight PROPERTIES LABELS "static")
+
+add_test(NAME allowlist_tight_src
+         COMMAND ${CMAKE_COMMAND}
+                 -DROOT=${PROJECT_SOURCE_DIR}/src
+                 -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/lint/allowlist_src.txt
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/lint/prune_allowlist.cmake)
+set_tests_properties(allowlist_tight_src PROPERTIES LABELS "static")
 
 # ── macOS compile check ──────────────────────────────────────────────────
 # There's no Mac here, so the darwin backends can't RUN in this suite. zig

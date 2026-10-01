@@ -294,36 +294,73 @@ public:
     auto get(loop_token) const -> const T&;
 };
 
+class loop_key {                              // the kernel's minting key
+    loop_key() = default;                     // PRIVATE: naming it is the forge
+    friend struct loop_detail::minter;        // the one place a key is born
+};
+
 class loop_token {                            // proof "this code runs on the loop thread"
-    loop_token() = default;                   // private
-    friend class kernel_access;               // only the kernel creates one
 public:
+    explicit loop_token(loop_key);            // so: kernel or on_loop() only
     loop_token(const loop_token&) = delete;   // can't be copied into a lambda
     loop_token(loop_token&&) = delete;        // or moved into one
 };
 ```
 
-- The kernel passes `loop_token&` into `update`, `view` and host callbacks,
-  on the loop thread only.
+- `loop_key`'s constructor is **private**. Only the kernel can mint a token
+  directly, through the one `friend` the key has. This was the hole: the ctor
+  used to be public-and-explicit, which stops `loop_token t{{}}` (brace
+  elision) but not `loop_token t{loop_key{}}` — two more characters, and any
+  worker had forged proof. `explicit` defeats elision, not naming.
 - A task body never receives one, and it can't capture one: the token is
   neither copyable nor movable, and a lambda that captures it by reference is
   rejected because task bodies must be captureless (4.6).
-- **There is no static or global way to get a token.** No `loop_token::current()`,
-  no singleton. This matters: a captureless lambda can still call any
-  function and read any global, so a static accessor would hand the token
-  straight to a worker. The only tokens that exist are the ones the kernel
-  passes down the call stack. (Prototyped: a captureless lambda calling a
-  static token getter passes the captureless check, which is why there
-  isn't one.)
-- So code running on a worker has no way to reach loop-bound state.
+- **There is no UNCHECKED static accessor.** No `loop_token::current()`, no
+  singleton. This matters: a captureless lambda can still call any function
+  and read any global, so an unchecked accessor would hand the token straight
+  to a worker.
+- `on_loop(f)` is the **checked** accessor, and it is how consumer code gets a
+  token at all. It asks the kernel's per-thread identity "is this a loop
+  thread?" and either runs `f` with a token or **aborts**, naming the rule. So
+  the off-loop call is not quietly wrong; it is loud.
+
+### Why there is an `on_loop()`, and the grade it costs
+
+The three bullets above, minus the last one, were the original design. They
+are sound, and they made `loop_bound<T>` **unusable**: a token could only come
+from the kernel, and the kernel passed one to nothing. Across jaal, maya and
+agentty the number of `loop_bound<T>` in production code was **zero**. All 68
+of maya's `thread_local`s and all 25 of agentty's stayed raw, each asserting
+P1 in a comment — exactly the state §1.2 calls the problem.
+
+A guarantee nothing can adopt protects nothing. So the kernel now arms a
+per-thread `loop_identity` for its whole lifetime (not just inside `step()` —
+a host calls `view()` *between* steps, and `view()` is the code with the
+caches worth protecting), and `on_loop()` mints proof only after checking it.
+
+That trades Level A for Level B on one axis: an off-loop call is caught at
+runtime, not compile time. It is still **A** for every route that mattered
+before — the token can't be forged, copied, moved, captured, or sent — and
+the failure it replaces is the one §1.2 names as *worse than a crash*: a
+worker silently getting its own empty cache. A Level B rule with real
+adopters beats a Level A rule with none.
+
+`on_loop()` also refuses to let a reference or pointer into loop-bound state
+escape the callback, since these are usually evicting caches and the handle
+would dangle at the next mutation. Note this is NOT `guarded<T>`'s rule:
+`guarded` requires `Sendable` because its data crosses a thread, while
+`loop_bound` only ever hands data to the loop thread, so an owning
+`shared_ptr<const T>` return is correct here and must keep compiling.
 
 What changes for maya: its `thread_local` caches become `loop_bound` state
-owned by the host, reached through the token. Code that ran on a worker
-today would stop compiling instead of silently getting an empty cache.
+reached through `with()`. A worker that touches one aborts with a message
+instead of silently rendering from an empty copy.
 
 This is the largest migration item and doesn't need to happen at once.
 `thread_local` keeps working. `loop_bound` is how new code, and code that's
-touched, gets the check.
+touched, gets the check. agentty has started: the four render-path
+`thread_local`s in `agent_timeline.cpp` and `tool_body_preview.cpp` are
+`loop_bound<T>` now, and their allowlist grants are gone.
 
 ### 4.6 Task bodies: captureless, arguments by move
 
@@ -476,7 +513,7 @@ documented).
 
 | maya today | jaal | level |
 |---|---|---|
-| P1 `thread_local` caches | `loop_bound<T>` reached with a `loop_token` | A |
+| P1 `thread_local` caches | `loop_bound<T>` reached via `on_loop()`; token unforgeable, a worker aborts | A for forge/copy/move/send, B for the off-loop call |
 | P2 BackgroundQueue + weak sink | `Sink<Msg>`, weak by type, mailbox destroyed only on the loop | A |
 | P3 detached isolated threads | `isolated_task`: captureless body, Sendable args, owned by jaal's detach path | A |
 | P4 markdown async slot | task + Msg, single-flight as a keyed source | A |
@@ -503,7 +540,7 @@ documented).
 | worker destroys runtime, self-join (P2) | mailbox's only strong owner is the kernel | A |
 | exception kills process from a worker | every thread body is wrapped (from agentty's `isolated_thread`) | A |
 | detached thread leaks work at exit | isolated tasks get the stop token; the kernel requests stop | A |
-| stale state read from another thread | loop state is `loop_bound`; workers can't get a token | A |
+| stale state read from another thread | loop state is `loop_bound`; a worker can't get a token and aborts if it asks | A/B |
 | borrowed view inside a Msg | deep `Sendable` via structured binding packs | A |
 | mutable field inside "immutable" shared data | `Frozen` rejects `mutable` fields | A |
 | a task shares data through a global or static | ban-list flags mutable statics; jaal exposes none | B |

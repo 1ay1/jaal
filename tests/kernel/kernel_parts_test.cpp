@@ -20,19 +20,29 @@ using jaal::platform::sim_clock;
 
 struct Msg { int v; };
 
-// ── loop_bound: a token can't be copied, moved, or made without the key ──
+// ── loop_bound: a token can't be copied, moved, or forged ────────────────
 static_assert(!std::is_copy_constructible_v<k::loop_token>);
 static_assert(!std::is_move_constructible_v<k::loop_token>);
 static_assert(!std::is_default_constructible_v<k::loop_token>);
-static_assert(std::is_constructible_v<k::loop_token, k::loop_key>);
-// loop_key's ctor is explicit, so a token can't appear from {} at a call
-// site: you have to name loop_key, which is grep-able.
-static_assert(!std::is_convertible_v<decltype(""), k::loop_key>);
 static_assert(!std::is_constructible_v<k::loop_token>);
-// There is no static accessor: a captureless task body can call any
-// function, so a loop_token::current() would hand a worker a token.
+// loop_key's ctor is PRIVATE. It used to be public-and-explicit, and the
+// justification was "you have to name loop_key, which is grep-able" — but
+// grep-able is not a guarantee, and `loop_token t{loop_key{}}` was two
+// characters of worker code away from forged proof. Now only the kernel
+// (loop_detail::minter, loop_key's one friend) and the thread-CHECKED
+// on_loop() can mint one.
+static_assert(!std::is_default_constructible_v<k::loop_key>);
+static_assert(!std::is_convertible_v<decltype(""), k::loop_key>);
+// There is still no UNCHECKED static accessor: a captureless task body can
+// call any function, so a loop_token::current() would hand a worker a token.
+// on_loop() is the checked form — it aborts off the loop rather than
+// returning proof — and loop_identity::token() is the kernel's own path,
+// callable only from inside an armed region.
 template <class T> concept has_current = requires { T::current(); };
 static_assert(!has_current<k::loop_token>);
+// A loop_identity is not itself proof — it ARMS the thread; proof comes from
+// loop_identity::token(), which is only meaningful inside an armed region.
+static_assert(!std::is_constructible_v<k::loop_token, k::loop_identity>);
 
 static int mailbox_tests() {
     // wake fires only on empty → non-empty
@@ -245,11 +255,18 @@ static int pool_tests() {
 }
 
 int main() {
+    // Arm this thread the way the kernel arms its own, then the loop-bound
+    // accessors work. There is no longer a way to get a token WITHOUT being
+    // on an armed thread, which is the point.
+    k::loop_identity arm;
     k::loop_bound<std::string> state("hi");
-    k::loop_token tok{k::loop_key{}};
+    const k::loop_token tok = k::loop_identity::token();
     if (state.get(tok) != "hi") return 50;
     state.with(tok, [](std::string& s) { s += "!"; });
     if (state.get(tok) != "hi!") return 51;
+    // The token-free form checks the thread for itself.
+    state.with([](std::string& s) { s += "?"; });
+    if (state.with([](const std::string& s) { return s; }) != "hi!?") return 52;
 
     if (int r = mailbox_tests()) return r;
     if (int r = timer_tests())   return r;

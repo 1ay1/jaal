@@ -1181,6 +1181,23 @@ private:
     // Origins of the subscriptions running right now (streams and every
     // timers). Loop-only, so the check in fold_pending has no window.
     std::unordered_set<origin_id> live_origins_;
+
+    // The thread that CONSTRUCTED this kernel is its loop thread: init(),
+    // every fold, every subscribe() and the host's view() all run there,
+    // and nothing else is allowed to drive it (the kernel is neither
+    // copyable nor movable, which is what makes "where it was made" a
+    // meaningful answer).
+    //
+    // Arming it as a MEMBER, rather than inside step(), is deliberate: a
+    // host calls view() BETWEEN steps, and that is exactly the code with the
+    // loop-only caches worth protecting. A guard scoped to step() would
+    // leave view() unarmed, i.e. leave the 68 render caches exactly as
+    // unprotected as they are today.
+    //
+    // Declared LAST among the members that matter so it is destroyed first,
+    // but after shutdown(): ~kernel runs shutdown() in its body, which joins
+    // the pool and may still fold, and that work must stay on-loop.
+    loop_identity loop_id_{};
     std::vector<queued> fired_;
     std::uint64_t       folds_      = 0;
     std::uint64_t       faults_     = 0;
