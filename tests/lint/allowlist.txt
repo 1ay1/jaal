@@ -54,6 +54,12 @@ kernel/scope.hpp: thread atomic
 kernel/waits.hpp: thread_local
 # guarded<T>: the shared_mutex it wraps.
 kernel/guarded.hpp: mutex
+# delay_for: condition_variable_any needs a Lockable to wait on, so the mutex
+# is a formality rather than a guard — nothing else can reach it, it is never
+# contended, and the shared state it "protects" is the stop_token. The whole
+# point of the function is that subsystems stop declaring one of these (plus a
+# condition variable and a stop flag) just to express a duration.
+kernel/delay.hpp: mutex
 
 # The signal handler's test hook is an atomic (the only thing a handler
 # may touch). Declared here so tests and the .cpp agree on it.

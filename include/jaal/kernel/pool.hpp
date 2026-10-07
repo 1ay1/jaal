@@ -153,7 +153,23 @@ public:
     /// any stuck pool worker. What changes is that a task which is merely
     /// BUSY now gets the microseconds it needs to notice its stop_token and
     /// leave, instead of racing teardown by design.
-    std::size_t shutdown(std::chrono::milliseconds grace = std::chrono::seconds(2)) {
+    /// No deadline. Wait for every job, however long it takes.
+    ///
+    /// The default bound is right for a pool whose jobs touch only what they
+    /// CO-OWN: a wedged syscall must not hold the process open, so abandoning
+    /// at the deadline is safe and correct. But a host also puts work in a
+    /// pool that writes into state the HOST owns and destroys immediately
+    /// after shutdown returns — an engine, a transport, an index. Abandoning
+    /// there is a use-after-free, and a hang is the lesser harm, so that host
+    /// must be able to say so rather than pick a grace it hopes is enough.
+    ///
+    /// A job that never returns hangs this forever. That is the point: it
+    /// turns "silent corruption at exit" into "this subsystem's job ignored
+    /// its own timeout", which is a bug with a stack trace.
+    static constexpr std::optional<std::chrono::milliseconds> no_deadline{};
+
+    std::size_t shutdown(std::optional<std::chrono::milliseconds> grace
+                             = std::chrono::seconds(2)) {
         std::vector<std::jthread> workers;
         {
             std::lock_guard lk(c_->m);
@@ -171,13 +187,21 @@ public:
         // return, or for the grace to end. One deadline covers both: the
         // grace is a bound on teardown, not a per-thread budget.
         const std::size_t n = workers.size();
-        const auto deadline = std::chrono::steady_clock::now() + grace;
         bool all_out;
         {
             std::unique_lock lk(c_->m);
-            all_out = c_->exited_cv.wait_until(lk, deadline, [&] {
+            const auto done = [&] {
                 return c_->exited >= n && c_->isolated_running == 0;
-            });
+            };
+            if (grace) {
+                all_out = c_->exited_cv.wait_until(
+                    lk, std::chrono::steady_clock::now() + *grace, done);
+            } else {
+                // No deadline: this returns only when every job is out, so
+                // the caller's "nothing is running" is a fact, not a hope.
+                c_->exited_cv.wait(lk, done);
+                all_out = true;
+            }
         }
         if (all_out) {
             workers.clear();                 // every one has left: join is instant

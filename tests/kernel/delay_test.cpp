@@ -15,7 +15,9 @@
 // loaded machine.
 
 #include <jaal/kernel/delay.hpp>
+#include <jaal/kernel/pool.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <stop_token>
@@ -87,6 +89,46 @@ int main() {
         std::stop_source src;
         ok(!jaal::kernel::delay_for(src.get_token(), 0ms),
            "a zero duration elapses rather than reporting a stop");
+    }
+
+    // pool::no_deadline is a BARRIER: shutdown must not return while a job is
+    // still running. The bounded default would return here with the job
+    // abandoned, which is exactly the case a host cannot have when the job
+    // writes into state the host frees next.
+    {
+        std::atomic<bool> finished{false};
+        std::atomic<bool> entered{false};
+        {
+            jaal::kernel::pool p;
+            p.post_isolated([&](std::stop_token) {
+                entered = true;
+                // Ignores its stop_token on purpose: a cooperative job would
+                // not distinguish a barrier from a short grace.
+                std::this_thread::sleep_for(300ms);
+                finished = true;
+            });
+            while (!entered.load()) std::this_thread::yield();
+            const std::size_t stuck = p.shutdown(jaal::kernel::pool::no_deadline);
+            ok(stuck == 0, "no_deadline abandons nothing");
+            ok(finished.load(),
+               "no_deadline waited for a job that ignored its stop_token");
+        }
+    }
+
+    // And the bounded default still bounds — the two must stay distinct, or
+    // the option above is decorative.
+    {
+        std::atomic<bool> entered{false};
+        jaal::kernel::pool p;
+        p.post_isolated([&](std::stop_token) {
+            entered = true;
+            std::this_thread::sleep_for(2s);
+        });
+        while (!entered.load()) std::this_thread::yield();
+        const auto        t0    = clk::now();
+        const std::size_t stuck = p.shutdown(50ms);
+        ok(stuck > 0, "a short grace reports what it abandoned");
+        ok(ms_since(t0) < 1500, "and returns without waiting the job out");
     }
 
     if (failures == 0) std::puts("delay: all checks OK");
