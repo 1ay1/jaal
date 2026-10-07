@@ -43,6 +43,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -153,6 +154,43 @@ public:
     /// any stuck pool worker. What changes is that a task which is merely
     /// BUSY now gets the microseconds it needs to notice its stop_token and
     /// leave, instead of racing teardown by design.
+    /// Run `body` and hand back its result.
+    ///
+    /// THE FUTURE DOES NOT BLOCK IN ITS DESTRUCTOR, and that is the entire
+    /// reason this exists rather than std::async.
+    ///
+    /// A future from std::async joins its task when the last reference to the
+    /// shared state dies. So "I no longer want this result" silently means
+    /// "block right here until it finishes" — at whatever line the future
+    /// happens to go out of scope, which is usually an early return or an
+    /// unwind. The only escape is to ship the future somewhere you can afford
+    /// to block, and hosts do exactly that: agentty's MCP startup handed
+    /// timed-out connect futures to a detached waiter whose whole job was to
+    /// absorb a destructor stall. That is a workaround for the primitive, so
+    /// the primitive should not need one.
+    ///
+    /// Built on a promise instead, whose future has no such behaviour:
+    /// dropping it abandons the result and nothing more. The job keeps
+    /// running on the pool and is waited for by shutdown() like any other.
+    ///
+    /// If the pool is already stopping the job is never run, the promise is
+    /// destroyed unfulfilled, and get() throws broken_promise. That is the
+    /// honest answer — a caller learns the work did not happen instead of
+    /// waiting forever for a result nobody will produce.
+    ///
+    /// `body` may take a std::stop_token or nothing.
+    template <class F>
+    [[nodiscard]] auto submit(F&& body) {
+        return submit_impl(std::forward<F>(body), /*isolated=*/false);
+    }
+
+    /// submit() on a thread of its own, for work that may never return.
+    /// Same future semantics.
+    template <class F>
+    [[nodiscard]] auto submit_isolated(F&& body) {
+        return submit_impl(std::forward<F>(body), /*isolated=*/true);
+    }
+
     /// No deadline. Wait for every job, however long it takes.
     ///
     /// The default bound is right for a pool whose jobs touch only what they
@@ -229,6 +267,49 @@ public:
     }
 
 private:
+    // Invoke `b` with the stop_token if it wants one. Also the RESULT-TYPE
+    // probe: std::conditional_t cannot be used for that, because it
+    // instantiates BOTH branches and one of them is always ill-formed here
+    // (a nullary body has no invoke_result with a stop_token, and vice
+    // versa). Return-type deduction over `if constexpr` is lazy, so this
+    // names the right type without forming the wrong one.
+    template <class Body>
+    static decltype(auto) invoke_body(Body& b, std::stop_token st) {
+        if constexpr (std::invocable<Body&, std::stop_token>)
+            return b(std::move(st));
+        else
+            return b();
+    }
+
+    template <class F>
+    auto submit_impl(F&& body, bool isolated) {
+        using Body = std::decay_t<F>;
+        using R    = decltype(invoke_body(std::declval<Body&>(),
+                                          std::stop_token{}));
+
+        auto pr  = std::make_shared<std::promise<R>>();
+        auto fut = pr->get_future();
+        job j = [pr, body = Body(std::forward<F>(body))](
+                    std::stop_token st) mutable {
+            try {
+                if constexpr (std::is_void_v<R>) {
+                    invoke_body(body, std::move(st));
+                    pr->set_value();
+                } else {
+                    pr->set_value(invoke_body(body, std::move(st)));
+                }
+            } catch (...) {
+                // The future carries the failure, so run_guarded's on_error
+                // net is not the reporting path here — the caller's get()
+                // rethrows at a place that has context for it.
+                try { pr->set_exception(std::current_exception()); } catch (...) {}
+            }
+        };
+        if (isolated) post_isolated(std::move(j));
+        else          post(std::move(j));
+        return fut;
+    }
+
     // Everything a worker touches. Co-owned by the pool and every worker.
     struct core {
         std::mutex                    m;

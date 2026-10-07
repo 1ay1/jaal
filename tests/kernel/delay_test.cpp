@@ -20,6 +20,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <future>
+#include <stdexcept>
 #include <stop_token>
 #include <thread>
 
@@ -129,6 +131,60 @@ int main() {
         const std::size_t stuck = p.shutdown(50ms);
         ok(stuck > 0, "a short grace reports what it abandoned");
         ok(ms_since(t0) < 1500, "and returns without waiting the job out");
+    }
+
+    // submit(): a result, without std::async's blocking destructor. This is
+    // the property the whole thing exists for, so it is measured: drop the
+    // future of a job that is still running and the drop must be instant.
+    // std::async would join here.
+    {
+        jaal::kernel::pool p;
+        std::atomic<bool>  entered{false};
+        std::atomic<bool>  finished{false};
+        const auto t0 = clk::now();
+        {
+            auto fut = p.submit_isolated([&](std::stop_token) {
+                entered = true;
+                std::this_thread::sleep_for(400ms);
+                finished = true;
+                return 7;
+            });
+            while (!entered.load()) std::this_thread::yield();
+        }   // future dropped mid-job
+        const auto dropped_after = ms_since(t0);
+        ok(dropped_after < 200,
+           "dropping a submit() future does NOT join the job");
+        ok(!finished.load(), "and the job really was still running");
+        // The job is still owned: shutdown waits for it.
+        (void)p.shutdown(jaal::kernel::pool::no_deadline);
+        ok(finished.load(), "an abandoned result still runs to completion");
+    }
+
+    // A value comes back, and a throw comes back as a throw.
+    {
+        jaal::kernel::pool p;
+        auto v = p.submit([] { return 41 + 1; });
+        ok(v.get() == 42, "submit returns the body's value");
+
+        auto bad = p.submit([]() -> int { throw std::runtime_error("nope"); });
+        bool threw = false;
+        try { (void)bad.get(); } catch (const std::runtime_error&) { threw = true; }
+        ok(threw, "a throwing body surfaces at get(), not at on_error");
+
+        auto nothing = p.submit([] {});          // void body
+        nothing.get();
+        ok(true, "a void body round-trips");
+    }
+
+    // Submitting to a stopped pool must not hand back a future that waits
+    // forever for a job nobody will run.
+    {
+        jaal::kernel::pool p;
+        (void)p.shutdown();
+        auto fut   = p.submit([] { return 1; });
+        bool threw = false;
+        try { (void)fut.get(); } catch (const std::future_error&) { threw = true; }
+        ok(threw, "a dropped job breaks its promise instead of hanging get()");
     }
 
     if (failures == 0) std::puts("delay: all checks OK");
