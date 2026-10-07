@@ -54,7 +54,19 @@ namespace jaal::kernel {
 
 class pool {
 public:
-    using job      = std::function<void(std::stop_token)>;
+    // move_only_function, NOT std::function. A job is queued once, moved
+    // once and invoked once — the queue never copies one (see worker_loop
+    // and post_isolated, both of which only std::move) — so requiring
+    // copy-constructibility buys nothing and costs the callers that matter
+    // most. Owned background work captures owned things: a unique_ptr, a
+    // promise, a response handle. std::function rejects every one of those,
+    // which pushed a host into wrapping its body in a shared_ptr purely to
+    // satisfy the signature — an allocation and a shared owner invented to
+    // work around the type, on exactly the code path where single ownership
+    // was the point. (agentty hit this with the ACP turn worker.)
+    using job      = std::move_only_function<void(std::stop_token)>;
+    // on_error stays copyable: it is stored and invoked many times, once per
+    // failing job, so it is a genuine std::function.
     using error_fn = std::function<void(std::exception_ptr)>;
 
     explicit pool(unsigned max_workers = 0, error_fn on_error = {})
