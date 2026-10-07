@@ -90,7 +90,10 @@ struct posix_process::impl {
     native_handle pidfd = invalid_handle;   ///< Linux exit signal
 
     bool        merged     = false;
-    bool        leads_group = false;
+    /// Only meaningful for an adopted child, where the caller asserts it.
+    /// For one we forked we ASK instead -- see leads_own_group().
+    bool        claimed_group = false;
+    bool        adopted       = false;
     bool        reaped     = false;
     bool        exit_exact = false;
     exit_status status{};
@@ -106,7 +109,7 @@ struct posix_process::impl {
         // without blocking. We do NOT wait — a destructor that can hang is
         // worse than a zombie.
         if (pid > 0 && !reaped) {
-            if (leads_group) ::kill(-pid, SIGKILL);
+            if (leads_own_group()) ::kill(-pid, SIGKILL);
 #if defined(__linux__)
             if (!signal_via_pidfd(pidfd, SIGKILL)) ::kill(pid, SIGKILL);
 #else
@@ -115,6 +118,15 @@ struct posix_process::impl {
             int st = 0;
             ::waitpid(pid, &st, WNOHANG);
         }
+    }
+
+    /// Asked, not remembered: setsid() fails when the caller already leads a
+    /// group, so storing the request would claim a group we may not lead and
+    /// kill(-pid) would signal a stranger.
+    [[nodiscard]] bool leads_own_group() const {
+        if (pid <= 0) return false;
+        if (adopted) return claimed_group;   // we did not fork it; take the word
+        return ::getpgid(pid) == pid;
     }
 
     [[nodiscard]] native_handle exit_fd() const {
@@ -228,7 +240,6 @@ result<posix_process> posix_process::spawn(const process_spec& spec) {
 
     // ── parent ──────────────────────────────────────────────────────────
     s.pid = pid;
-    s.leads_group = spec.new_session;   // we called setsid; we know
     report.close_write();          // so our read sees EOF when exec succeeds
     s.out.close_write();
     s.err.close_write();
@@ -280,9 +291,10 @@ result<posix_process> posix_process::adopt(adopted_child c) {
 
     posix_process self;
     auto& s = *self.p_;
-    s.pid         = c.pid;
-    s.merged      = c.merged;
-    s.leads_group = c.leads_own_group;
+    s.pid           = c.pid;
+    s.merged        = c.merged;
+    s.claimed_group = c.leads_own_group;
+    s.adopted       = true;
     s.out.r  = c.stdout_fd;
     s.err.r  = c.merged ? invalid_handle : c.stderr_fd;
     s.in.w   = c.stdin_fd;
@@ -343,7 +355,7 @@ result<void> posix_process::stop(stop_mode mode, stop_scope scope) {
     // The group, but only when we KNOW the pid leads one here. For an
     // adopted child from a PID namespace the number means something else on
     // this host, and kill(-n) would signal a stranger.
-    if (scope == stop_scope::tree && p_->leads_group) {
+    if (scope == stop_scope::tree && p_->leads_own_group()) {
         if (::kill(-p_->pid, sig) == 0) return {};
         if (errno != ESRCH)
             return std::unexpected(error::from_errno(errno, "posix_process: killpg"));
