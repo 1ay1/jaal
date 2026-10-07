@@ -55,6 +55,10 @@ jaal_test(kernel_pool_isolated_wait_test kernel/pool_isolated_wait_test.cpp)
 jaal_test(platform_conformance platform/conformance.cpp)
 if(UNIX)
     jaal_test(platform_process_conformance platform/process_conformance.cpp)
+    # The cross-process critical section. Checks 9-13 FORK, because the only
+    # statement a file lock makes is about the kernel arbitrating between
+    # real processes — a sim that modelled that would assert its own map.
+    jaal_test(platform_file_lock_conformance platform/file_lock_conformance.cpp)
 endif()
 # modify() against a real socket send buffer. POSIX: uses socketpair().
 if(UNIX)

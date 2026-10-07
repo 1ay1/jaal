@@ -61,6 +61,7 @@ if(WIN32)
     list(APPEND JAAL_PLATFORM_SOURCES
          src/platform/windows/wait_reactor.cpp
          src/platform/windows/console_signals.cpp
+         src/platform/windows/file_lock.cpp
          src/platform/windows/handle.cpp)
 elseif(UNIX)
     list(APPEND JAAL_PLATFORM_SOURCES
@@ -68,7 +69,9 @@ elseif(UNIX)
          src/platform/posix/signals.cpp
          src/platform/posix/handle.cpp
          src/platform/posix/process.cpp
-         src/platform/sim/process.cpp)
+         src/platform/posix/file_lock.cpp
+         src/platform/sim/process.cpp
+         src/platform/sim/file_lock.cpp)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         list(APPEND JAAL_PLATFORM_SOURCES src/platform/linux/epoll_reactor.cpp)
     elseif(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD")

@@ -10,6 +10,9 @@
 //   Process          spawn a child; its EXIT is a handle the reactor watches,
 //                    so a host waits for a child, a socket and a timer in one
 //                    wait() instead of bolting waitpid onto a poll loop
+//   FileLock         a cross-process critical section on a lock sidecar, for
+//                    the race jaal::guarded cannot reach: two COPIES of the
+//                    program doing read-modify-write on one file
 //   owned_handle     an OS handle as a linear resource (move-only, one close)
 //   steady_clock / sim_clock
 //
@@ -23,6 +26,7 @@
 
 #include "platform/clock.hpp"
 #include "platform/concepts.hpp"
+#include "platform/file_lock.hpp"
 #include "platform/handle.hpp"
 #include "platform/process.hpp"
 #include "platform/select.hpp"
