@@ -66,7 +66,9 @@ elseif(UNIX)
     list(APPEND JAAL_PLATFORM_SOURCES
          src/platform/posix/poll_reactor.cpp
          src/platform/posix/signals.cpp
-         src/platform/posix/handle.cpp)
+         src/platform/posix/handle.cpp
+         src/platform/posix/process.cpp
+         src/platform/sim/process.cpp)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         list(APPEND JAAL_PLATFORM_SOURCES src/platform/linux/epoll_reactor.cpp)
     elseif(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD")

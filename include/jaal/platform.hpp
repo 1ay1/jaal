@@ -7,6 +7,9 @@
 //   native_reactor   epoll (Linux), kqueue (macOS/BSD), WaitForMultipleObjects
 //                    (Windows), poll (other POSIX)
 //   native_signals   signals as events, never as handler callbacks
+//   Process          spawn a child; its EXIT is a handle the reactor watches,
+//                    so a host waits for a child, a socket and a timer in one
+//                    wait() instead of bolting waitpid onto a poll loop
 //   owned_handle     an OS handle as a linear resource (move-only, one close)
 //   steady_clock / sim_clock
 //
@@ -21,5 +24,6 @@
 #include "platform/clock.hpp"
 #include "platform/concepts.hpp"
 #include "platform/handle.hpp"
+#include "platform/process.hpp"
 #include "platform/select.hpp"
 #include "platform/signal.hpp"

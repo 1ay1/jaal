@@ -66,14 +66,25 @@ struct sim_step {
     std::int32_t value = 0;    ///< for exit_code / killed
 };
 
-/// The script the NEXT spawn will run.
+/// THE SIM PROGRAM IS ITS ARGV.
 ///
-/// Thread-local and consumed by spawn(), because the concept mandates a
-/// static `P::spawn(spec)` and a test backend may not widen that signature
-/// just for its own convenience — a backend that needs a different entry
-/// point is a backend the suite cannot run uniformly, which defeats the
-/// purpose. Set it, spawn, step it.
-void sim_script(std::vector<sim_step> steps);
+/// A real child is identified by the program you name; so is this one. The
+/// script is the argv, one step per argument:
+///
+///     {"sim", "out:hello", "fill", "exit:3"}
+///
+/// grammar:  out:<bytes> | err:<bytes> | fill | exit[:n] | kill:<sig>
+///
+/// The first draft kept the script in a thread_local that spawn() consumed,
+/// and justified it in a comment -- the concept mandates a static
+/// `P::spawn(spec)`, so where else would it go? jaal's own banlist answered
+/// that: nowhere, because hidden per-thread state is the thing this runtime
+/// exists to not have. Putting the script where a program's identity already
+/// lives removes the question instead of excusing it, and the request stays
+/// pure data that two threads can spawn concurrently without sharing
+/// anything.
+[[nodiscard]] std::vector<sim_step> parse_sim_script(
+    const std::vector<std::string>& argv);
 
 /// A scripted child. Satisfies Process, so the conformance suite runs
 /// against it unmodified.

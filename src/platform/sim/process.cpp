@@ -10,6 +10,7 @@
 #include "jaal/platform/sim/process.hpp"
 
 #include <cerrno>
+#include <cstdlib>
 #include <utility>
 
 #if defined(_WIN32)
@@ -21,8 +22,6 @@
 
 namespace jaal::platform {
 namespace {
-
-thread_local std::vector<sim_step> g_next_script;
 
 /// A pipe as two owned ends. Non-blocking on BOTH ends: the writer so
 /// fill_pipe can stop at EAGAIN instead of deadlocking the test, the reader
@@ -114,19 +113,45 @@ struct sim_process::impl {
     }
 };
 
+std::vector<sim_step> parse_sim_script(const std::vector<std::string>& argv) {
+    std::vector<sim_step> steps;
+    // argv[0] names the program, exactly as it would for a real one.
+    for (std::size_t i = 1; i < argv.size(); ++i) {
+        const std::string& a = argv[i];
+        const auto colon = a.find(':');
+        const std::string head = a.substr(0, colon);
+        const std::string tail =
+            colon == std::string::npos ? std::string{} : a.substr(colon + 1);
+
+        sim_step s;
+        if (head == "out")       { s.what = sim_step::kind::write_out; s.bytes = tail; }
+        else if (head == "err")  { s.what = sim_step::kind::write_err; s.bytes = tail; }
+        else if (head == "fill") { s.what = sim_step::kind::fill_pipe; }
+        else if (head == "exit") {
+            s.what  = tail.empty() ? sim_step::kind::exit_ok : sim_step::kind::exit_code;
+            s.value = tail.empty() ? 0 : std::atoi(tail.c_str());
+        } else if (head == "kill") {
+            s.what  = sim_step::kind::killed;
+            s.value = tail.empty() ? 9 : std::atoi(tail.c_str());
+        } else {
+            continue;   // unknown step: a program that does nothing
+        }
+        steps.push_back(std::move(s));
+    }
+    return steps;
+}
+
 sim_process::sim_process() : p_(std::make_unique<impl>()) {}
 sim_process::sim_process(sim_process&&) noexcept            = default;
 sim_process& sim_process::operator=(sim_process&&) noexcept = default;
 sim_process::~sim_process()                                 = default;
-
-void sim_script(std::vector<sim_step> steps) { g_next_script = std::move(steps); }
 
 result<sim_process> sim_process::spawn(const process_spec& spec) {
     static std::uint64_t next_id = 1;
 
     sim_process sp;
     auto& s = *sp.p_;
-    s.script = std::exchange(g_next_script, {});
+    s.script = parse_sim_script(spec.argv);
     s.merged = spec.merge_stderr;
     s.ident  = next_id++;
 
