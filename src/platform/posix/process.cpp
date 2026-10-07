@@ -56,6 +56,13 @@ struct pipe_pair {
 [[nodiscard]] int open_pidfd(::pid_t pid) {
     return static_cast<int>(::syscall(SYS_pidfd_open, pid, 0u));
 }
+
+/// Signal through the pidfd. Names THIS child: no pid-reuse race, and no
+/// dependence on what a pid means in whatever namespace it came from.
+[[nodiscard]] bool signal_via_pidfd(int pidfd, int sig) {
+    if (pidfd < 0) return false;
+    return ::syscall(SYS_pidfd_send_signal, pidfd, sig, nullptr, 0u) == 0;
+}
 #endif
 
 /// Write all of `n` bytes, retrying EINTR. Async-signal-safe: no allocation,
@@ -83,6 +90,7 @@ struct posix_process::impl {
     native_handle pidfd = invalid_handle;   ///< Linux exit signal
 
     bool        merged     = false;
+    bool        leads_group = false;
     bool        reaped     = false;
     bool        exit_exact = false;
     exit_status status{};
@@ -98,8 +106,12 @@ struct posix_process::impl {
         // without blocking. We do NOT wait — a destructor that can hang is
         // worse than a zombie.
         if (pid > 0 && !reaped) {
-            ::kill(-pid, SIGKILL);
+            if (leads_group) ::kill(-pid, SIGKILL);
+#if defined(__linux__)
+            if (!signal_via_pidfd(pidfd, SIGKILL)) ::kill(pid, SIGKILL);
+#else
             ::kill(pid, SIGKILL);
+#endif
             int st = 0;
             ::waitpid(pid, &st, WNOHANG);
         }
@@ -216,6 +228,7 @@ result<posix_process> posix_process::spawn(const process_spec& spec) {
 
     // ── parent ──────────────────────────────────────────────────────────
     s.pid = pid;
+    s.leads_group = spec.new_session;   // we called setsid; we know
     report.close_write();          // so our read sees EOF when exec succeeds
     s.out.close_write();
     s.err.close_write();
@@ -255,6 +268,53 @@ result<posix_process> posix_process::spawn(const process_spec& spec) {
     return self;
 }
 
+result<posix_process> posix_process::adopt(adopted_child c) {
+    if (c.pid <= 0) {
+        // Close what we were handed anyway: the caller passed ownership, and
+        // leaking on the error path is how a refusal becomes a leak.
+        for (int fd : {c.pidfd, c.stdout_fd, c.stderr_fd, c.stdin_fd})
+            if (fd >= 0) close_handle(fd);
+        return std::unexpected(error::make(std::errc::invalid_argument,
+                                           "posix_process::adopt: no pid"));
+    }
+
+    posix_process self;
+    auto& s = *self.p_;
+    s.pid         = c.pid;
+    s.merged      = c.merged;
+    s.leads_group = c.leads_own_group;
+    s.out.r  = c.stdout_fd;
+    s.err.r  = c.merged ? invalid_handle : c.stderr_fd;
+    s.in.w   = c.stdin_fd;
+
+#if defined(__linux__)
+    // Prefer the spawner's pidfd; open one otherwise. Either way the exit is
+    // exact -- a pidfd names THIS child and cannot be confused by pid reuse,
+    // which matters more here than for our own fork(): an adopted pid came
+    // from code we did not write.
+    s.pidfd      = (c.pidfd >= 0) ? c.pidfd : open_pidfd(c.pid);
+    s.exit_exact = is_valid(s.pidfd);
+#else
+    if (c.pidfd >= 0) close_handle(c.pidfd);
+    s.exit_exact = false;
+#endif
+
+    if (!is_valid(s.pidfd)) {
+        // No watchable exit, and we cannot retrofit one: the death-pipe trick
+        // needs a descriptor the child inherited, and this child was already
+        // running before we were asked. Refuse rather than hand back a
+        // process whose exit_handle() never fires -- a caller waiting on it
+        // would hang forever, which is worse than a clear failure here.
+        return std::unexpected(error::make(
+            std::errc::not_supported,
+            "posix_process::adopt: no pidfd, so the exit is not watchable"));
+    }
+
+    if (is_valid(s.out.r)) ::fcntl(s.out.r, F_SETFL, O_NONBLOCK);
+    if (is_valid(s.err.r)) ::fcntl(s.err.r, F_SETFL, O_NONBLOCK);
+    return self;
+}
+
 borrowed_handle posix_process::exit_handle() const {
     return borrowed_handle{p_->exit_fd()};
 }
@@ -280,14 +340,18 @@ result<void> posix_process::stop(stop_mode mode, stop_scope scope) {
 
     // Signalling does not require anyone to be draining: a full pipe blocks
     // the CHILD's write, not our kill.
-    if (scope == stop_scope::tree) {
-        // The child leads its own group when new_session was asked for, so
-        // the negative pid reaches its descendants -- all of them that
-        // stayed in the group.
+    // The group, but only when we KNOW the pid leads one here. For an
+    // adopted child from a PID namespace the number means something else on
+    // this host, and kill(-n) would signal a stranger.
+    if (scope == stop_scope::tree && p_->leads_group) {
         if (::kill(-p_->pid, sig) == 0) return {};
         if (errno != ESRCH)
             return std::unexpected(error::from_errno(errno, "posix_process: killpg"));
     }
+#if defined(__linux__)
+    // Preferred for the leader: unambiguous, and correct across namespaces.
+    if (signal_via_pidfd(p_->pidfd, sig)) return {};
+#endif
     if (::kill(p_->pid, sig) != 0 && errno != ESRCH)
         return std::unexpected(error::from_errno(errno, "posix_process: kill"));
     return {};
