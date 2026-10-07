@@ -52,6 +52,9 @@ jaal_test(kernel_parts_test kernel/kernel_parts_test.cpp)
 jaal_test(kernel_test kernel/kernel_test.cpp)
 jaal_test(kernel_scope_test kernel/scope_test.cpp)
 jaal_test(kernel_pool_isolated_wait_test kernel/pool_isolated_wait_test.cpp)
+# delay_for: the cancellable wait every background job needs. Check 2 is the
+# one that matters — a stop must CUT the wait short, not be noticed after it.
+jaal_test(kernel_delay_test kernel/delay_test.cpp)
 jaal_test(platform_conformance platform/conformance.cpp)
 if(UNIX)
     jaal_test(platform_process_conformance platform/process_conformance.cpp)

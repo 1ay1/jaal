@@ -6,6 +6,8 @@
 //   kernel<P, Event, Clock>  the loop: start / route / step / finish
 //   run<P>(host)             drive it on the native platform until it quits
 //   scope / nursery          structured background work tied to a lifetime
+//   pool                     worker threads for tasks, bounded shutdown
+//   delay_for(st, d)         a wait cancellation can cut short
 //   recorder / replay        fold a recorded run again, effects excluded
 //   timeline / diff          walk a recorded run step by step
 //
@@ -16,10 +18,12 @@
 // <jaal/kernel.hpp>, <jaal/platform.hpp>, <jaal/host.hpp>, and
 // <jaal/jaal.hpp> for everything.
 
+#include "kernel/delay.hpp"
 #include "kernel/fault.hpp"
 #include "kernel/guarded.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/mailbox.hpp"
+#include "kernel/pool.hpp"
 #include "kernel/waits.hpp"
 #include "kernel/replay.hpp"
 #include "kernel/run.hpp"
