@@ -136,6 +136,14 @@ public:
 
 private:
     static model_type fold(model_type m, const msg_type& msg) {
+        // A clocked program's update needs the time each message was folded
+        // at, and a timeline built from bare messages doesn't have it. Build
+        // one from jaal::timed_recording entries instead (replay.hpp); this
+        // refuses rather than fold every message at the epoch.
+        static_assert(!detail::prog::clocked<P>,
+                      "jaal: timeline<P> folds bare messages, but P declares "
+                      "a Clock, so update needs `now` too. Replay a "
+                      "jaal::timed_recording<P> instead.");
         (void)prog::update<P>(m, msg);
         return m;
     }

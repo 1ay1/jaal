@@ -59,6 +59,10 @@ jaal_test(kernel_delay_test kernel/delay_test.cpp)
 # (admission closes with stop) and check 4 (an abandoned member leaves safely)
 # are the two a hand-rolled registry gets wrong.
 jaal_test(kernel_stop_group_test kernel/stop_group_test.cpp)
+# A program that declares a Clock gets the step time as update's third
+# argument. Pins: one `now` per step, sim advance moves it exactly, and a
+# timed recording replays to the live model.
+jaal_test(kernel_clocked_test kernel/clocked_test.cpp)
 jaal_test(platform_conformance platform/conformance.cpp)
 if(UNIX)
     jaal_test(platform_process_conformance platform/process_conformance.cpp)

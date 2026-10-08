@@ -162,9 +162,24 @@ struct child {
     /// Run the child's update on `slot`, in place; return its Cmd, mapped.
     template <class W>
         requires std::same_as<std::remove_cvref_t<W>, Wrap>
+                 && (!detail::prog::clocked<Child>)
     [[nodiscard]] static auto update(model_type& slot, W&& w) {
         return lift(
             prog::update<Child>(slot, msg_type(detail::childx::inner(std::forward<W>(w)))));
+    }
+
+    /// A clocked child is folded at its PARENT's time: the parent forwards
+    /// `now` exactly as it forwards the message, so a child can't see a
+    /// different instant from the step that delivered to it. The parent
+    /// must itself be clocked to have a `now` to forward.
+    template <class W, class T>
+        requires std::same_as<std::remove_cvref_t<W>, Wrap>
+                 && detail::prog::clocked<Child>
+                 && std::convertible_to<T, detail::prog::now_t<Child>>
+    [[nodiscard]] static auto update(model_type& slot, W&& w, T now) {
+        return lift(prog::update<Child>(
+            slot, msg_type(detail::childx::inner(std::forward<W>(w))),
+            detail::prog::now_t<Child>(now)));
     }
 
 private:

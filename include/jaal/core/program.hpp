@@ -69,11 +69,79 @@ namespace detail::prog {
 template <class T> inline constexpr bool is_variant_v = false;
 template <class... Ts> inline constexpr bool is_variant_v<std::variant<Ts...>> = true;
 
-/// Does P have an update for message case C?
-template <class P, class C>
-concept updates_case = requires(typename P::Model& m, C&& c) {
-    { P::update(m, std::move(c)) } -> std::convertible_to<typename P::Cmd>;
+// ── time, as an argument ─────────────────────────────────────────────────────────────
+//
+// A program that needs the time declares the clock it reads:
+//
+//     using Clock = jaal::platform::steady_clock;
+//     static Cmd update(Model& m, Tick, Clock::time_point now);
+//
+// and then EVERY update takes `now` as its third argument. The kernel fills
+// it with the step's time (one read per step, shared by every message the
+// step folds — see kernel::step_now for why that matters).
+//
+// This is the purity rule made structural rather than advisory. The
+// alternative — reducers calling std::chrono::steady_clock::now() — is a
+// read of global mutable state, and its cost is concrete: replay re-runs
+// update() with a different time and gets a different model (D23), a test
+// can't hold time still, and two messages in one step see two "nows". With
+// time as an argument, a reducer cannot see the clock without the caller
+// supplying it, and the caller is the kernel, which owns the clock.
+//
+// Why an argument and not a Model field the kernel writes: a field is state
+// update can read at any moment, including moments it is stale (a helper
+// called from view(), a model copied into a test). An argument exists only
+// for the duration of the fold it belongs to.
+//
+// It is per-PROGRAM, not per-handler. Declaring Clock is the decision; every
+// case then takes `now`, and a handler that forgot it is a compile error
+// naming the case. A program that doesn't declare Clock is unchanged.
+
+JAAL_DECLARES_MEMBER(declares_clock, Clock);
+
+// What a program's declared Clock must be. Stated here, in core, rather than
+// reusing platform::Clock: core sits BELOW platform in jaal's layering
+// (docs/design.md §7), and the program shape is a core concept. This is the
+// same rule with no OS behind it — a steady clock with a time_point — and
+// both platform clocks satisfy it, which the kernel static_asserts.
+//
+// Steady, as platform::Clock requires, for the same reason: a wall clock can
+// jump backwards when the user changes it, and a reducer comparing `now`
+// against a deadline it set earlier would then see time run in reverse.
+template <class C>
+concept steady_program_clock = requires {
+    typename C::duration;
+    typename C::time_point;
+    requires C::is_steady;
+} && requires(C& c) {
+    { c.now() } -> std::same_as<typename C::time_point>;
 };
+
+template <class P>
+concept clocked = requires { typename P::Clock; }
+                  && steady_program_clock<typename P::Clock>;
+
+/// The type update's `now` parameter has: the declared clock's time_point,
+/// or an empty tag a non-clocked program never sees.
+struct no_time {};
+template <class P, bool = clocked<P>> struct now_of { using type = no_time; };
+template <class P> struct now_of<P, true> { using type = typename P::Clock::time_point; };
+template <class P> using now_t = typename now_of<P>::type;
+
+/// Does P have an update for message case C? A clocked program's update
+/// takes the step time as a third argument; an unclocked one does not.
+/// Exactly one shape is accepted per program, so a clocked program whose
+/// handler forgot `now` is a missing case — the diagnostic names it.
+template <class P, class C>
+concept updates_case =
+    (clocked<P> &&
+     requires(typename P::Model& m, C&& c, now_t<P> t) {
+         { P::update(m, std::move(c), t) } -> std::convertible_to<typename P::Cmd>;
+     })
+    || (!clocked<P> &&
+     requires(typename P::Model& m, C&& c) {
+         { P::update(m, std::move(c)) } -> std::convertible_to<typename P::Cmd>;
+     });
 
 // ── the routing plan ────────────────────────────────────────────────
 //
@@ -269,11 +337,18 @@ JAAL_DECLARES_MEMBER(declares_needs_warmup, needs_warmup);
 // The runtime half of the plan. `route` is the one function that decides
 // where a message goes, and it asks plan_of the same question the concept
 // did — so a program that compiles dispatches exactly where the check said.
+//
+// `now` rides the whole walk and is handed to the leaf. For an unclocked
+// program it is the empty no_time tag and is never passed on, so its
+// handlers keep their two-argument shape.
 template <class P, class C>
-[[nodiscard]] typename P::Cmd route(typename P::Model& m, C&& c) {
+[[nodiscard]] typename P::Cmd route(typename P::Model& m, C&& c, now_t<P> now = {}) {
     using plan = plan_of<P, std::remove_cvref_t<C>>;
     if constexpr (std::same_as<plan, at_leaf>) {
-        return P::update(m, std::forward<C>(c));
+        if constexpr (clocked<P>)
+            return P::update(m, std::forward<C>(c), now);
+        else
+            return P::update(m, std::forward<C>(c));
     } else if constexpr (std::same_as<plan, nowhere>) {
         return {};                    // unreachable for a Program: check_route
                                       // already failed, and this keeps that to
@@ -281,7 +356,7 @@ template <class P, class C>
     } else {
         return std::visit(
             [&]<class L>(L&& leaf) -> typename P::Cmd {
-                return route<P>(m, std::forward<L>(leaf));
+                return route<P>(m, std::forward<L>(leaf), now);
             },
             std::forward<C>(c));
     }
@@ -495,11 +570,31 @@ template <Program P>
 /// Below the root, `route` walks the plan the concept checked
 /// (detail::prog::plan_of): a leaf handler is called, a group with its own
 /// handler is called whole, anything else is descended into.
+///
+/// Two overloads, so the time is never silently defaulted. An unclocked
+/// program calls update(m, msg) as it always has. A clocked program MUST
+/// pass `now` — there is deliberately no default for it, because a
+/// forgotten argument would compile and fold at the epoch, which is the
+/// exact "reducer sees the wrong time" bug this mechanism exists to remove.
+/// The kernel supplies the step time; given<>, replay and timeline supply
+/// the time they recorded or were told.
 template <Program P>
+    requires(!detail::prog::clocked<P>)
 [[nodiscard]] typename P::Cmd update(typename P::Model& m, typename P::Msg msg) {
     return std::visit(
         [&]<class C>(C&& c) -> typename P::Cmd {
             return detail::prog::route<P>(m, std::forward<C>(c));
+        },
+        std::move(msg));
+}
+
+template <Program P>
+    requires detail::prog::clocked<P>
+[[nodiscard]] typename P::Cmd update(typename P::Model& m, typename P::Msg msg,
+                                     detail::prog::now_t<P> now) {
+    return std::visit(
+        [&]<class C>(C&& c) -> typename P::Cmd {
+            return detail::prog::route<P>(m, std::forward<C>(c), now);
         },
         std::move(msg));
 }

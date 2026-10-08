@@ -248,6 +248,15 @@ template <class K, class H, class S> class teardown;   // kernel/teardown.hpp
 struct no_events {};
 
 
+// core/program.hpp states what a program's declared Clock must be
+// (steady_program_clock) without including platform/, because core sits below
+// platform. It is meant to be the same rule as platform::Clock. Pin that here,
+// in the first layer that can see both, so the two cannot drift apart.
+static_assert(detail::prog::steady_program_clock<platform::steady_clock>);
+static_assert(detail::prog::steady_program_clock<platform::sim_clock>);
+static_assert(!detail::prog::steady_program_clock<std::chrono::system_clock>,
+              "a program clock must be steady: a wall clock can run backwards");
+
 template <Program P, class Event = no_events, platform::Clock C = platform::steady_clock>
 class kernel {
 public:
@@ -478,6 +487,22 @@ public:
     [[nodiscard]] bool quitting() const noexcept { return exit_.has_value(); }
     [[nodiscard]] C& clock() noexcept { return clock_; }
 
+    /// For a clocked program: also hand the recorder the time each message
+    /// was folded at. jaal::timed_recording::hook() returns the right shape.
+    /// Replay then folds every message at the instant it was folded live, so
+    /// a clocked run replays to the same model — which an untimed record
+    /// cannot promise once update depends on `now` (D23).
+    ///
+    /// Set it BEFORE the first step if you need the whole run: messages
+    /// folded by start() itself (init's `send`) go only to the plain
+    /// record hook given at construction.
+    void record_with_time(
+        std::function<void(const msg_type&, detail::prog::now_t<P>)> f)
+        requires detail::prog::clocked<P>
+    {
+        record_timed_ = std::move(f);
+    }
+
     /// The seed Cmd::random is running from. Pass it back as
     /// options::random_seed to reproduce this run's draws. Log it on a
     /// crash and the run comes back.
@@ -538,6 +563,8 @@ private:
            std::function<void()> wake, std::function<void(const msg_type&)> record)
         : record_(std::move(record)),
           clock_(std::move(clock)),
+          started_at_(clock_.now()),
+          program_epoch_(program_epoch_now()),
           opt_(opt),
           rng_(opt.random_seed ? opt.random_seed : detail::rnd::pick_seed()),
           seed_used_(rng_.state()),
@@ -653,11 +680,21 @@ private:
                                    : std::chrono::steady_clock::time_point{};
         const std::size_t index = msg.index();
         // Record BEFORE update consumes the message (kernel/replay.hpp).
+        // A clocked program's record carries the time it was folded at, so
+        // replay folds it at the same instant and gets the same model.
         if (record_) {
             try { record_(msg); } catch (...) {}
         }
         try {
-            c = prog::update<P>(model_, std::move(msg));
+            if constexpr (detail::prog::clocked<P>) {
+                const auto now = program_now();
+                if (record_timed_) {
+                    try { record_timed_(msg, now); } catch (...) {}
+                }
+                c = prog::update<P>(model_, std::move(msg), now);
+            } else {
+                c = prog::update<P>(model_, std::move(msg));
+            }
         } catch (...) {
             const bool kept = saved.has_value();
             if (kept) model_ = std::move(*saved);
@@ -747,6 +784,43 @@ private:
             now_cached_ = true;
         }
         return now_;
+    }
+
+    // The step time, as the PROGRAM's clock type (`P::Clock::time_point`).
+    //
+    // The kernel's clock and the program's declared clock can differ: a
+    // program declares steady_clock, and the headless/sim hosts drive it on
+    // sim_clock so a test controls time. Both are steady, so the only honest
+    // conversion is "time elapsed since the kernel started, measured on the
+    // kernel's clock", placed on the program's timeline at the same offset
+    // from ITS start. Under steady_clock-on-steady_clock this is the
+    // identity; under sim_clock it means `advance(5s)` moves update's `now`
+    // by exactly 5s, which is the whole point of running on a sim clock.
+    //
+    // Same once-per-step read as step_now, so every message a step folds
+    // agrees on when "now" was — the property timers already relied on.
+    [[nodiscard]] detail::prog::now_t<P> program_now()
+        requires detail::prog::clocked<P>
+    {
+        using PC = typename P::Clock;
+        if constexpr (std::same_as<typename PC::time_point, typename C::time_point>) {
+            return step_now();
+        } else {
+            const auto elapsed = step_now() - started_at_;
+            return program_epoch_
+                 + std::chrono::duration_cast<typename PC::duration>(elapsed);
+        }
+    }
+
+    // The program clock's reading at construction. For an unclocked program
+    // this is the empty no_time tag; for a clocked one whose clock is the
+    // kernel's own, nothing reads it (program_now returns step_now directly).
+    [[nodiscard]] static detail::prog::now_t<P> program_epoch_now() {
+        if constexpr (detail::prog::clocked<P>) {
+            return typename P::Clock{}.now();
+        } else {
+            return {};
+        }
     }
 
     // ── effects ─────────────────────────────────────────────────────────
@@ -1132,6 +1206,18 @@ private:
 
     std::function<void(const msg_type&)> record_;   // first: set before the ctor body folds
     C                   clock_;
+    // Where the kernel's clock and the program's declared clock each read
+    // when the kernel started. program_now() places update's `now` at the
+    // same elapsed offset on the program's timeline, so a sim_clock test
+    // that advances 5s moves update's `now` by 5s. Declared after clock_
+    // and before opt_: members initialise in declaration order, and both
+    // of these are read from clock_ in the mem-init list.
+    typename C::time_point             started_at_{};
+    detail::prog::now_t<P>             program_epoch_{};
+    // A clocked program's recorder also wants the time each message was
+    // folded at (kernel/replay.hpp: timed_recording). Separate from record_
+    // so an unclocked program's API is untouched.
+    std::function<void(const msg_type&, detail::prog::now_t<P>)> record_timed_;
     // The clock, read at most ONCE per step (see step_now).
     typename C::time_point now_{};
     bool                   now_cached_ = false;

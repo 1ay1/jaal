@@ -81,12 +81,15 @@ public:
     /// Start from a given model, with no pending Cmd.
     explicit given(model_type m) { model_.emplace(std::move(m)); }
 
-    // ── acting ──────────────────────────────────────────────────────────
+    // ── acting ──────────────────────────────────────────────────────────────────────
     given& when(msg_type msg) {
         if (!model_) return *this;          // an earlier update threw: nothing to fold into
         before_ = *model_;
         try {
-            last_ = prog::update<P>(*model_, std::move(msg));
+            if constexpr (detail::prog::clocked<P>)
+                last_ = prog::update<P>(*model_, std::move(msg), clocked_now());
+            else
+                last_ = prog::update<P>(*model_, std::move(msg));
             ++folds_;
             note(last_);
         } catch (const std::exception& e) {
@@ -103,8 +106,17 @@ public:
     template <class... Ms>
     given& when_all(Ms&&... ms) { (when(msg_type(std::forward<Ms>(ms))), ...); return *this; }
 
-    /// The time a `now` effect gets during settle().
+    /// The time a `now` effect gets during settle() — and, for a clocked
+    /// program, the `now` every update is folded at. One test clock for
+    /// both, so a test that holds time still holds ALL of it still.
     given& at_time(time_point t) { now_ = t; return *this; }
+
+    /// Move the test clock forward. For a clocked program this is how a test
+    /// reaches a deadline: fold, advance(5s), fold, and the second update
+    /// sees a `now` exactly 5s later.
+    given& advance(std::chrono::nanoseconds d) { now_ += std::chrono::duration_cast<
+                                                     typename time_point::duration>(d);
+                                                 return *this; }
 
     /// The seed `random` effects draw from during settle(). Call before the
     /// draws you care about; it restarts the stream.
@@ -277,6 +289,21 @@ private:
     std::vector<timer>        afters_;
     std::optional<int>        quit_;
     time_point                now_{};
+
+    // The test clock, in the program's declared clock type. For the common
+    // case (Clock = steady_clock) the types match and this is now_ itself;
+    // otherwise it is the same elapsed offset from each clock's epoch, which
+    // is the only meaning a test's at_time()/advance() can have there.
+    [[nodiscard]] detail::prog::now_t<P> clocked_now() const
+        requires detail::prog::clocked<P>
+    {
+        using PT = detail::prog::now_t<P>;
+        if constexpr (std::same_as<PT, time_point>)
+            return now_;
+        else
+            return PT{std::chrono::duration_cast<typename PT::duration>(
+                now_.time_since_epoch())};
+    }
     rng                       rng_{default_seed};
     std::size_t               folds_ = 0;
     std::vector<std::string>  failures_;

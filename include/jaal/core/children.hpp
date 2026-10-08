@@ -207,12 +207,28 @@ public:
     /// normal, not an error).
     template <class W>
         requires std::same_as<std::remove_cvref_t<W>, Wrap>
+                 && (!detail::prog::clocked<Child>)
     static auto update(map& ms, W&& w) {
         using out = decltype(lift(w.id, prog::update<Child>(std::declval<model_type&>(), w.msg)));
         auto it = ms.find(w.id);
         if (it == ms.end()) return out::none();
         const id_type id = w.id;
         return lift(id, prog::update<Child>(it->second, std::forward<W>(w).msg));
+    }
+
+    /// A clocked child is folded at its parent's time (see child<>::update).
+    template <class W, class T>
+        requires std::same_as<std::remove_cvref_t<W>, Wrap>
+                 && detail::prog::clocked<Child>
+                 && std::convertible_to<T, detail::prog::now_t<Child>>
+    static auto update(map& ms, W&& w, T now) {
+        const detail::prog::now_t<Child> t(now);
+        using out = decltype(lift(w.id, prog::update<Child>(
+                                  std::declval<model_type&>(), w.msg, t)));
+        auto it = ms.find(w.id);
+        if (it == ms.end()) return out::none();
+        const id_type id = w.id;
+        return lift(id, prog::update<Child>(it->second, std::forward<W>(w).msg, t));
     }
 
     /// Every child's subscriptions, batched, each keyed under its own id so
