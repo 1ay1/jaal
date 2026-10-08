@@ -35,3 +35,4 @@
 #include "core/sink.hpp"
 #include "core/stream.hpp"
 #include "core/sub.hpp"
+#include "core/unique_function.hpp"

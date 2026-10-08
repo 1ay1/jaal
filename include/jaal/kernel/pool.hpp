@@ -51,11 +51,13 @@
 #include <utility>
 #include <vector>
 
+#include "../core/unique_function.hpp"
+
 namespace jaal::kernel {
 
 class pool {
 public:
-    // move_only_function, NOT std::function. A job is queued once, moved
+    // A move-only callable, NOT std::function. A job is queued once, moved
     // once and invoked once — the queue never copies one (see worker_loop
     // and post_isolated, both of which only std::move) — so requiring
     // copy-constructibility buys nothing and costs the callers that matter
@@ -65,7 +67,12 @@ public:
     // satisfy the signature — an allocation and a shared owner invented to
     // work around the type, on exactly the code path where single ownership
     // was the point. (agentty hit this with the ACP turn worker.)
-    using job      = std::move_only_function<void(std::stop_token)>;
+    //
+    // jaal::unique_function rather than std::move_only_function directly:
+    // libc++ (Termux, Apple, llvm-mingw for Windows) doesn't ship the std
+    // one, and naming it broke every one of those builds. See
+    // core/unique_function.hpp.
+    using job      = unique_function<void(std::stop_token)>;
     // on_error stays copyable: it is stored and invoked many times, once per
     // failing job, so it is a genuine std::function.
     using error_fn = std::function<void(std::exception_ptr)>;
