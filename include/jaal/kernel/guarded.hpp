@@ -97,20 +97,27 @@ public:
         return f(std::as_const(value_), std::move(args)...);
     }
 
-    /// Block until `pred(const T&)` holds, then run f(T&, args...) under the
-    /// same lock. Every with() wakes waiters, so a writer never has to
-    /// remember to notify. pred is captureless too. This is a worker's
-    /// "sleep until there's work" without a hand-paired mutex + condvar.
+    /// Block until `pred(const T&, args...)` holds, then run f(T&, args...)
+    /// under the same lock. Every with() wakes waiters, so a writer never has
+    /// to remember to notify. pred is captureless too and sees the same
+    /// arguments as f, so "wait for MY entry" needs no capture:
+    ///
+    ///     auto c = st.wait_with(
+    ///         [](const S& s, Id id) { return s.done.contains(id); },
+    ///         [](S& s, Id id) { return take(s.done, id); }, my_id);
+    ///
+    /// This is a worker's "sleep until there's work" without a hand-paired
+    /// mutex + condvar.
     template <class P, class F, class... Args>
     auto wait_with(P pred, F f, Args... args) -> std::invoke_result_t<F&, T&, Args&&...> {
         check<F, T&, Args...>();
         static_assert(detail::guard::captureless<P>,
                       "jaal: guarded<T>::wait_with takes a CAPTURELESS predicate");
-        static_assert(std::is_same_v<std::invoke_result_t<P&, const T&>, bool>,
-                      "jaal: guarded<T>::wait_with: the predicate is bool(const T&)");
+        static_assert(std::is_same_v<std::invoke_result_t<P&, const T&, const Args&...>, bool>,
+                      "jaal: guarded<T>::wait_with: the predicate is bool(const T&, const Args&...)");
         std::unique_lock lk(m_);
         ++waiters_;
-        cv_.wait(lk, [&] { return pred(std::as_const(value_)); });
+        cv_.wait(lk, [&] { return pred(std::as_const(value_), std::as_const(args)...); });
         --waiters_;
         Notify on_exit{*this};
         return f(value_, std::move(args)...);
