@@ -37,7 +37,10 @@
 // simpler (a cache many workers read).
 
 #include <concepts>
+#include <cstddef>
+#include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <type_traits>
 #include <utility>
@@ -81,6 +84,7 @@ public:
     auto with(F f, Args... args) -> std::invoke_result_t<F&, T&, Args&&...> {
         check<F, T&, Args...>();
         std::unique_lock lk(m_);
+        Notify on_exit{*this};   // a writer may have made someone's predicate true
         return f(value_, std::move(args)...);
     }
 
@@ -90,6 +94,47 @@ public:
     auto read(F f, Args... args) const -> std::invoke_result_t<F&, const T&, Args&&...> {
         check<F, const T&, Args...>();
         std::shared_lock lk(m_);
+        return f(std::as_const(value_), std::move(args)...);
+    }
+
+    /// Block until `pred(const T&)` holds, then run f(T&, args...) under the
+    /// same lock. Every with() wakes waiters, so a writer never has to
+    /// remember to notify. pred is captureless too. This is a worker's
+    /// "sleep until there's work" without a hand-paired mutex + condvar.
+    template <class P, class F, class... Args>
+    auto wait_with(P pred, F f, Args... args) -> std::invoke_result_t<F&, T&, Args&&...> {
+        check<F, T&, Args...>();
+        static_assert(detail::guard::captureless<P>,
+                      "jaal: guarded<T>::wait_with takes a CAPTURELESS predicate");
+        static_assert(std::is_same_v<std::invoke_result_t<P&, const T&>, bool>,
+                      "jaal: guarded<T>::wait_with: the predicate is bool(const T&)");
+        std::unique_lock lk(m_);
+        ++waiters_;
+        cv_.wait(lk, [&] { return pred(std::as_const(value_)); });
+        --waiters_;
+        Notify on_exit{*this};
+        return f(value_, std::move(args)...);
+    }
+
+    /// Non-blocking forms: run f only if the lock is free right now, else
+    /// return nullopt without waiting. For a reader that must never stall
+    /// (a status line drawn every frame). f must return a value.
+    template <class F, class... Args>
+    auto try_with(F f, Args... args)
+        -> std::optional<std::invoke_result_t<F&, T&, Args&&...>> {
+        check<F, T&, Args...>();
+        std::unique_lock lk(m_, std::try_to_lock);
+        if (!lk.owns_lock()) return std::nullopt;
+        Notify on_exit{*this};
+        return f(value_, std::move(args)...);
+    }
+
+    template <class F, class... Args>
+    auto try_read(F f, Args... args) const
+        -> std::optional<std::invoke_result_t<F&, const T&, Args&&...>> {
+        check<F, const T&, Args...>();
+        std::shared_lock lk(m_, std::try_to_lock);
+        if (!lk.owns_lock()) return std::nullopt;
         return f(std::as_const(value_), std::move(args)...);
     }
 
@@ -119,8 +164,18 @@ private:
         }
     }
 
-    mutable std::shared_mutex m_;
-    T                         value_{};
+    // Wakes wait_with() callers after any exclusive access, and only when
+    // there are any: waiters_ is read under the lock, so a guarded nobody
+    // waits on never pays for a notify. Waiters re-check under the lock.
+    struct Notify {
+        guarded& g;
+        ~Notify() { if (g.waiters_ != 0) g.cv_.notify_all(); }
+    };
+
+    mutable std::shared_mutex     m_;
+    std::condition_variable_any   cv_;
+    std::size_t                   waiters_ = 0;   // under m_
+    T                             value_{};
 };
 
 // A guarded<T> owns a lock; it never crosses into another lock's body.

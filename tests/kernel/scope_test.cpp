@@ -233,6 +233,46 @@ static int guarded_tests() {
     jaal::guarded<std::string> s;
     s.with([](std::string& v, std::string a, int n) { v = a + std::to_string(n); }, std::string("x"), 7);
     if (s.read([](const std::string& v) { return v; }) != "x7") return 203;
+
+    // try_*: run when the lock is free, nullopt (no wait) while it is held
+    jaal::guarded<int> busy(5);
+    if (busy.try_read([](const int& v) { return v; }) != std::optional<int>{5}) return 204;
+    if (busy.try_with([](int& v) { return ++v; }) != std::optional<int>{6}) return 205;
+    {
+        static std::atomic<bool> holding{false}, release{false};
+        std::jthread holder([&] {
+            busy.with([](int&) {
+                holding.store(true);
+                while (!release.load()) std::this_thread::yield();
+            });
+        });
+        while (!holding.load()) std::this_thread::yield();
+        const bool r_none = !busy.try_read([](const int& v) { return v; });
+        const bool w_none = !busy.try_with([](int& v) { return v; });
+        release.store(true);
+        if (!r_none || !w_none) return 206;
+    }
+
+    // wait_with: a worker sleeps until there is work, drains it, stops on a flag
+    {
+        struct Q { std::vector<int> items; bool stop = false; };
+        static jaal::guarded<Q> q;
+        static std::atomic<int> sum{0};
+        std::jthread worker([] {
+            for (;;) {
+                auto batch = q.wait_with(
+                    [](const Q& s) { return !s.items.empty() || s.stop; },
+                    [](Q& s) { return std::exchange(s.items, {}); });
+                if (batch.empty()) return;   // stop with nothing left
+                for (int v : batch) sum += v;
+            }
+        });
+        for (int i = 1; i <= 100; ++i)
+            q.with([](Q& s, int v) { s.items.push_back(v); }, i);
+        q.with([](Q& s) { s.stop = true; });
+        worker.join();
+        if (sum.load() != 5050) return 207;
+    }
     return 0;
 }
 
