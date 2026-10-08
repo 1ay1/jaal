@@ -143,6 +143,14 @@ class stop_group {
         return c_->live;
     }
 
+    /// Wait for every member to leave on its own, WITHOUT requesting stop.
+    /// For an owner that wants a job's natural end (a reader reaching EOF)
+    /// rather than cancelling it. Admission stays open.
+    void wait() {
+        std::unique_lock lk(c_->m);
+        c_->cv.wait(lk, [&] { return c_->live == 0; });
+    }
+
     /// Close admission, request stop on every member, and wait for them to
     /// leave. `grace` nullopt waits however long it takes; otherwise returns
     /// after the grace with the count still running (0 = all out).
