@@ -311,6 +311,13 @@ add_test(NAME layering
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/layering/check.cmake)
 set_tests_properties(layering PROPERTIES LABELS "static")
 
+# ── bottom layer: jaal names nothing above it (maya, agentty) ─────────────────
+add_test(NAME layering_upward
+         COMMAND ${CMAKE_COMMAND}
+                 -DROOT=${PROJECT_SOURCE_DIR}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/lint/layering.cmake)
+set_tests_properties(layering_upward PROPERTIES LABELS "static")
+
 # ── banlist: raw threads/locks/atomics only where jaal implements them ───
 add_test(NAME banlist
          COMMAND ${CMAKE_COMMAND}
