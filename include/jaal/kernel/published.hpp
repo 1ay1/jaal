@@ -47,6 +47,17 @@ public:
         slot_.store(std::move(next), std::memory_order_release);
     }
 
+    /// Publish `next` only if `expected` is still current. Returns false
+    /// (publishing nothing) when another writer got there first, so a
+    /// rebuild can re-check against what that writer published.
+    [[nodiscard]] bool publish_if(const std::shared_ptr<T>& expected,
+                                  std::shared_ptr<T> next) noexcept {
+        auto e = expected;
+        return slot_.compare_exchange_strong(e, std::move(next),
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire);
+    }
+
     /// The current object, or null if none is published.
     [[nodiscard]] std::shared_ptr<T> current() const noexcept {
         return slot_.load(std::memory_order_acquire);
