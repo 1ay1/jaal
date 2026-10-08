@@ -63,6 +63,9 @@ kernel/delay.hpp: mutex
 # stop_group: the count, the closed flag and the cv that wakes stop_and_wait
 # when the last member leaves. It IS the registry hosts used to hand-roll.
 kernel/stop_group.hpp: mutex
+# published<T>: std::atomic<std::shared_ptr<T>> IS the implementation of the
+# swap-the-current-object slot (one atomic load per reader, no lock).
+kernel/published.hpp: atomic
 
 # The signal handler's test hook is an atomic (the only thing a handler
 # may touch). Declared here so tests and the .cpp agree on it.
