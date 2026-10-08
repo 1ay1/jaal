@@ -60,6 +60,9 @@ kernel/guarded.hpp: mutex
 # point of the function is that subsystems stop declaring one of these (plus a
 # condition variable and a stop flag) just to express a duration.
 kernel/delay.hpp: mutex
+# stop_group: the count, the closed flag and the cv that wakes stop_and_wait
+# when the last member leaves. It IS the registry hosts used to hand-roll.
+kernel/stop_group.hpp: mutex
 
 # The signal handler's test hook is an atomic (the only thing a handler
 # may touch). Declared here so tests and the .cpp agree on it.
