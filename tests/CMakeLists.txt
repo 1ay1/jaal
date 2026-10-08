@@ -51,6 +51,10 @@ jaal_test(core_debounce_test core/debounce_test.cpp)
 jaal_test(kernel_parts_test kernel/kernel_parts_test.cpp)
 jaal_test(kernel_test kernel/kernel_test.cpp)
 jaal_test(kernel_scope_test kernel/scope_test.cpp)
+# published<T> twice: the atomic<shared_ptr> path and the libc++ fallback.
+jaal_test(kernel_published_test kernel/published_test.cpp)
+jaal_test(kernel_published_mutex_test kernel/published_test.cpp)
+target_compile_definitions(kernel_published_mutex_test PRIVATE JAAL_FORCE_PUBLISHED_MUTEX=1)
 jaal_test(kernel_pool_isolated_wait_test kernel/pool_isolated_wait_test.cpp)
 # delay_for: the cancellable wait every background job needs. Check 2 is the
 # one that matters — a stop must CUT the wait short, not be noticed after it.
@@ -216,7 +220,7 @@ jaal_compile_fail(NAME loop_token_not_copyable  SOURCE compile_fail/loop_bound.c
 # on_loop() lends access the same way guarded<T>::with does, so it refuses to
 # let a reference into the protected data escape the callback.
 jaal_compile_fail(NAME loop_bound_no_escape     SOURCE compile_fail/loop_bound.cpp CASE 6
-                  MATCH "returns something that points into loop-bound state")
+                  MATCH "returns a reference or pointer into loop-bound state")
 # A loop_bound is pinned to one thread, so it must not ride into a worker.
 jaal_compile_fail(NAME loop_bound_not_sendable  SOURCE compile_fail/loop_bound.cpp CASE 7
                   MATCH "not Sendable|thread-bound")

@@ -65,7 +65,7 @@ kernel/delay.hpp: mutex
 kernel/stop_group.hpp: mutex
 # published<T>: std::atomic<std::shared_ptr<T>> IS the implementation of the
 # swap-the-current-object slot (one atomic load per reader, no lock).
-kernel/published.hpp: atomic
+kernel/published.hpp: atomic mutex
 
 # The signal handler's test hook is an atomic (the only thing a handler
 # may touch). Declared here so tests and the .cpp agree on it.

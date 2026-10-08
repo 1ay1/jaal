@@ -261,15 +261,15 @@ static int guarded_tests() {
         std::jthread worker([] {
             for (;;) {
                 auto batch = q.wait_with(
-                    [](const Q& s) { return !s.items.empty() || s.stop; },
-                    [](Q& s) { return std::exchange(s.items, {}); });
+                    [](const Q& w) { return !w.items.empty() || w.stop; },
+                    [](Q& w) { return std::exchange(w.items, {}); });
                 if (batch.empty()) return;   // stop with nothing left
                 for (int v : batch) sum += v;
             }
         });
         for (int i = 1; i <= 100; ++i)
-            q.with([](Q& s, int v) { s.items.push_back(v); }, i);
-        q.with([](Q& s) { s.stop = true; });
+            q.with([](Q& w, int v) { w.items.push_back(v); }, i);
+        q.with([](Q& w) { w.stop = true; });
         worker.join();
         if (sum.load() != 5050) return 207;
     }
