@@ -21,7 +21,7 @@ compiler error.
 - [Subscriptions: `Sub`](#subscriptions-sub) — `none` `every` `stream` `on` `batch`
 - [Talking back: `Sink`](#talking-back-sink)
 - [Composition](#composition) — `child`, `children`, `debounce`
-- [Safety types](#safety-types) — `Sendable`, `Frozen`, `shared`, `guarded`, `loop_bound`, `scope`, `handle`
+- [Safety types](#safety-types) — `Sendable`, `Frozen`, `shared`, `guarded`, `loop_bound`, `scope`, `handle`, `stop_group`, `worker_group`, `native_process`
 - [Hosts](#hosts) — what a host is, `headless`, `given`, `sim`
 - [Testing](#testing) — `sim`, `explore`, compile-fail cases
 - [Diagnostics](#diagnostics) — reading jaal's error messages
@@ -558,6 +558,33 @@ pinned — no moving it out to extend its life.
 An owned OS handle. No copy, no implicit conversion from `int`, no
 double-close. `borrowed_handle` for a non-owning view, and the two don't
 convert into each other.
+
+### `stop_group`
+
+Cancel and wait for work running on threads jaal doesn't own. `join()` hands
+a member a real `std::stop_token`; `stop_and_wait(grace)` stops them all and
+waits for them to leave. Refuses: a `join()` after stopping has begun.
+
+### `worker_group`
+
+An object's background jobs, where `stop()` is a hard barrier with no grace.
+When it returns, no job is running, so the owner may free what the jobs
+wrote into. Use it when a job touches something a third party frees right
+after stop; `pool`'s bounded shutdown abandons, which is wrong there. Refuses:
+a `post()` after `stop()` (dropped). A job that never returns hangs `stop()`,
+so give jobs their own timeouts.
+
+### `native_process`
+
+A child process, chosen per OS (`select.hpp`): `posix_process` or
+`windows_process`. Both satisfy `Process` and pass the same conformance
+suite. The exit handle and the output pipes go into the reactor like any
+other readiness. On Windows the child runs in a kill-on-close job object, so
+`stop(_, tree)` reaches every descendant; `graceful` acts as `forceful`
+there, since an arbitrary program has no SIGTERM. Read Windows pipes with
+`read_some`/`write_some`, which never wait. `process_spec::windows_command_line`
+passes a command line verbatim, and a `cmd /c <payload>` argv passes its
+payload as written, since cmd.exe doesn't parse by CommandLineToArgvW rules.
 
 ---
 

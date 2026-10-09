@@ -26,6 +26,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "../process.hpp"
 
@@ -77,5 +79,26 @@ static_assert(Process<windows_process>,
 /// `closed` is set when the reader has gone.
 [[nodiscard]] std::size_t write_some(borrowed_handle h, const char* buf,
                                      std::size_t len, bool& closed) noexcept;
+
+// ── command lines ──────────────────────────────────────────────────────────────
+
+/// Quote one argument by CommandLineToArgvW rules, so the child's C runtime
+/// recovers it exactly. Untouched when it needs no quotes.
+[[nodiscard]] std::string quote_arg(std::string_view arg);
+
+/// `argv` joined with quote_arg.
+[[nodiscard]] std::string join_command_line(const std::vector<std::string>& argv);
+
+/// cmd.exe does not parse by CommandLineToArgvW rules. `cmd /S /C "x"` runs
+/// x verbatim, so a payload goes in plain quotes with no escaping.
+[[nodiscard]] std::string cmd_command_line(std::string_view payload);
+
+/// When argv is `cmd[.exe] ... /c|/k <payload>`, the command line with that
+/// payload passed verbatim; otherwise empty (quote argv normally).
+[[nodiscard]] std::string cmd_form_command_line(const std::vector<std::string>& argv);
+
+/// Does `exe` resolve on PATH to a .bat/.cmd? CreateProcess cannot start
+/// those directly; they run through cmd.exe.
+[[nodiscard]] bool resolves_to_batch(std::string_view exe);
 
 }  // namespace jaal::platform

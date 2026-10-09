@@ -36,28 +36,15 @@ std::wstring widen(std::string_view s) {
     return out;
 }
 
-// CommandLineToArgvW quoting: a run of backslashes doubles before a quote,
-// a quote is escaped, and an argument is wrapped only when it needs it.
-void append_quoted(std::wstring& out, const std::wstring& arg) {
-    if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos) {
-        out += arg;
-        return;
-    }
-    out.push_back(L'"');
-    std::size_t backslashes = 0;
-    for (wchar_t c : arg) {
-        if (c == L'\\') { ++backslashes; continue; }
-        if (c == L'"') {
-            out.append(backslashes * 2 + 1, L'\\');
-            out.push_back(L'"');
-        } else {
-            out.append(backslashes, L'\\');
-            out.push_back(c);
-        }
-        backslashes = 0;
-    }
-    out.append(backslashes * 2, L'\\');
-    out.push_back(L'"');
+char lower(char c) noexcept {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+bool iequals(std::string_view a, std::string_view b) noexcept {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (lower(a[i]) != lower(b[i])) return false;
+    return true;
 }
 
 // Windows sorts environment names case-insensitively; so does the block.
@@ -226,11 +213,10 @@ result<windows_process> windows_process::spawn(const process_spec& spec) {
     std::wstring cmd;
     if (!spec.windows_command_line.empty()) {
         cmd = widen(spec.windows_command_line);
+    } else if (auto c = cmd_form_command_line(spec.argv); !c.empty()) {
+        cmd = widen(c);
     } else {
-        for (std::size_t i = 0; i < spec.argv.size(); ++i) {
-            if (i) cmd.push_back(L' ');
-            append_quoted(cmd, widen(spec.argv[i]));
-        }
+        cmd = widen(join_command_line(spec.argv));
     }
     std::vector<wchar_t> cmdline(cmd.begin(), cmd.end());
     cmdline.push_back(L'\0');
@@ -364,6 +350,82 @@ std::size_t write_some(borrowed_handle h, const char* buf, std::size_t len,
         return 0;
     }
     return put;
+}
+
+std::string quote_arg(std::string_view arg) {
+    // A run of backslashes doubles before a quote, a quote is escaped, and
+    // the argument is wrapped only when it needs it.
+    if (!arg.empty() && arg.find_first_of(" \t\n\v\"") == std::string_view::npos)
+        return std::string{arg};
+    std::string out = "\"";
+    std::size_t backslashes = 0;
+    for (char c : arg) {
+        if (c == '\\') { ++backslashes; continue; }
+        if (c == '"') {
+            out.append(backslashes * 2 + 1, '\\');
+            out.push_back('"');
+        } else {
+            out.append(backslashes, '\\');
+            out.push_back(c);
+        }
+        backslashes = 0;
+    }
+    out.append(backslashes * 2, '\\');
+    out.push_back('"');
+    return out;
+}
+
+std::string join_command_line(const std::vector<std::string>& argv) {
+    std::string out;
+    for (std::size_t i = 0; i < argv.size(); ++i) {
+        if (i) out.push_back(' ');
+        out += quote_arg(argv[i]);
+    }
+    return out;
+}
+
+std::string cmd_command_line(std::string_view payload) {
+    std::string out = "cmd.exe /S /C \"";
+    out += payload;
+    out.push_back('"');
+    return out;
+}
+
+std::string cmd_form_command_line(const std::vector<std::string>& argv) {
+    if (argv.size() < 3) return {};
+    std::string_view exe = argv[0];
+    if (const auto slash = exe.find_last_of("\\/"); slash != std::string_view::npos)
+        exe.remove_prefix(slash + 1);
+    if (!iequals(exe, "cmd") && !iequals(exe, "cmd.exe")) return {};
+    const std::string& sw = argv[argv.size() - 2];
+    if (sw.size() != 2 || (sw[0] != '/' && sw[0] != '-')
+        || (lower(sw[1]) != 'c' && lower(sw[1]) != 'k'))
+        return {};
+    std::string out = quote_arg(argv[0]);
+    for (std::size_t i = 1; i + 1 < argv.size(); ++i) {
+        out.push_back(' ');
+        out += quote_arg(argv[i]);
+    }
+    out += " \"" + argv.back() + "\"";
+    return out;
+}
+
+bool resolves_to_batch(std::string_view exe) {
+    const std::wstring we = widen(exe);
+    wchar_t out[MAX_PATH * 2]{};
+    constexpr DWORD cap = static_cast<DWORD>(sizeof(out) / sizeof(out[0]));
+    // .exe first, then the PATHEXT order, where batch files come later.
+    DWORD n = ::SearchPathW(nullptr, we.c_str(), L".exe", cap, out, nullptr);
+    if (n == 0 || n >= cap) {
+        n = ::SearchPathW(nullptr, we.c_str(), nullptr, cap, out, nullptr);
+        if (n == 0 || n >= cap) return false;
+    }
+    const std::wstring_view resolved{out, n};
+    const auto dot = resolved.find_last_of(L'.');
+    if (dot == std::wstring_view::npos) return false;
+    std::string ext;
+    for (wchar_t c : resolved.substr(dot)) ext.push_back(c < 128 ? static_cast<char>(c) : '?');
+    return iequals(ext, ".cmd") || iequals(ext, ".bat");
 }
 
 }  // namespace jaal::platform
