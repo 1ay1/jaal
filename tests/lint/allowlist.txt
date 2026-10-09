@@ -5,6 +5,8 @@
 
 # Sink is defined here; sink_access is its private minting key.
 core/sink.hpp: sink_access
+# sync.hpp names std::atomic only to recognise it as a Sync field.
+core/sync.hpp: atomic
 # Task map builds a forwarding sink for the mapped task.
 core/fx.hpp: sink_access
 # Stream map builds a forwarding sink for the mapped stream, the same way.

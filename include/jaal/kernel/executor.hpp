@@ -64,13 +64,13 @@ public:
         : pool_(max_workers, std::move(on_error)) {}
 
     void post(typename base::job j, fx::placement where) override {
-        if (where == fx::placement::isolated) pool_.post_isolated(std::move(j));
-        else                                  pool_.post(std::move(j));
+        if (where == fx::placement::isolated) pool_access::post_isolated(pool_, std::move(j));
+        else                                  pool_access::post(pool_, std::move(j));
     }
 
     // Streams are long-lived and often block: always a thread of their own.
     void post_stream(std::string_view, Sink<Msg> out, typename base::stream_job j) override {
-        pool_.post_isolated([out = std::move(out), j = std::move(j)](std::stop_token st) mutable {
+        pool_access::post_isolated(pool_, [out = std::move(out), j = std::move(j)](std::stop_token st) mutable {
             j(std::move(out), std::move(st));
         });
     }

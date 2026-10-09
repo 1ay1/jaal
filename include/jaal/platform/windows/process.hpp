@@ -29,6 +29,7 @@
 #include <string_view>
 #include <vector>
 
+#include "../../core/sendable.hpp"
 #include "../process.hpp"
 
 namespace jaal::platform {
@@ -102,3 +103,6 @@ static_assert(Process<windows_process>,
 [[nodiscard]] bool resolves_to_batch(std::string_view exe);
 
 }  // namespace jaal::platform
+
+// Same ownership as posix_process: move-only, owns its handles.
+template <> inline constexpr bool jaal::sendable_opt_in<jaal::platform::windows_process> = true;

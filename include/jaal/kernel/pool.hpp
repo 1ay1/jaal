@@ -48,12 +48,54 @@
 #include <mutex>
 #include <stop_token>
 #include <thread>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "../core/sendable.hpp"
 #include "../core/unique_function.hpp"
 
 namespace jaal::kernel {
+
+// A job body: a CAPTURELESS function of (std::stop_token, Args...), every
+// Args Sendable. Same rule as Cmd::task (core/fx.hpp): the body can't borrow
+// `this` or a local, it owns its inputs, and state two threads share has to
+// be passed in as a co_owned<T> (core/co_owned.hpp), which requires Sync.
+template <class F, class... Args>
+concept JobBody =
+    std::is_convertible_v<
+        F, std::invoke_result_t<F&, std::stop_token, Args...> (*)(std::stop_token, Args...)>;
+
+template <class F, class... Args>
+concept CheckedJob =
+    std::is_invocable_v<F&, std::stop_token, Args...> && JobBody<F, Args...>
+    && (Sendable<Args> && ...);
+
+struct pool_access;   // the kernel's key for posting an already-erased job
+
+namespace detail_pool {
+template <class F, class... Args>
+consteval void explain() {
+    if constexpr (!(Sendable<Args> && ...))
+        static_assert((Sendable<Args> && ...),
+            "jaal: a job argument is not Sendable; pass owned values, and share "
+            "state through jaal::co_owned<T>");
+    else if constexpr (!std::is_invocable_v<F&, std::stop_token, Args...>)
+        static_assert(std::is_invocable_v<F&, std::stop_token, Args...>,
+            "jaal: a job body must be callable as (std::stop_token, Args...)");
+    else
+        static_assert(JobBody<F, Args...>,
+            "jaal: a job body must not capture anything; pass what it needs as "
+            "arguments after the body (shared state as a jaal::co_owned<T>)");
+}
+}  // namespace detail_pool
+
+/// The job rule as a check, for wrappers that forward a body type on.
+template <class F, class... Args>
+consteval void require_job() {
+    if constexpr (!CheckedJob<F, Args...>) detail_pool::explain<F, Args...>();
+}
 
 class pool {
 public:
@@ -89,9 +131,42 @@ public:
 
     ~pool() { shutdown(); }
 
+    /// Queue `body(stop_token, args...)` for the shared workers. The body is
+    /// captureless and the args Sendable (see JobBody).
+    template <class F, class... Args>
+    void post(F body, Args... args) {
+        if constexpr (CheckedJob<F, Args...>)
+            post_job(erase(body, std::move(args)...));
+        else
+            detail_pool::explain<F, Args...>();
+    }
+
+    /// Same, on a thread of its own. For work that may never return.
+    template <class F, class... Args>
+    void post_isolated(F body, Args... args) {
+        if constexpr (CheckedJob<F, Args...>)
+            post_isolated_job(erase(body, std::move(args)...));
+        else
+            detail_pool::explain<F, Args...>();
+    }
+
+private:
+    friend struct pool_access;
+
+    // An erased job: a function pointer plus its owned arguments.
+    template <class F, class... Args>
+    static job erase(F body, Args... args) {
+        using R = std::invoke_result_t<F&, std::stop_token, Args...>;
+        R (*fp)(std::stop_token, Args...) = body;
+        return [fp, tup = std::tuple<Args...>(std::move(args)...)](
+                   std::stop_token st) mutable {
+            std::apply([&](Args&... a) { (void)fp(std::move(st), std::move(a)...); }, tup);
+        };
+    }
+
     /// Queue a job for the shared workers. Spawns one if they're all busy
     /// and we're under the cap.
-    void post(job j) {
+    void post_job(job j) {
         {
             std::lock_guard lk(c_->m);
             if (c_->stopping) return;
@@ -102,7 +177,7 @@ public:
     }
 
     /// Run on a thread of its own, detached. For work that may never return.
-    void post_isolated(job j) {
+    void post_isolated_job(job j) {
         {
             std::lock_guard lk(c_->m);
             if (c_->stopping) return;
@@ -129,9 +204,11 @@ public:
                 std::lock_guard lk(c_->m);
                 --c_->isolated_running;  // no thread was created
             }
-            post(std::move(j));      // the OS refused a thread: use the pool
+            post_job(std::move(j));  // the OS refused a thread: use the pool
         }
     }
+
+public:
 
     /// Ask every running task to stop, wait up to `grace` for the pool's
     /// workers AND any isolated tasks to return, and refuse new work.
@@ -185,17 +262,18 @@ public:
     /// honest answer — a caller learns the work did not happen instead of
     /// waiting forever for a result nobody will produce.
     ///
-    /// `body` may take a std::stop_token or nothing.
-    template <class F>
-    [[nodiscard]] auto submit(F&& body) {
-        return submit_impl(std::forward<F>(body), /*isolated=*/false);
+    /// `body(stop_token, args...)`: captureless, args Sendable. The result
+    /// isn't checked: the job has ended by the time the caller sees it.
+    template <class F, class... Args>
+    [[nodiscard]] auto submit(F body, Args... args) {
+        return submit_impl(/*isolated=*/false, body, std::move(args)...);
     }
 
     /// submit() on a thread of its own, for work that may never return.
     /// Same future semantics.
-    template <class F>
-    [[nodiscard]] auto submit_isolated(F&& body) {
-        return submit_impl(std::forward<F>(body), /*isolated=*/true);
+    template <class F, class... Args>
+    [[nodiscard]] auto submit_isolated(F body, Args... args) {
+        return submit_impl(/*isolated=*/true, body, std::move(args)...);
     }
 
     /// No deadline. Wait for every job, however long it takes.
@@ -274,47 +352,37 @@ public:
     }
 
 private:
-    // Invoke `b` with the stop_token if it wants one. Also the RESULT-TYPE
-    // probe: std::conditional_t cannot be used for that, because it
-    // instantiates BOTH branches and one of them is always ill-formed here
-    // (a nullary body has no invoke_result with a stop_token, and vice
-    // versa). Return-type deduction over `if constexpr` is lazy, so this
-    // names the right type without forming the wrong one.
-    template <class Body>
-    static decltype(auto) invoke_body(Body& b, std::stop_token st) {
-        if constexpr (std::invocable<Body&, std::stop_token>)
-            return b(std::move(st));
-        else
-            return b();
-    }
-
-    template <class F>
-    auto submit_impl(F&& body, bool isolated) {
-        using Body = std::decay_t<F>;
-        using R    = decltype(invoke_body(std::declval<Body&>(),
-                                          std::stop_token{}));
-
-        auto pr  = std::make_shared<std::promise<R>>();
-        auto fut = pr->get_future();
-        job j = [pr, body = Body(std::forward<F>(body))](
-                    std::stop_token st) mutable {
-            try {
-                if constexpr (std::is_void_v<R>) {
-                    invoke_body(body, std::move(st));
-                    pr->set_value();
-                } else {
-                    pr->set_value(invoke_body(body, std::move(st)));
+    template <class F, class... Args>
+    auto submit_impl(bool isolated, F body, Args... args) {
+        if constexpr (!CheckedJob<F, Args...>) {
+            detail_pool::explain<F, Args...>();
+            return std::future<void>{};
+        } else {
+            using R = std::invoke_result_t<F&, std::stop_token, Args...>;
+            R (*fp)(std::stop_token, Args...) = body;
+            auto pr  = std::make_shared<std::promise<R>>();
+            auto fut = pr->get_future();
+            job j = [pr, fp, tup = std::tuple<Args...>(std::move(args)...)](
+                        std::stop_token st) mutable {
+                try {
+                    if constexpr (std::is_void_v<R>) {
+                        std::apply([&](Args&... a) { fp(std::move(st), std::move(a)...); }, tup);
+                        pr->set_value();
+                    } else {
+                        pr->set_value(std::apply(
+                            [&](Args&... a) { return fp(std::move(st), std::move(a)...); }, tup));
+                    }
+                } catch (...) {
+                    // The future carries the failure, so run_guarded's on_error
+                    // net is not the reporting path here — the caller's get()
+                    // rethrows at a place that has context for it.
+                    try { pr->set_exception(std::current_exception()); } catch (...) {}
                 }
-            } catch (...) {
-                // The future carries the failure, so run_guarded's on_error
-                // net is not the reporting path here — the caller's get()
-                // rethrows at a place that has context for it.
-                try { pr->set_exception(std::current_exception()); } catch (...) {}
-            }
-        };
-        if (isolated) post_isolated(std::move(j));
-        else          post(std::move(j));
-        return fut;
+            };
+            if (isolated) post_isolated_job(std::move(j));
+            else          post_job(std::move(j));
+            return fut;
+        }
     }
 
     // Everything a worker touches. Co-owned by the pool and every worker.
@@ -389,6 +457,15 @@ private:
 
     std::shared_ptr<core>     c_;
     std::vector<std::jthread> workers_;
+};
+
+/// Posts a job that is already erased. For the kernel's executor (its task
+/// and stream bodies were checked where they were made) and for hosts that
+/// forward jobs checked one layer up. App code has no reason to; a ban-list
+/// check flags it outside jaal.
+struct pool_access {
+    static void post(pool& p, pool::job j) { p.post_job(std::move(j)); }
+    static void post_isolated(pool& p, pool::job j) { p.post_isolated_job(std::move(j)); }
 };
 
 }  // namespace jaal::kernel

@@ -24,6 +24,7 @@
 //      point of `isolated` is that a hung syscall cannot hold the process
 //      open; the fix must not trade a race for a hang.
 
+#include <jaal/core/co_owned.hpp>
 #include <jaal/kernel/pool.hpp>
 
 #include <atomic>
@@ -42,6 +43,15 @@ void check(bool ok, const char* what) {
 
 using namespace std::chrono_literals;
 
+// What a task and the test share. Atomics only, so it is Sync.
+struct Flags {
+    std::atomic<bool> inside{false};
+    std::atomic<bool> observed_stop{false};
+    std::atomic<bool> release{false};
+    std::atomic<int>  ran{0};
+};
+using flags_t = jaal::co_owned<Flags>;
+
 // ── 1. a busy task is waited for ────────────────────────────────────────
 // The task holds a flag that stands in for "something the program owns is
 // still being read". If shutdown() returns while the flag is set, a real
@@ -49,36 +59,34 @@ using namespace std::chrono_literals;
 void waits_for_busy_isolated() {
     std::printf("--- shutdown() waits for a busy isolated task ---\n");
 
-    std::atomic<bool> inside{false};
-    std::atomic<bool> observed_stop{false};
-    std::atomic<bool> still_inside_at_shutdown{false};
+    auto f = flags_t::make();
+    bool still_inside_at_shutdown = false;
 
     {
         jaal::kernel::pool p{1};
-        p.post_isolated([&](std::stop_token st) {
-            inside.store(true, std::memory_order_release);
+        p.post_isolated([](std::stop_token st, flags_t f) {
+            f->inside.store(true, std::memory_order_release);
             // Cooperative: poll the token the way a scan polls between
             // files. Long enough that an unbounded shutdown() would
             // certainly return first.
             for (int i = 0; i < 2000 && !st.stop_requested(); ++i)
                 std::this_thread::sleep_for(1ms);
-            observed_stop.store(st.stop_requested(), std::memory_order_release);
-            inside.store(false, std::memory_order_release);
-        });
+            f->observed_stop.store(st.stop_requested(), std::memory_order_release);
+            f->inside.store(false, std::memory_order_release);
+        }, f);
 
         // Let it actually enter the body before we tear down.
-        while (!inside.load(std::memory_order_acquire))
+        while (!f->inside.load(std::memory_order_acquire))
             std::this_thread::sleep_for(200us);
 
         const auto abandoned = p.shutdown(2s);
-        still_inside_at_shutdown.store(inside.load(std::memory_order_acquire),
-                                       std::memory_order_release);
+        still_inside_at_shutdown = f->inside.load(std::memory_order_acquire);
         check(abandoned == 0, "a cooperative task is not reported abandoned");
     }
 
-    check(!still_inside_at_shutdown.load(std::memory_order_acquire),
+    check(!still_inside_at_shutdown,
           "shutdown() returned only after the task left its body");
-    check(observed_stop.load(std::memory_order_acquire),
+    check(f->observed_stop.load(std::memory_order_acquire),
           "the task saw its stop_token (it was asked, not killed)");
 }
 
@@ -88,20 +96,19 @@ void waits_for_busy_isolated() {
 void abandons_wedged_isolated() {
     std::printf("--- shutdown() stays bounded when a task ignores stop ---\n");
 
-    std::atomic<bool> inside{false};
-    std::atomic<bool> release{false};
+    auto f = flags_t::make();
     std::chrono::milliseconds took{0};
     std::size_t abandoned = 0;
 
     {
         jaal::kernel::pool p{1};
-        p.post_isolated([&](std::stop_token) {
-            inside.store(true, std::memory_order_release);
+        p.post_isolated([](std::stop_token, flags_t f) {
+            f->inside.store(true, std::memory_order_release);
             // Deliberately ignores the token, like a blocking syscall.
-            while (!release.load(std::memory_order_acquire))
+            while (!f->release.load(std::memory_order_acquire))
                 std::this_thread::sleep_for(1ms);
-        });
-        while (!inside.load(std::memory_order_acquire))
+        }, f);
+        while (!f->inside.load(std::memory_order_acquire))
             std::this_thread::sleep_for(200us);
 
         const auto t0 = std::chrono::steady_clock::now();
@@ -112,7 +119,7 @@ void abandons_wedged_isolated() {
         // Let the wedged thread finish before the core goes away. It
         // co-owns the core, so this is about keeping the TEST tidy, not
         // about correctness of the pool.
-        release.store(true, std::memory_order_release);
+        f->release.store(true, std::memory_order_release);
         std::this_thread::sleep_for(20ms);
     }
 
@@ -124,11 +131,11 @@ void abandons_wedged_isolated() {
 void clean_shutdown_reports_zero() {
     std::printf("--- a pool with no work shuts down clean ---\n");
     jaal::kernel::pool p{2};
-    std::atomic<int> ran{0};
-    p.post_isolated([&](std::stop_token) { ran.fetch_add(1); });
+    auto f = flags_t::make();
+    p.post_isolated([](std::stop_token, flags_t f) { f->ran.fetch_add(1); }, f);
     std::this_thread::sleep_for(30ms);          // let it finish on its own
     check(p.shutdown(1s) == 0, "a finished isolated task is not abandoned");
-    check(ran.load() == 1, "the task ran exactly once");
+    check(f->ran.load() == 1, "the task ran exactly once");
 }
 
 }  // namespace

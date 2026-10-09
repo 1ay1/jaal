@@ -14,6 +14,7 @@
 // delay it was asked for", which is the behavioural claim and is robust on a
 // loaded machine.
 
+#include <jaal/core/co_owned.hpp>
 #include <jaal/kernel/delay.hpp>
 #include <jaal/kernel/pool.hpp>
 
@@ -27,6 +28,13 @@
 
 using namespace std::chrono_literals;
 using clk = std::chrono::steady_clock;
+
+// What a job and the test share. Atomics only, so it is Sync.
+struct Flags {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> finished{false};
+};
+using flags_t = jaal::co_owned<Flags>;
 
 namespace {
 
@@ -98,21 +106,20 @@ int main() {
     // abandoned, which is exactly the case a host cannot have when the job
     // writes into state the host frees next.
     {
-        std::atomic<bool> finished{false};
-        std::atomic<bool> entered{false};
+        auto f = flags_t::make();
         {
             jaal::kernel::pool p;
-            p.post_isolated([&](std::stop_token) {
-                entered = true;
+            p.post_isolated([](std::stop_token, flags_t f) {
+                f->entered = true;
                 // Ignores its stop_token on purpose: a cooperative job would
                 // not distinguish a barrier from a short grace.
                 std::this_thread::sleep_for(300ms);
-                finished = true;
-            });
-            while (!entered.load()) std::this_thread::yield();
+                f->finished = true;
+            }, f);
+            while (!f->entered.load()) std::this_thread::yield();
             const std::size_t stuck = p.shutdown(jaal::kernel::pool::no_deadline);
             ok(stuck == 0, "no_deadline abandons nothing");
-            ok(finished.load(),
+            ok(f->finished.load(),
                "no_deadline waited for a job that ignored its stop_token");
         }
     }
@@ -120,13 +127,13 @@ int main() {
     // And the bounded default still bounds — the two must stay distinct, or
     // the option above is decorative.
     {
-        std::atomic<bool> entered{false};
+        auto f = flags_t::make();
         jaal::kernel::pool p;
-        p.post_isolated([&](std::stop_token) {
-            entered = true;
+        p.post_isolated([](std::stop_token, flags_t f) {
+            f->entered = true;
             std::this_thread::sleep_for(2s);
-        });
-        while (!entered.load()) std::this_thread::yield();
+        }, f);
+        while (!f->entered.load()) std::this_thread::yield();
         const auto        t0    = clk::now();
         const std::size_t stuck = p.shutdown(50ms);
         ok(stuck > 0, "a short grace reports what it abandoned");
@@ -139,39 +146,38 @@ int main() {
     // std::async would join here.
     {
         jaal::kernel::pool p;
-        std::atomic<bool>  entered{false};
-        std::atomic<bool>  finished{false};
+        auto f = flags_t::make();
         const auto t0 = clk::now();
         {
-            auto fut = p.submit_isolated([&](std::stop_token) {
-                entered = true;
+            auto fut = p.submit_isolated([](std::stop_token, flags_t f) {
+                f->entered = true;
                 std::this_thread::sleep_for(400ms);
-                finished = true;
+                f->finished = true;
                 return 7;
-            });
-            while (!entered.load()) std::this_thread::yield();
+            }, f);
+            while (!f->entered.load()) std::this_thread::yield();
         }   // future dropped mid-job
         const auto dropped_after = ms_since(t0);
         ok(dropped_after < 200,
            "dropping a submit() future does NOT join the job");
-        ok(!finished.load(), "and the job really was still running");
+        ok(!f->finished.load(), "and the job really was still running");
         // The job is still owned: shutdown waits for it.
         (void)p.shutdown(jaal::kernel::pool::no_deadline);
-        ok(finished.load(), "an abandoned result still runs to completion");
+        ok(f->finished.load(), "an abandoned result still runs to completion");
     }
 
     // A value comes back, and a throw comes back as a throw.
     {
         jaal::kernel::pool p;
-        auto v = p.submit([] { return 41 + 1; });
+        auto v = p.submit([](std::stop_token, int x) { return x + 1; }, 41);
         ok(v.get() == 42, "submit returns the body's value");
 
-        auto bad = p.submit([]() -> int { throw std::runtime_error("nope"); });
+        auto bad = p.submit([](std::stop_token) -> int { throw std::runtime_error("nope"); });
         bool threw = false;
         try { (void)bad.get(); } catch (const std::runtime_error&) { threw = true; }
         ok(threw, "a throwing body surfaces at get(), not at on_error");
 
-        auto nothing = p.submit([] {});          // void body
+        auto nothing = p.submit([](std::stop_token) {});          // void body
         nothing.get();
         ok(true, "a void body round-trips");
     }
@@ -181,7 +187,7 @@ int main() {
     {
         jaal::kernel::pool p;
         (void)p.shutdown();
-        auto fut   = p.submit([] { return 1; });
+        auto fut   = p.submit([](std::stop_token) { return 1; });
         bool threw = false;
         try { (void)fut.get(); } catch (const std::future_error&) { threw = true; }
         ok(threw, "a dropped job breaks its promise instead of hanging get()");

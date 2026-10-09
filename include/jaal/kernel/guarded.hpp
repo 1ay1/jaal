@@ -47,6 +47,7 @@
 #include <utility>
 
 #include "../core/sendable.hpp"
+#include "../core/sync.hpp"
 
 namespace jaal {
 
@@ -209,5 +210,7 @@ private:
 
 // A guarded<T> owns a lock; it never crosses into another lock's body.
 template <class T> inline constexpr bool sendable_opt_out<guarded<T>> = true;
+// Every access to the value goes through the lock.
+template <class T> inline constexpr bool sync_opt_in<guarded<T>> = true;
 
 }  // namespace jaal

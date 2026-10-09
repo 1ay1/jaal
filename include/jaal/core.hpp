@@ -18,6 +18,7 @@
 #include "core/child.hpp"
 #include "core/children.hpp"
 #include "core/cmd.hpp"
+#include "core/co_owned.hpp"
 #include "core/core_fx.hpp"
 #include "core/debounce.hpp"
 #include "core/diff.hpp"
@@ -35,4 +36,5 @@
 #include "core/sink.hpp"
 #include "core/stream.hpp"
 #include "core/sub.hpp"
+#include "core/sync.hpp"
 #include "core/unique_function.hpp"

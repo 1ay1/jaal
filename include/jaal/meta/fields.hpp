@@ -77,13 +77,26 @@ auto bind_fields(const T& t) {
     auto& [... xs] = t;
     return list<decltype(xs)...>{};
 }
+template <class T>
+auto bind_declared(T& t) {
+    auto& [... xs] = t;
+    return list<decltype(xs)...>{};
+}
 }  // namespace detail
 
 template <aggregate_struct T>
 using fields_t = decltype(detail::bind_fields(std::declval<const T&>()));
+
+// The field types as DECLARED: a non-const binding, so `const int x` is
+// `const int` and `int x` is `int`. Sync uses it to tell a field nobody can
+// write from one anybody can.
+template <aggregate_struct T>
+using declared_fields_t = decltype(detail::bind_declared(std::declval<T&>()));
 #else
 template <aggregate_struct T>
 using fields_t = list<>;   // unreachable: aggregate_struct is always false
+template <aggregate_struct T>
+using declared_fields_t = list<>;
 #endif
 
 // The binding types as a const binding sees them, with the top-level const

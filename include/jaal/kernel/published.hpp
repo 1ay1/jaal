@@ -34,6 +34,7 @@
 #include <version>
 
 #include "../core/sendable.hpp"
+#include "../core/sync.hpp"
 
 // std::atomic<std::shared_ptr<T>> is C++20, and libstdc++ has it, but libc++
 // still does not (Termux, Android): there the declaration falls through to
@@ -129,4 +130,7 @@ private:
 namespace jaal {
 // A published<T> is a process-wide slot, not a value to move around.
 template <class T> inline constexpr bool sendable_opt_out<kernel::published<T>> = true;
+// The slot itself is an atomic swap; what T does is T's business, and the
+// type's contract (see the top of this file) already says T guards itself.
+template <class T> inline constexpr bool sync_opt_in<kernel::published<T>> = true;
 }  // namespace jaal

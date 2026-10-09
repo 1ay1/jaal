@@ -403,6 +403,50 @@ time.
 
 The cost: slightly more verbose task code than `[&]`. That's the trade.
 
+#### Jobs follow the same rule
+
+`pool::post`, `pool::post_isolated`, `pool::submit` and `worker_group::post`
+take a body of the same shape, `body(stop_token, args...)`: captureless,
+every argument Sendable. So a background job can't borrow `this` or a local
+and outlive it either. The kernel's own executor posts already-erased task
+bodies through `pool_access`, a key app code has no reason to name.
+
+When a job and its owner really must share one object, it goes in a
+`co_owned<T>` (core/co_owned.hpp): reference counted, never null, a move
+copies, and built only by `make()`, which requires `Sync<T>`.
+
+`Sync<T>` (core/sync.hpp) means many threads may use the same `T&` at once.
+On a plain struct it is checked field by field, as declared:
+
+| field | Sync when |
+|---|---|
+| `const F` | F is Frozen |
+| `guarded<U>`, `published<U>` | always |
+| `std::atomic` of a number or enum | always |
+| `const std::stop_source`, `const co_owned<U>` | always |
+| `const shared_ptr<U>`, `const unique_ptr<U>` | U is Sync |
+| a nested plain struct | its fields are |
+| anything else | never: a writable field is a race |
+
+A class jaal can't see inside opts in with `sync_opt_in` (agentty spells it
+`MAYA_SYNC`). An opted-in field still has to be const unless the type can't
+be assigned, because assigning the whole field is a write.
+
+```cpp
+struct Conn {
+    const std::string             url;
+    jaal::guarded<Session>        session;
+    std::atomic<bool>             alive{true};
+};
+auto c = jaal::co_owned<Conn>::make(url);
+workers.post([](std::stop_token, jaal::co_owned<Conn> c, std::string frame) {
+    c->post(frame);
+}, c, std::move(frame));
+```
+
+`scope` keeps `[&]`: it joins before returning, so its helpers can't outlive
+what they borrow.
+
 ### 4.7 `scope`: structured concurrency for helpers
 
 Sometimes a blocking job needs helper threads: read stdout and stderr at
@@ -611,8 +655,8 @@ stop that. It can make it visible:
 Kept short on purpose:
 
 1. `restore_guard` callbacks must be async-signal-safe.
-2. `sendable_opt_in` must only be used for types that are actually safe to
-   move between threads.
+2. `sendable_opt_in` and `sync_opt_in` must only be used for types that are
+   actually safe to move between threads / use from many at once.
 3. `update` and `view` must be pure. (design.md 3.1.)
 4. Code outside jaal that uses raw threads anyway, if it's on the allowlist.
 

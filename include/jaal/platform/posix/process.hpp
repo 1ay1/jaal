@@ -32,6 +32,7 @@
 #include <optional>
 
 #include "../../core/error.hpp"
+#include "../../core/sendable.hpp"
 #include "../handle.hpp"
 #include "../process.hpp"
 
@@ -128,3 +129,7 @@ static_assert(Process<posix_process>,
               "the one-suite-every-backend contract is a fiction");
 
 }  // namespace jaal::platform
+
+// Move-only, and owns its child's handles outright behind a unique_ptr, so
+// moving it to the thread that will drive it shares nothing.
+template <> inline constexpr bool jaal::sendable_opt_in<jaal::platform::posix_process> = true;

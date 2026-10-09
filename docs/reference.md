@@ -21,7 +21,7 @@ compiler error.
 - [Subscriptions: `Sub`](#subscriptions-sub) — `none` `every` `stream` `on` `batch`
 - [Talking back: `Sink`](#talking-back-sink)
 - [Composition](#composition) — `child`, `children`, `debounce`
-- [Safety types](#safety-types) — `Sendable`, `Frozen`, `shared`, `guarded`, `loop_bound`, `scope`, `handle`, `stop_group`, `worker_group`, `native_process`
+- [Safety types](#safety-types) — `Sendable`, `Frozen`, `shared`, `Sync`, `co_owned`, `guarded`, `loop_bound`, `scope`, `handle`, `stop_group`, `worker_group`, `native_process`
 - [Hosts](#hosts) — what a host is, `headless`, `given`, `sim`
 - [Testing](#testing) — `sim`, `explore`, compile-fail cases
 - [Diagnostics](#diagnostics) — reading jaal's error messages
@@ -499,6 +499,23 @@ Deeply immutable. `shared<T>` requires it, so many readers need no lock.
 Immutable value, many readers, no lock. No null, no raw pointer in, no write
 after construction.
 
+### `Sync`
+
+Many threads may use the same `T&` at once. Checked field by field on a
+plain struct: a field is fine when it's `const` and Frozen, a `guarded`, a
+`published`, an atomic number, or a `const` owning pointer to something
+Sync. Anything writable fails. A class jaal can't walk opts in with
+`sync_opt_in`.
+
+### `co_owned<T>`
+
+State a background job shares with its owner. Like `shared<T>` (never null,
+move copies, built only by `make()`), but `make()` requires `Sync<T>` and it
+hands out `T&`. `co_owned<T>::of(self)` gets the handle from inside an
+object that derives from `enable_shared_from_this`.
+
+> **Refuses:** a `T` with a writable field, naming the field.
+
 ### `guarded<T>`
 
 State behind a lock you cannot forget to take:
@@ -573,6 +590,12 @@ wrote into. Use it when a job touches something a third party frees right
 after stop; `pool`'s bounded shutdown abandons, which is wrong there. Refuses:
 a `post()` after `stop()` (dropped). A job that never returns hangs `stop()`,
 so give jobs their own timeouts.
+
+Jobs here and on `pool` follow the task rule: `post(body, args...)` with a
+captureless `body(stop_token, args...)` and Sendable args. Shared state goes
+in as a `co_owned<T>`.
+
+> **Refuses:** a capturing body, a pointer or view argument.
 
 ### `native_process`
 

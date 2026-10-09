@@ -27,6 +27,7 @@ jaal_static_test(meta_list_test meta/list_test.cpp)
 jaal_static_test(meta_declares_test meta/declares_test.cpp)
 jaal_static_test(core_task_gate_test core/task_gate_test.cpp)
 jaal_static_test(core_sendable_test core/sendable_test.cpp)
+jaal_static_test(core_sync_test core/sync_test.cpp)
 
 # Every layer umbrella (<jaal/core.hpp> and friends) must compile alone and
 # export what it claims: a header added to a layer but not its umbrella fails
@@ -169,6 +170,21 @@ jaal_compile_fail(NAME isolated_body_shape   SOURCE compile_fail/task_isolated.c
                   MATCH "jaal: a task body must be callable as")
 jaal_compile_fail(NAME sink_msg_sendable     SOURCE compile_fail/cmd.cpp CASE 6
                   MATCH "jaal: a Sink's Msg must be Sendable")
+
+# Jobs on pool / worker_group follow the task rule: no captures, Sendable
+# arguments, and shared state only as co_owned<T> of a Sync T.
+jaal_compile_fail(NAME job_no_capture        SOURCE compile_fail/job.cpp CASE 1
+                  MATCH "jaal: a job body must not capture anything")
+jaal_compile_fail(NAME job_arg_sendable      SOURCE compile_fail/job.cpp CASE 2
+                  MATCH "jaal: a job argument is not Sendable")
+jaal_compile_fail(NAME job_group_no_capture  SOURCE compile_fail/job.cpp CASE 3
+                  MATCH "jaal: a job body must not capture anything")
+jaal_compile_fail(NAME job_submit_no_capture SOURCE compile_fail/job.cpp CASE 4
+                  MATCH "jaal: a job body must not capture anything")
+jaal_compile_fail(NAME co_owned_needs_sync   SOURCE compile_fail/job.cpp CASE 5
+                  MATCH "is not Sync")
+jaal_compile_fail(NAME job_body_shape        SOURCE compile_fail/job.cpp CASE 6
+                  MATCH "jaal: a job body must be callable as")
 
 # A Sink is a weak handle to the loop's mailbox, minted only by the kernel.
 # Forging one would hand a worker a route into loop state that the loop

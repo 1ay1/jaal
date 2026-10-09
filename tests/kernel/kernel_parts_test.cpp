@@ -1,6 +1,7 @@
 // tests/kernel/kernel_parts_test.cpp — mailbox, timers, pool, loop_bound.
 // Runtime behaviour; the tricky bits get their own check.
 
+#include <jaal/core/co_owned.hpp>
 #include <jaal/core/program.hpp>
 #include <jaal/kernel/loop.hpp>
 #include <jaal/kernel/mailbox.hpp>
@@ -197,13 +198,23 @@ static int timer_tests() {
     return 0;
 }
 
+namespace {
+// What jobs and the test share. Atomics only, so it is Sync.
+struct Counters {
+    std::atomic<int>  ran{0};
+    std::atomic<bool> started{false};
+    std::atomic<bool> saw_stop{false};
+};
+using counters_t = jaal::co_owned<Counters>;
+}  // namespace
+
 static int pool_tests() {
     // jobs run, and the pool reuses workers rather than one thread per job
     {
         k::pool p(4);
-        std::atomic<int> ran{0};
-        for (int i = 0; i < 64; ++i) p.post([&](std::stop_token) { ++ran; });
-        while (ran < 64) std::this_thread::sleep_for(1ms);
+        auto c = counters_t::make();
+        for (int i = 0; i < 64; ++i) p.post([](std::stop_token, counters_t c) { ++c->ran; }, c);
+        while (c->ran < 64) std::this_thread::sleep_for(1ms);
         if (p.worker_count() > 4) return 40;
     }
 
@@ -212,24 +223,24 @@ static int pool_tests() {
         std::atomic<int> errors{0};
         k::pool p(2, [&](std::exception_ptr) { ++errors; });
         p.post([](std::stop_token) { throw std::runtime_error("boom"); });
-        std::atomic<bool> after{false};
-        p.post([&](std::stop_token) { after = true; });
-        while (!after || errors == 0) std::this_thread::sleep_for(1ms);
+        auto c = counters_t::make();
+        p.post([](std::stop_token, counters_t c) { c->started = true; }, c);
+        while (!c->started || errors == 0) std::this_thread::sleep_for(1ms);
         if (errors != 1) return 41;
     }
 
     // shutdown asks running work to stop and joins: no hang, no leak
     {
         k::pool p(2);
-        std::atomic<bool> started{false}, saw_stop{false};
-        p.post([&](std::stop_token st) {
-            started = true;
+        auto c = counters_t::make();
+        p.post([](std::stop_token st, counters_t c) {
+            c->started = true;
             while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
-            saw_stop = true;
-        });
-        while (!started) std::this_thread::sleep_for(1ms);
+            c->saw_stop = true;
+        }, c);
+        while (!c->started) std::this_thread::sleep_for(1ms);
         p.shutdown();                                // must return
-        if (!saw_stop) return 42;
+        if (!c->saw_stop) return 42;
         p.shutdown();                                // idempotent
         p.post([](std::stop_token) {});              // ignored after shutdown
         if (p.queued() != 0) return 43;
@@ -238,18 +249,18 @@ static int pool_tests() {
     // an isolated task runs on its own thread and is asked to stop at
     // shutdown, but is never joined (so a wedged one can't hang us)
     {
-        std::atomic<bool> running{false}, released{false};
+        auto c = counters_t::make();
         {
             k::pool p(2);
-            p.post_isolated([&](std::stop_token st) {
-                running = true;
+            p.post_isolated([](std::stop_token st, counters_t c) {
+                c->started = true;
                 while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
-                released = true;
-            });
-            while (!running) std::this_thread::sleep_for(1ms);
+                c->saw_stop = true;
+            }, c);
+            while (!c->started) std::this_thread::sleep_for(1ms);
         }                                            // ~pool: request stop, don't join
-        for (int i = 0; i < 2000 && !released; ++i) std::this_thread::sleep_for(1ms);
-        if (!released) return 44;
+        for (int i = 0; i < 2000 && !c->saw_stop; ++i) std::this_thread::sleep_for(1ms);
+        if (!c->saw_stop) return 44;
     }
     return 0;
 }

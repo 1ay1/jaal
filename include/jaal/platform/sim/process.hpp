@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "../../core/error.hpp"
+#include "../../core/sendable.hpp"
 #include "../handle.hpp"
 #include "../process.hpp"
 
@@ -142,3 +143,6 @@ static_assert(Process<sim_process>,
               "ones, or the one-suite-every-backend contract is a fiction");
 
 }  // namespace jaal::platform
+
+// Same ownership as the real backends.
+template <> inline constexpr bool jaal::sendable_opt_in<jaal::platform::sim_process> = true;

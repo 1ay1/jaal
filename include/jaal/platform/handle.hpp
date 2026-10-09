@@ -25,6 +25,7 @@
 #include <utility>
 
 #include "../core/error.hpp"
+#include "../core/sendable.hpp"
 
 namespace jaal::platform {
 
@@ -156,4 +157,8 @@ private:
 namespace jaal {
 using platform::borrowed_handle;
 using platform::owned_handle;
+
+// An owner closes its handle once, wherever it ends up; moving it to another
+// thread is just moving that duty. A borrow is NOT: it outlives nothing.
+template <> inline constexpr bool sendable_opt_in<platform::owned_handle> = true;
 }  // namespace jaal

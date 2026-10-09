@@ -13,9 +13,11 @@
 // own timeouts.
 //
 //     jaal::kernel::worker_group g;
-//     g.post([&](std::stop_token st) { pump(st); });
+//     g.post([](std::stop_token st, jaal::co_owned<Pump> p) { p->run(st); }, pump);
 //     ...
 //     g.stop();   // stop requested on every job, then waits for all of them
+//
+// Jobs follow pool's rule: a captureless body, Sendable arguments.
 //
 // Admission: post() after stop() is dropped, decided under the pool's lock,
 // so no job slips in between "still open?" and "counted".
@@ -41,8 +43,10 @@ class worker_group {
     /// Joins on destruction, so an owner that forgets stop() is still safe.
     ~worker_group() { stop(); }
 
-    /// Run `j` on a thread of its own. Dropped once the group is stopped.
-    void post(pool::job j) { pool_.post_isolated(std::move(j)); }
+    /// Run `body(stop_token, args...)` on a thread of its own. Dropped once
+    /// the group is stopped.
+    template <class F, class... Args>
+    void post(F body, Args... args) { pool_.post_isolated(body, std::move(args)...); }
 
     /// Barrier: when this returns, no job posted here is running. Idempotent.
     void stop() noexcept { (void)pool_.shutdown(pool::no_deadline); }

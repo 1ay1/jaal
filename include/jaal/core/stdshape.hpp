@@ -116,6 +116,8 @@ template <> struct shape_of<std::nullptr_t>                { using type = value;
 // many threads at once (its operations are thread-safe by specification).
 // So it's Sendable. It is not Frozen: a stop request changes what it reports.
 template <> struct shape_of<std::stop_token> { using type = sync_handle; };
+// Same for std::stop_source: request_stop() and the queries are thread-safe.
+template <> struct shape_of<std::stop_source> { using type = sync_handle; };
 
 // std::exception_ptr exists to carry an exception from one thread to
 // another (std::promise, std::rethrow_exception). Copying and destroying
