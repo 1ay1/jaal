@@ -45,6 +45,7 @@
 #if !defined(_WIN32)
 #  include <dirent.h>
 #  include <jaal/platform/posix/poll_reactor.hpp>
+#  include <fcntl.h>
 #  include <unistd.h>
 #endif
 
@@ -358,6 +359,27 @@ int main() {
     // correct when it passes the suite, and sim is not exempt from it.
     int r = suite<sim_fixture>(sim_fixture::name);
     r |= suite<posix_fixture>(posix_fixture::name);
+
+    // A descriptor the parent opened WITHOUT close-on-exec must still not
+    // reach the child: hosts hold logs and credential files open while they
+    // run tools. posix only; sim has no descriptors to inherit.
+    {
+        const int fd = ::open("/dev/null", O_RDONLY);   // no O_CLOEXEC
+        const std::string probe = "test -e /proc/self/fd/" + std::to_string(fd)
+                                + " && printf leaked || printf clean";
+        auto p = posix_fixture::process::spawn(posix_fixture::sh(probe)).value();
+        posix_fixture::run_out(p);
+        const std::string got = drain(*p.stdout_handle());
+        (void)p.reap();
+        ::close(fd);
+        if (got != "clean" && got != "") {   // "" where there is no /proc
+            std::fprintf(stderr, "process conformance[posix_process]: child inherited fd %d (%s)\n",
+                         fd, got.c_str());
+            r |= 1;
+        } else {
+            std::puts("process conformance[posix_process]: inherited fds are closed");
+        }
+    }
     return r;
 #endif
 }

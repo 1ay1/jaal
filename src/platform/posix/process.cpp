@@ -27,6 +27,29 @@
 namespace jaal::platform {
 namespace {
 
+/// In the forked child: close every fd above stderr except `a` and `b`
+/// (-1 for none). Async-signal-safe. close_range where the kernel has it,
+/// a bounded loop otherwise.
+void close_fds_above_stderr(int a, int b) noexcept {
+    if (a > b) { const int t = a; a = b; b = t; }   // a <= b; -1 sorts first
+#if defined(__linux__) && defined(SYS_close_range)
+    unsigned lo = 3;
+    bool ok = true;
+    for (int k : {a, b}) {
+        if (k < static_cast<int>(lo)) continue;
+        if (static_cast<unsigned>(k) > lo)
+            ok = ok && ::syscall(SYS_close_range, lo, static_cast<unsigned>(k) - 1, 0u) == 0;
+        lo = static_cast<unsigned>(k) + 1;
+    }
+    ok = ok && ::syscall(SYS_close_range, lo, ~0u, 0u) == 0;
+    if (ok) return;
+#endif
+    const long top_l = ::sysconf(_SC_OPEN_MAX);
+    const int  top   = top_l > 0 && top_l < (1 << 16) ? static_cast<int>(top_l) : (1 << 16);
+    for (int fd = 3; fd < top; ++fd)
+        if (fd != a && fd != b) ::close(fd);
+}
+
 /// A pipe as two owned ends, so a half-built spawn cannot leak one.
 struct pipe_pair {
     native_handle r = invalid_handle;
@@ -232,6 +255,19 @@ result<posix_process> posix_process::spawn(const process_spec& spec) {
         // SIGPIPE writes into a closed pipe forever instead of dying, which
         // is how a "finished" command stays alive.
         ::signal(SIGPIPE, SIG_DFL);
+
+        // Close everything above stderr. A descriptor the parent opened
+        // without O_CLOEXEC (a log, a credential store, another library's
+        // socket) would otherwise reach the program. Two are kept: the
+        // report pipe (close-on-exec, so a failed exec can still say why)
+        // and, off Linux, the death pipe the child must hold across exec.
+        {
+            int keep[2] = {report.w, -1};
+#if !defined(__linux__)
+            keep[1] = s.death.w;
+#endif
+            close_fds_above_stderr(keep[0], keep[1]);
+        }
 
         if (envp.empty()) ::execvp(argv[0], argv.data());
         else              ::execvpe(argv[0], argv.data(), envp.data());
