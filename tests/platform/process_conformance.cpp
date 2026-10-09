@@ -45,7 +45,9 @@
 #if !defined(_WIN32)
 #  include <dirent.h>
 #  include <jaal/platform/posix/poll_reactor.hpp>
+#  include <csignal>
 #  include <fcntl.h>
+#  include <pthread.h>
 #  include <unistd.h>
 #endif
 
@@ -378,6 +380,55 @@ int main() {
             r |= 1;
         } else {
             std::puts("process conformance[posix_process]: inherited fds are closed");
+        }
+    }
+
+    // The child starts with default signal handling and nothing blocked,
+    // whatever the parent had. A host that ignores SIGINT or blocks SIGTERM
+    // on its threads must not hand a child that nobody can stop.
+    {
+        struct sigaction ign{};
+        ign.sa_handler = SIG_IGN;
+        struct sigaction old_int{};
+        ::sigaction(SIGINT, &ign, &old_int);
+        sigset_t block, old_mask;
+        sigemptyset(&block);
+        sigaddset(&block, SIGTERM);
+        ::pthread_sigmask(SIG_BLOCK, &block, &old_mask);
+
+        // SigIgn/SigBlk are hex masks in /proc; all zero means clean.
+        auto p = posix_fixture::process::spawn(posix_fixture::sh(
+            "grep -E '^Sig(Ign|Blk):' /proc/self/status 2>/dev/null | awk '{print $2}' | tr -d '0\\n'")).value();
+        posix_fixture::run_out(p);
+        const std::string got = drain(*p.stdout_handle());
+        (void)p.reap();
+
+        ::pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
+        ::sigaction(SIGINT, &old_int, nullptr);
+        if (!got.empty()) {
+            std::fprintf(stderr, "process conformance[posix_process]: child inherited ignored/blocked signals (%s)\n",
+                         got.c_str());
+            r |= 1;
+        } else {
+            std::puts("process conformance[posix_process]: child signals start clean");
+        }
+    }
+
+    // close_stdin() is EOF for the child: `cat` ends by itself.
+    {
+        auto spec = posix_fixture::sh("cat; printf done");
+        spec.stdin_from = pf::stream_to::pipe;
+        auto p = posix_fixture::process::spawn(spec).value();
+        p.close_stdin();
+        posix_fixture::run_out(p);
+        const std::string got = drain(*p.stdout_handle());
+        auto st = p.reap();
+        if (got != "done" || !st) {
+            std::fprintf(stderr, "process conformance[posix_process]: close_stdin did not end cat (%s)\n",
+                         got.c_str());
+            r |= 1;
+        } else {
+            std::puts("process conformance[posix_process]: close_stdin gives the child EOF");
         }
     }
     return r;

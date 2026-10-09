@@ -251,10 +251,18 @@ result<posix_process> posix_process::spawn(const process_spec& spec) {
         else if (spec.stderr_to == stream_to::null && devnull >= 0)
                                            { ::dup2(devnull, 2); }
 
-        // Default the signal disposition: a child inheriting SIG_IGN on
-        // SIGPIPE writes into a closed pipe forever instead of dying, which
-        // is how a "finished" command stays alive.
-        ::signal(SIGPIPE, SIG_DFL);
+        // Default every signal and clear the mask. exec keeps SIG_IGN and the
+        // blocked set, and a host's threads routinely block or ignore signals
+        // (SIGPIPE, SIGINT while a foreground command runs). Inheriting them
+        // makes a child that Ctrl-C cannot stop, or one that writes into a
+        // closed pipe forever instead of dying.
+        for (int sig = 1; sig < NSIG; ++sig)
+            if (sig != SIGKILL && sig != SIGSTOP) ::signal(sig, SIG_DFL);
+        {
+            sigset_t none;
+            sigemptyset(&none);
+            ::sigprocmask(SIG_SETMASK, &none, nullptr);
+        }
 
         // Close everything above stderr. A descriptor the parent opened
         // without O_CLOEXEC (a log, a credential store, another library's
@@ -381,6 +389,8 @@ std::optional<borrowed_handle> posix_process::stdin_handle() const {
     if (!is_valid(p_->in.w)) return std::nullopt;
     return borrowed_handle{p_->in.w};
 }
+
+void posix_process::close_stdin() noexcept { p_->in.close_write(); }
 
 result<void> posix_process::stop(stop_mode mode, stop_scope scope) {
     if (p_->pid <= 0 || p_->reaped) return {};   // already gone: not an error

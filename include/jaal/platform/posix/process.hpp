@@ -100,6 +100,11 @@ class posix_process {
     [[nodiscard]] result<void>        stop(stop_mode, stop_scope);
     [[nodiscard]] result<exit_status> reap();
 
+    /// Close our end of the child's stdin, so it reads EOF. A long-lived
+    /// peer (a server speaking over its stdio) is asked to finish this way
+    /// before anyone signals it. No-op without a stdin pipe.
+    void close_stdin() noexcept;
+
     /// A process group is not a tree: a descendant that calls setsid() leaves
     /// it and survives the kill. Plain POSIX can only reach the group, so
     /// this is false here. A Linux host that delegated a cgroup can do
