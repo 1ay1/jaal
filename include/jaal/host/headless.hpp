@@ -21,11 +21,12 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
-#include <thread>
+#include <memory>
 #include <typeindex>
 #include <utility>
 #include <vector>
 
+#include "../kernel/guarded.hpp"
 #include "../kernel/kernel.hpp"
 #include "../kernel/teardown.hpp"
 #include "../platform/clock.hpp"
@@ -99,7 +100,7 @@ public:
 
     explicit headless(kernel::options opt = {},
                       std::function<void(const msg_type&)> record = {})
-        : k_(kernel_type::start(rec_, C{}, with_seed(opt), {}, std::move(record))) {}
+        : k_(kernel_type::start(rec_, C{}, with_seed(opt), waker(), std::move(record))) {}
 
     /// Resume from a recovered model (kernel::start_from): init() doesn't
     /// run, subscribe(model) does. For testing crash recovery:
@@ -108,7 +109,7 @@ public:
              cmd_of<P> resume_cmd = cmd_of<P>::none(), kernel::options opt = {},
              std::function<void(const msg_type&)> record = {})
         : k_(kernel_type::start_from(rec_, std::move(model), std::move(resume_cmd), C{},
-                                     with_seed(opt), {}, std::move(record))) {}
+                                     with_seed(opt), waker(), std::move(record))) {}
 
     headless(const headless&)            = delete;
     headless& operator=(const headless&) = delete;
@@ -179,16 +180,22 @@ private:
         return o;
     }
 
-    bool idle_for_a_moment() {
-        // Give pool workers a chance to post; if nothing shows up, idle.
-        for (int i = 0; i < 20; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            k_.step(rec_);
-            if (k_.has_pending()) return false;
-        }
-        return !k_.has_pending();
+    // Set by the kernel's wake (a worker posted, a fault arrived); cleared
+    // by idle_for_a_moment. Shared so a late wake after ~headless is safe.
+    std::function<void()> waker() {
+        return [w = woken_] { w->with([](bool& b) { b = true; }); };
     }
 
+    bool idle_for_a_moment() {
+        // Give pool workers a moment to post. Wakes the instant one does.
+        const bool news = woken_->wait_with_for(std::chrono::milliseconds(20),
+            [](const bool& b) { return b; },
+            [](bool& b) { return std::exchange(b, false); }).first;
+        k_.step(rec_);
+        return !news && !k_.has_pending();
+    }
+
+    std::shared_ptr<guarded<bool>> woken_ = std::make_shared<guarded<bool>>(false);
     recorder    rec_;          // must be constructed before k_ (start() uses it)
     kernel_type k_;
 };
