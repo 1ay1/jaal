@@ -31,15 +31,21 @@
 
 #include <jaal/platform/concepts.hpp>
 #include <jaal/platform/process.hpp>
-#include <jaal/platform/sim/process.hpp>
-
 #if !defined(_WIN32)
+#  include <jaal/platform/sim/process.hpp>
+#endif
+
+#if defined(_WIN32)
+#  include <jaal/platform/windows/process.hpp>
+#  include <jaal/platform/windows/wait_reactor.hpp>
+#else
 #  include <jaal/platform/posix/process.hpp>
 #endif
 
 #include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if !defined(_WIN32)
@@ -56,11 +62,15 @@ namespace pf = jaal::platform;
 
 namespace {
 
-#if !defined(_WIN32)
-// Defined with the helpers below; the posix fixture needs it to wait.
+#if defined(_WIN32)
+using native_reactor = pf::wait_reactor;
+#else
+using native_reactor = pf::poll_reactor;
+#endif
+
+// Defined with the helpers below; the real fixtures need it to wait.
 template <pf::Reactor R>
 bool readable_now(pf::borrowed_handle h);
-#endif
 
 // ── fixtures ────────────────────────────────────────────────────────────
 //
@@ -68,6 +78,7 @@ bool readable_now(pf::borrowed_handle h);
 // to move it forward. "Forward" is a step for a scripted child and a short
 // wait for a real one, which is the only place the two differ.
 
+#if !defined(_WIN32)
 struct sim_fixture {
     using process = pf::sim_process;
     static constexpr const char* name = "sim_process";
@@ -107,6 +118,7 @@ struct sim_fixture {
     static void advance(process& p) { p.step(); }
     static void run_out(process& p) { p.run_to_completion(); }
 };
+#endif
 
 #if !defined(_WIN32)
 /// The same children, as real programs.
@@ -149,7 +161,7 @@ struct posix_fixture {
     /// finished says so by calling this; nothing here sleeps blindly.
     static void run_out(process& p) {
         for (int i = 0; i < 400; ++i) {
-            if (readable_now<pf::poll_reactor>(p.exit_handle())) return;
+            if (readable_now<native_reactor>(p.exit_handle())) return;
             ::usleep(5000);
         }
     }
@@ -157,9 +169,55 @@ struct posix_fixture {
 };
 #endif
 
+#if defined(_WIN32)
+/// The same children on Windows, through cmd.exe.
+struct windows_fixture {
+    using process = pf::windows_process;
+    static constexpr const char* name = "windows_process";
+
+    static pf::process_spec cmd(std::string script) {
+        pf::process_spec s;
+        s.argv = {"cmd.exe", "/d", "/c", std::move(script)};
+        return s;
+    }
+
+    static process writes_then_exits(std::string bytes, int code) {
+        // `<nul set /p =x` prints x with no newline.
+        std::string s = bytes.empty() ? std::string{}
+                                      : "<nul set /p =" + bytes + "& ";
+        return process::spawn(cmd(s + "exit /b " + std::to_string(code))).value();
+    }
+
+    static process fills_pipe_and_runs() {
+        // Far more than the 64 KiB pipe, then idle.
+        return process::spawn(cmd(
+            "for /l %i in (1,1,20000) do @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            " & ping -n 30 127.0.0.1 >nul")).value();
+    }
+
+    static process runs_silently() {
+        return process::spawn(cmd("ping -n 30 127.0.0.1 >nul")).value();
+    }
+
+    static process merged_streams() {
+        // Redirect first: `... =x 1>&2` would print "x ".
+        auto spec = cmd("1>&2 <nul set /p =to-stderr");
+        spec.merge_stderr = true;
+        return process::spawn(spec).value();
+    }
+
+    static void run_out(process& p) {
+        for (int i = 0; i < 400; ++i) {
+            if (readable_now<native_reactor>(p.exit_handle())) return;
+            std::this_thread::sleep_for(5ms);
+        }
+    }
+    static void advance(process& p) { std::this_thread::sleep_for(200ms); (void)p; }
+};
+#endif
+
 // ── helpers ─────────────────────────────────────────────────────────────
 
-#if !defined(_WIN32)
 /// Is this handle readable right now, through a real reactor?
 template <pf::Reactor R>
 bool readable_now(pf::borrowed_handle h) {
@@ -174,6 +232,21 @@ bool readable_now(pf::borrowed_handle h) {
     return false;
 }
 
+#if defined(_WIN32)
+std::string drain(pf::borrowed_handle h) {
+    std::string out;
+    char buf[1024];
+    for (;;) {
+        bool eof = false;
+        const auto n = pf::read_some(h, buf, sizeof buf, eof);
+        if (n > 0) { out.append(buf, n); continue; }
+        break;
+    }
+    return out;
+}
+
+int open_fd_count() { return -1; }   // no /proc: the leak check skips itself
+#else
 std::string drain(pf::borrowed_handle h) {
     std::string out;
     char buf[1024];
@@ -203,7 +276,7 @@ int exit_seen_late_is_not_lost() {
     auto p = Fx::writes_then_exits("hi", 0);
     Fx::run_out(p);                       // it ends while nobody is watching
     for (int i = 0; i < 5; ++i) {}        // ...and we look well afterwards
-    if (!readable_now<pf::poll_reactor>(p.exit_handle())) return 101;
+    if (!readable_now<native_reactor>(p.exit_handle())) return 101;
     return 0;
 }
 
@@ -211,8 +284,8 @@ template <class Fx>
 int exit_readiness_is_idempotent() {
     auto p = Fx::writes_then_exits("hi", 0);
     Fx::run_out(p);
-    if (!readable_now<pf::poll_reactor>(p.exit_handle())) return 102;
-    if (!readable_now<pf::poll_reactor>(p.exit_handle())) return 103;
+    if (!readable_now<native_reactor>(p.exit_handle())) return 102;
+    if (!readable_now<native_reactor>(p.exit_handle())) return 103;
     return 0;
 }
 
@@ -238,7 +311,7 @@ int stop_works_with_a_full_pipe() {
     // asked the sim object whether it had ended, which compiled against one
     // backend and made the suite sim-shaped.
     Fx::run_out(p);
-    if (!readable_now<pf::poll_reactor>(p.exit_handle())) return 108;
+    if (!readable_now<native_reactor>(p.exit_handle())) return 108;
     auto st = p.reap();
     if (!st) return 109;
     return 0;
@@ -269,7 +342,7 @@ int exited_and_signalled_stay_distinct() {
     // would_block. The contract is "reap after the exit handle is ready",
     // and the check now honours it.
     Fx::run_out(b);
-    if (!readable_now<pf::poll_reactor>(b.exit_handle())) return 115;
+    if (!readable_now<native_reactor>(b.exit_handle())) return 115;
     auto sb = b.reap();
     if (!sb) return 116;
     if (sb->how != pf::exit_status::kind::signalled) return 117;
@@ -354,8 +427,28 @@ int suite(const char* name) {
 
 int main() {
 #if defined(_WIN32)
-    std::puts("process conformance: no backend on this platform yet");
-    return 0;
+    // sim_process is POSIX-only (its handles are pipes), so here the suite
+    // runs the real backend alone.
+    int r = suite<windows_fixture>(windows_fixture::name);
+
+    // close_stdin() is EOF for the child: `findstr` ends by itself.
+    {
+        auto spec = windows_fixture::cmd("findstr x & <nul set /p =done");
+        spec.stdin_from = pf::stream_to::pipe;
+        auto p = windows_fixture::process::spawn(spec).value();
+        p.close_stdin();
+        windows_fixture::run_out(p);
+        const std::string got = drain(*p.stdout_handle());
+        auto st = p.reap();
+        if (got != "done" || !st) {
+            std::fprintf(stderr, "process conformance[windows_process]: close_stdin did not end findstr (%s)\n",
+                         got.c_str());
+            r |= 1;
+        } else {
+            std::puts("process conformance[windows_process]: close_stdin gives the child EOF");
+        }
+    }
+    return r;
 #else
     // The same checks, both backends. That is the contract: a backend is
     // correct when it passes the suite, and sim is not exempt from it.

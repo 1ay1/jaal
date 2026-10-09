@@ -62,7 +62,8 @@ if(WIN32)
          src/platform/windows/wait_reactor.cpp
          src/platform/windows/console_signals.cpp
          src/platform/windows/file_lock.cpp
-         src/platform/windows/handle.cpp)
+         src/platform/windows/handle.cpp
+         src/platform/windows/process.cpp)
 elseif(UNIX)
     list(APPEND JAAL_PLATFORM_SOURCES
          src/platform/posix/poll_reactor.cpp

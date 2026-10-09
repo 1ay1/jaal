@@ -84,6 +84,12 @@ struct process_spec {
     /// Independent of `stop_tree`: a session is about the terminal, a tree
     /// is about who dies.
     bool new_session = true;
+
+    /// Windows only, ignored elsewhere. When set, used verbatim as the
+    /// command line instead of quoting `argv`. cmd.exe does not parse its
+    /// line by CommandLineToArgvW rules, so `cmd /S /C "..."` must be passed
+    /// as written. `argv` still names the program for diagnostics.
+    std::string windows_command_line;
 };
 
 // ── how a child ends ────────────────────────────────────────────────────
