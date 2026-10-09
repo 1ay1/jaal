@@ -9,6 +9,7 @@
 //   pool                     worker threads for tasks, bounded shutdown
 //   delay_for(st, d)         a wait cancellation can cut short
 //   stop_group               cancel + wait for work on threads you don't own
+//   worker_group             an object's background jobs; stop() is a barrier
 //   recorder / replay        fold a recorded run again, effects excluded
 //   timeline / diff          walk a recorded run step by step
 //
@@ -26,6 +27,7 @@
 #include "kernel/mailbox.hpp"
 #include "kernel/pool.hpp"
 #include "kernel/stop_group.hpp"
+#include "kernel/worker_group.hpp"
 #include "kernel/waits.hpp"
 #include "kernel/replay.hpp"
 #include "kernel/run.hpp"
