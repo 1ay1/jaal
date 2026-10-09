@@ -36,6 +36,7 @@
 // you send messages to; guarded<T> is for the few places a lock really is
 // simpler (a cache many workers read).
 
+#include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <condition_variable>
@@ -121,6 +122,27 @@ public:
         --waiters_;
         Notify on_exit{*this};
         return f(value_, std::move(args)...);
+    }
+
+    /// wait_with, bounded: wait up to `d` for pred, then run f under the same
+    /// lock either way. Returns f's result and whether pred held, so a caller
+    /// that wants "news, or whatever there is after 5s" needs no poll loop.
+    template <class Rep, class Period, class P, class F, class... Args>
+    auto wait_with_for(std::chrono::duration<Rep, Period> d, P pred, F f, Args... args)
+        -> std::pair<std::invoke_result_t<F&, T&, Args&&...>, bool> {
+        check<F, T&, Args...>();
+        static_assert(detail::guard::captureless<P>,
+                      "jaal: guarded<T>::wait_with_for takes a CAPTURELESS predicate");
+        static_assert(std::is_same_v<std::invoke_result_t<P&, const T&, const Args&...>, bool>,
+                      "jaal: guarded<T>::wait_with_for: the predicate is bool(const T&, const Args&...)");
+        std::unique_lock lk(m_);
+        ++waiters_;
+        const bool held = cv_.wait_for(lk, d, [&] {
+            return pred(std::as_const(value_), std::as_const(args)...);
+        });
+        --waiters_;
+        Notify on_exit{*this};
+        return {f(value_, std::move(args)...), held};
     }
 
     /// Non-blocking forms: run f only if the lock is free right now, else

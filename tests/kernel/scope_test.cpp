@@ -273,6 +273,27 @@ static int guarded_tests() {
         worker.join();
         if (sum.load() != 5050) return 207;
     }
+
+    // wait_with_for: gives up after the budget with pred false, and wakes
+    // early (pred true) the moment a writer makes it hold.
+    {
+        using namespace std::chrono_literals;
+        static jaal::guarded<int> v(0);
+        const auto t0 = std::chrono::steady_clock::now();
+        auto [got, held] = v.wait_with_for(50ms,
+            [](const int& x) { return x > 0; }, [](int& x) { return x; });
+        const auto waited = std::chrono::steady_clock::now() - t0;
+        if (held || got != 0 || waited < 40ms) return 208;
+
+        std::jthread writer([] {
+            std::this_thread::sleep_for(20ms);
+            v.with([](int& x) { x = 7; });
+        });
+        const auto t1 = std::chrono::steady_clock::now();
+        auto [got2, held2] = v.wait_with_for(5s,
+            [](const int& x) { return x > 0; }, [](int& x) { return x; });
+        if (!held2 || got2 != 7 || std::chrono::steady_clock::now() - t1 > 2s) return 209;
+    }
     return 0;
 }
 
