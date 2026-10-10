@@ -48,6 +48,7 @@
 
 #include "../core/sendable.hpp"
 #include "../core/sync.hpp"
+#include "lock_order.hpp"
 
 namespace jaal {
 
@@ -75,6 +76,13 @@ public:
         requires std::is_constructible_v<T, Args...>
     explicit guarded(Args&&... args) : value_(std::forward<Args>(args)...) {}
 
+    /// A guarded whose body takes other locks: give it a level below theirs
+    /// (kernel/lock_order.hpp). The default is a leaf, taken last.
+    template <class... Args>
+        requires std::is_constructible_v<T, Args...>
+    explicit guarded(lock_level lv, Args&&... args)
+        : value_(std::forward<Args>(args)...), level_(lv) {}
+
     guarded(const guarded&)            = delete;
     guarded& operator=(const guarded&) = delete;
     guarded(guarded&&)                 = delete;
@@ -85,7 +93,9 @@ public:
     template <class F, class... Args>
     auto with(F f, Args... args) -> std::invoke_result_t<F&, T&, Args&&...> {
         check<F, T&, Args...>();
+        kernel::lock_order::before_acquire(this, level_);
         std::unique_lock lk(m_);
+        kernel::lock_order::hold h{this, level_};
         Notify on_exit{*this};   // a writer may have made someone's predicate true
         return f(value_, std::move(args)...);
     }
@@ -95,7 +105,9 @@ public:
     template <class F, class... Args>
     auto read(F f, Args... args) const -> std::invoke_result_t<F&, const T&, Args&&...> {
         check<F, const T&, Args...>();
+        kernel::lock_order::before_acquire(this, level_);
         std::shared_lock lk(m_);
+        kernel::lock_order::hold h{this, level_};
         return f(std::as_const(value_), std::move(args)...);
     }
 
@@ -117,7 +129,9 @@ public:
                       "jaal: guarded<T>::wait_with takes a CAPTURELESS predicate");
         static_assert(std::is_same_v<std::invoke_result_t<P&, const T&, const Args&...>, bool>,
                       "jaal: guarded<T>::wait_with: the predicate is bool(const T&, const Args&...)");
+        kernel::lock_order::require_no_locks_held("guarded<T>::wait_with");
         std::unique_lock lk(m_);
+        kernel::lock_order::hold h{this, level_};
         ++waiters_;
         cv_.wait(lk, [&] { return pred(std::as_const(value_), std::as_const(args)...); });
         --waiters_;
@@ -136,7 +150,9 @@ public:
                       "jaal: guarded<T>::wait_with_for takes a CAPTURELESS predicate");
         static_assert(std::is_same_v<std::invoke_result_t<P&, const T&, const Args&...>, bool>,
                       "jaal: guarded<T>::wait_with_for: the predicate is bool(const T&, const Args&...)");
+        kernel::lock_order::require_no_locks_held("guarded<T>::wait_with_for");
         std::unique_lock lk(m_);
+        kernel::lock_order::hold h{this, level_};
         ++waiters_;
         const bool held = cv_.wait_for(lk, d, [&] {
             return pred(std::as_const(value_), std::as_const(args)...);
@@ -155,6 +171,7 @@ public:
         check<F, T&, Args...>();
         std::unique_lock lk(m_, std::try_to_lock);
         if (!lk.owns_lock()) return std::nullopt;
+        kernel::lock_order::hold h{this, level_};
         Notify on_exit{*this};
         return f(value_, std::move(args)...);
     }
@@ -165,6 +182,7 @@ public:
         check<F, const T&, Args...>();
         std::shared_lock lk(m_, std::try_to_lock);
         if (!lk.owns_lock()) return std::nullopt;
+        kernel::lock_order::hold h{this, level_};
         return f(std::as_const(value_), std::move(args)...);
     }
 
@@ -206,6 +224,7 @@ private:
     std::condition_variable_any   cv_;
     std::size_t                   waiters_ = 0;   // under m_
     T                             value_{};
+    lock_level                    level_{};
 };
 
 // A guarded<T> owns a lock; it never crosses into another lock's body.

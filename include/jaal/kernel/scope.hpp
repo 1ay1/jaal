@@ -62,6 +62,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "lock_order.hpp"
 #include "waits.hpp"
 
 namespace jaal {
@@ -238,6 +239,9 @@ private:
 /// exception AFTER everything is joined.
 template <class B>
 auto scope(std::stop_token parent, B&& block) {
+    // scope() joins its helpers before returning; a helper that needs a lock
+    // this thread holds would never finish.
+    kernel::lock_order::require_no_locks_held("scope()");
     nursery n(std::move(parent));
     using R = std::invoke_result_t<B&, nursery&>;
     std::exception_ptr block_error;

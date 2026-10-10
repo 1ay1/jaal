@@ -49,7 +49,7 @@ class worker_group {
     void post(F body, Args... args) { pool_.post_isolated(body, std::move(args)...); }
 
     /// Barrier: when this returns, no job posted here is running. Idempotent.
-    void stop() noexcept { (void)pool_.shutdown(pool::no_deadline); }
+    void stop() noexcept { (void)pool_.shutdown_noexcept(pool::no_deadline); }
 
   private:
     pool pool_;

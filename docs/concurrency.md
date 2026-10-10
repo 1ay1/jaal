@@ -523,6 +523,31 @@ cache.with([](auto& m, std::string k) { ++m[k]; }, key);
   the same way (the ban-list rejects mutable statics outside jaal).
 - Used rarely. The preferred answer is always an owner you send messages to.
 
+#### Deadlocks are errors at the call
+
+A deadlock needs a thread holding a lock while it waits for something. The
+body rule already stops a `with()` from naming a second guarded; what's left
+is one reached through a global or static, or a blocking wait under a lock.
+Both are checked on every call (kernel/lock_order.hpp), on one thread, with
+no timing involved:
+
+- **Levels.** A plain `guarded` is a leaf: taken last, never held with
+  another leaf. A guarded whose body takes others is built with a
+  `lock_level` below theirs. Taking a lock at or below one you hold throws
+  `lock_order_error`, naming both. So does re-entering the same guarded.
+  A cycle needs one of those, so none can form.
+- **No waiting under a lock.** `wait_with`, `pool::shutdown`, `scope()` and
+  `worker_group::stop` refuse to block while the thread holds a guarded.
+- **No self-join.** Shutting a pool down from one of its own jobs throws.
+
+Noexcept paths (destructors, `worker_group::stop`) print the reason and
+abort instead. A forked child that keeps running C++ calls
+`forget_held_after_fork()` first.
+
+What this can't see: a raw `std::mutex` (banned outside jaal by the lint),
+and a wait on something that isn't a jaal primitive (a socket read). Those
+stay a matter of care.
+
 ### 4.9 `once<T>` and `latch`-style results
 
 For P4 (single-flight offload with a result slot), jaal gives the pieces so

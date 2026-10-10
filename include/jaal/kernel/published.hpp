@@ -74,6 +74,18 @@ public:
 #endif
     }
 
+    /// publish(), returning the old object instead of dropping it here.
+    /// Use it when destroying the old one blocks (it joins threads) and this
+    /// runs under a guarded: hold the result and let it go after the lock.
+    [[nodiscard]] std::shared_ptr<T> replace(std::shared_ptr<T> next) noexcept {
+#if JAAL_ATOMIC_SHARED_PTR
+        return slot_.exchange(std::move(next), std::memory_order_acq_rel);
+#else
+        std::lock_guard lk(m_);
+        return std::exchange(slot_, std::move(next));
+#endif
+    }
+
     /// Publish `next` only if `expected` is still current. Returns false
     /// (publishing nothing) when another writer got there first, so a
     /// rebuild can re-check against what that writer published.

@@ -55,6 +55,7 @@
 
 #include "../core/sendable.hpp"
 #include "../core/unique_function.hpp"
+#include "lock_order.hpp"
 
 namespace jaal::kernel {
 
@@ -129,7 +130,14 @@ public:
     pool(const pool&)            = delete;
     pool& operator=(const pool&) = delete;
 
-    ~pool() { shutdown(); }
+    ~pool() { (void)shutdown_noexcept(std::chrono::seconds(2)); }
+
+    /// shutdown() for noexcept callers (destructors, worker_group::stop): a
+    /// self-join or a lock held aborts with the reason instead of throwing.
+    std::size_t shutdown_noexcept(std::optional<std::chrono::milliseconds> grace) noexcept {
+        lock_order::check_or_abort(c_.get(), "pool shutdown");
+        return shutdown_unchecked(grace);
+    }
 
     /// Queue `body(stop_token, args...)` for the shared workers. The body is
     /// captureless and the args Sendable (see JobBody).
@@ -293,6 +301,15 @@ public:
 
     std::size_t shutdown(std::optional<std::chrono::milliseconds> grace
                              = std::chrono::seconds(2)) {
+        // Both would wait forever (no_deadline) or for the whole grace for
+        // something that can't happen while we wait. Errors, every time.
+        lock_order::require_not_own_job(c_.get(), "pool::shutdown");
+        lock_order::require_no_locks_held("pool::shutdown");
+        return shutdown_unchecked(grace);
+    }
+
+private:
+    std::size_t shutdown_unchecked(std::optional<std::chrono::milliseconds> grace) noexcept {
         std::vector<std::jthread> workers;
         {
             std::lock_guard lk(c_->m);
@@ -341,6 +358,7 @@ public:
         return abandoned;
     }
 
+public:
     [[nodiscard]] std::size_t worker_count() const {
         std::lock_guard lk(c_->m);
         return workers_.size();
@@ -440,6 +458,7 @@ private:
 
     static void run_guarded(core& c, job& j, std::stop_token st) noexcept {
         try {
+            lock_order::running_job here{&c};
             j(std::move(st));
         } catch (...) {
             error_fn cb;

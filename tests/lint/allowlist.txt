@@ -54,6 +54,8 @@ kernel/scope.hpp: thread atomic
 # that would deadlock (a scope helper sending to the loop that joins it).
 # Same as mailbox.hpp: it names std::thread::id, it never spawns a thread.
 kernel/waits.hpp: thread_local
+# lock_order.hpp: per-thread record of held guarded locks and running jobs.
+kernel/lock_order.hpp: thread_local
 # guarded<T>: the shared_mutex it wraps.
 kernel/guarded.hpp: mutex
 # delay_for: condition_variable_any needs a Lockable to wait on, so the mutex
