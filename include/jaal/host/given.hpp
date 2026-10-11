@@ -309,4 +309,26 @@ private:
     std::vector<std::string>  failures_;
 };
 
+/// Run every task in `c` inline, on this thread, and return the messages they
+/// sent. For a test that folds by hand instead of through given<P>. Other
+/// effects are ignored; a task that throws is rethrown.
+template <class Msg, class R>
+[[nodiscard]] std::vector<Msg> run_tasks_inline(basic_cmd<Msg, R> c) {
+    using cmd_type = basic_cmd<Msg, R>;
+    std::vector<Msg> got;
+    std::visit([&]<class X>(X&& x) {
+        using U = std::remove_cvref_t<X>;
+        if constexpr (std::same_as<U, typename cmd_type::Batch>) {
+            for (auto& inner : x.cmds)
+                for (auto& m : run_tasks_inline(std::move(inner))) got.push_back(std::move(m));
+        } else if constexpr (in_row<fx::task, R> && std::same_as<U, payload_t<fx::task, Msg>>) {
+            auto box = std::make_shared<detail::given::collect<Msg>>();
+            auto sink = sink_access::make<Msg>(std::weak_ptr<detail::mailbox_iface<Msg>>(box));
+            std::move(x.thunk).run(std::move(sink), std::stop_token{});
+            for (auto& m : box->got) got.push_back(std::move(m));
+        }
+    }, std::move(c.inner));
+    return got;
+}
+
 }  // namespace jaal
