@@ -17,12 +17,17 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__linux__)
 #  include <sys/syscall.h>
 #endif
+
+// POSIX requires the program to declare environ itself; glibc leaks it from
+// <unistd.h> under _GNU_SOURCE, macOS and the BSDs do not.
+extern "C" char** environ;
 
 namespace jaal::platform {
 namespace {
@@ -278,7 +283,18 @@ result<posix_process> posix_process::spawn(const process_spec& spec) {
         }
 
         if (envp.empty()) ::execvp(argv[0], argv.data());
-        else              ::execvpe(argv[0], argv.data(), envp.data());
+        else {
+#if defined(__linux__)
+            ::execvpe(argv[0], argv.data(), envp.data());
+#else
+            // No execvpe off glibc. Swapping environ is a single pointer
+            // store -- async-signal-safe -- and execvp both searches PATH
+            // and hands the new environment to the program. PATH lookup
+            // then uses the child's PATH, same as execvpe on glibc.
+            environ = envp.data();
+            ::execvp(argv[0], argv.data());
+#endif
+        }
         die(errno);
     }
 
@@ -421,8 +437,23 @@ result<exit_status> posix_process::reap() {
         return std::unexpected(error::make(std::errc::no_such_process,
                                            "posix_process: nothing to reap"));
     int st = 0;
+    // Off Linux the exit signal is the death pipe, and it fires when the
+    // child's last copy of the write end closes -- during exit, slightly
+    // BEFORE the kernel makes the pid waitable. A WNOHANG reap right after
+    // the pipe fires can therefore see "still running" for a child that is
+    // already gone (macOS hits this every few runs; a caller that marks the
+    // child reaped on the strength of the signal then loses the exit code).
+    // So when the inexact signal has fired, the exit is imminent: block for
+    // it. A pidfd (exit_exact) fires only once the child is waitable, so
+    // Linux keeps the pure non-blocking reap.
+    const bool death_fired = [&] {
+        if (p_->exit_exact || !is_valid(p_->death.r)) return false;
+        pollfd pfd{p_->death.r, POLLIN, 0};
+        return ::poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLIN | POLLHUP));
+    }();
+    const int flags = death_fired ? 0 : WNOHANG;
     for (;;) {
-        const auto r = ::waitpid(p_->pid, &st, WNOHANG);
+        const auto r = ::waitpid(p_->pid, &st, flags);
         if (r < 0 && errno == EINTR) continue;
         if (r == 0)
             return std::unexpected(error::make(std::errc::operation_would_block,
