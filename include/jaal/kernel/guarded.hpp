@@ -1,40 +1,41 @@
 #pragma once
-// jaal::guarded<T> — when there has to be a lock, make the unsafe forms
-// impossible to write.
+// jaal::guarded<T, R> — shared state that is only reachable under its lock,
+// in an order the compiler checks.
 //
-//   jaal::guarded<std::map<std::string, int>> cache;
-//   cache.with([](auto& m, std::string k) { ++m[k]; }, key);         // exclusive
-//   int n = cache.read([](const auto& m) { return int(m.size()); });   // shared
+//   using cache_rank = jaal::rank<40, "app.cache">;
+//   jaal::guarded<std::map<std::string, int>, cache_rank> cache;
+//
+//   void bump(const jaal::below<cache_rank>& cap, std::string k) {
+//       cache.with(cap, [](const auto& held, auto& m, std::string k) { ++m[k]; }, std::move(k));
+//   }
 //
 // Rules, each enforced by the compiler:
 //
-//   * The data is ONLY reachable while the lock is held. There's no get(),
+//   * The data is ONLY reachable while the lock is held. There is no get(),
 //     no raw mutex, nothing to forget to lock.
 //
-//   * Nothing escapes the lock. The function's result must be Sendable,
-//     which rules out references, pointers and views into T. You get a copy
-//     out, never a handle in.
+//   * Nothing escapes the lock. The body's result must be Sendable, which
+//     rules out references, pointers and views into T.
 //
-//   * NO LOCK CAN BE TAKEN WHILE ANOTHER IS HELD. Every lock-order deadlock
-//     starts with a thread holding lock A while taking lock B. Inside
-//     with()/read(), code can only reach what it was GIVEN: the function is
-//     captureless, and its extra arguments must be Sendable. A guarded<U>
-//     (it owns a mutex), a pointer or reference to one, or a Sink with a
-//     blocking mailbox behind it... none of those can be passed in:
-//       - a capture is rejected (the function must be captureless)
-//       - guarded<U> is not Sendable, and neither is a pointer, reference
-//         or reference_wrapper to anything
-//     So the second lock has no name inside the first. The deadlock can't
-//     be written, rather than being caught at runtime.
+//   * LOCKS ARE TAKEN IN RANK ORDER, OR NOT AT ALL. Taking the lock needs a
+//     capability proving the thread holds only lower-ranked locks
+//     (core/capability.hpp): `unlocked`, a `held<Q>` with Q < R, or a
+//     `below<S>` with S <= R. The body receives `held<R>`, which is the ONLY
+//     capability it can reach: it is captureless, and its arguments must be
+//     Sendable, which capabilities never are. So a body can take a further
+//     lock only if that lock ranks above R, and a leaf's body can take none.
 //
-//     The one way round it is a global or a static (a captureless function
-//     can still name those). The ban-list (tests/lint) rejects mutable
-//     statics and globals outside jaal's own files, which is how the same
-//     hole is closed for task bodies.
+//   * NO BLOCKING WAIT UNDER A LOCK. wait_with needs `unlocked`.
 //
-// Prefer not to need this. The first answer to shared state is an owner
-// you send messages to; guarded<T> is for the few places a lock really is
-// simpler (a cache many workers read).
+// A body may take its `held<R>` as a leading parameter or ignore it:
+//
+//   g.with(cap, [](T& t) { ... });                              // takes nothing else
+//   g.with(cap, [](const jaal::held<R>& h, T& t) { ... });      // may take ranks > R
+//
+// Prefer not to need this. The first answer to shared state is an owner you
+// send messages to, and a value read far more often than it changes is a
+// published<T> (no lock, no rank). guarded is for the few places a lock
+// really is simpler.
 
 #include <chrono>
 #include <concepts>
@@ -46,9 +47,10 @@
 #include <type_traits>
 #include <utility>
 
+#include "../core/capability.hpp"
+#include "../core/join_free.hpp"
 #include "../core/sendable.hpp"
 #include "../core/sync.hpp"
-#include "lock_order.hpp"
 
 namespace jaal {
 
@@ -59,157 +61,217 @@ template <class R>
 concept escapable = std::is_void_v<R> || Sendable<std::remove_cv_t<R>>;
 
 // No captures: an empty, default-constructible callable is a lambda with an
-// empty capture list (or a stateless function object). That's what makes
-// "the function can only reach its arguments" true.
+// empty capture list (or a stateless function object). That is what makes
+// "the body can only reach its arguments" true.
 template <class F>
 concept captureless = std::is_empty_v<std::remove_cvref_t<F>>
                    && std::default_initializable<std::remove_cvref_t<F>>;
 
+// A body either takes the lock's capability first, or doesn't.
+template <class F, class Cap, class Ref, class... Args>
+concept takes_cap = std::invocable<F&, const Cap&, Ref, Args&&...>;
+template <class F, class Cap, class Ref, class... Args>
+concept plain_body = !takes_cap<F, Cap, Ref, Args...> && std::invocable<F&, Ref, Args&&...>;
+
+template <class F, class Cap, class Ref, class... Args>
+struct body_result;
+template <class F, class Cap, class Ref, class... Args>
+    requires takes_cap<F, Cap, Ref, Args...>
+struct body_result<F, Cap, Ref, Args...> {
+    using type = std::invoke_result_t<F&, const Cap&, Ref, Args&&...>;
+};
+template <class F, class Cap, class Ref, class... Args>
+    requires plain_body<F, Cap, Ref, Args...>
+struct body_result<F, Cap, Ref, Args...> {
+    using type = std::invoke_result_t<F&, Ref, Args&&...>;
+};
+template <class F, class Cap, class Ref, class... Args>
+using body_result_t = typename body_result<F, Cap, Ref, Args...>::type;
+
+template <class F, class Cap, class Ref, class... Args>
+decltype(auto) call(F& f, Ref ref, Args&... args) {
+    if constexpr (takes_cap<F, Cap, Ref, Args...>) {
+        const Cap h = cap_access::mint<typename Cap::top>();
+        return f(h, static_cast<Ref>(ref), std::move(args)...);
+    } else {
+        return f(static_cast<Ref>(ref), std::move(args)...);
+    }
+}
+
 }  // namespace detail::guard
 
-template <class T>
+template <class T, class R = leaf>
+    requires Rank<R>
 class guarded {
+    // Destroying T inside a body (`v = {}`, an erase, a reset) must never
+    // wait for another thread: that wait would be under this lock, and a
+    // destructor can't be asked for `unlocked`.
+    static_assert(JoinFree<T>,
+                  "jaal: guarded<T> can't own a pool, worker_group or any type whose "
+                  "destructor joins threads (jaal::joins_on_destroy): replacing or "
+                  "dropping it inside a lock body would wait under the lock. Keep it "
+                  "outside, and stop() it with `unlocked` first.");
+
 public:
-    guarded() = default;
+    using rank       = R;
+    using value_type = T;
+    using held_cap   = held<R>;
+    using entry_cap  = below<R>;
+
+    guarded() { warm(); }
 
     template <class... Args>
         requires std::is_constructible_v<T, Args...>
-    explicit guarded(Args&&... args) : value_(std::forward<Args>(args)...) {}
+    explicit guarded(std::in_place_t, Args&&... args) : value_(std::forward<Args>(args)...) {
+        warm();
+    }
 
-    /// A guarded whose body takes other locks: give it a level below theirs
-    /// (kernel/lock_order.hpp). The default is a leaf, taken last.
-    template <class... Args>
-        requires std::is_constructible_v<T, Args...>
-    explicit guarded(lock_level lv, Args&&... args)
-        : value_(std::forward<Args>(args)...), level_(lv) {}
+    template <class U>
+        requires(std::is_constructible_v<T, U> && !std::same_as<std::remove_cvref_t<U>, std::in_place_t>
+                 && !std::same_as<std::remove_cvref_t<U>, guarded>)
+    explicit guarded(U&& init) : value_(std::forward<U>(init)) { warm(); }
 
     guarded(const guarded&)            = delete;
     guarded& operator=(const guarded&) = delete;
     guarded(guarded&&)                 = delete;
     guarded& operator=(guarded&&)      = delete;
 
-    /// Exclusive access: f(T&, args...). f is captureless; args are moved
-    /// in and must be Sendable; the result must not point into T.
+    /// Exclusive access: body([held<R>,] T&, args...). The caller proves it
+    /// holds only lower-ranked locks; the body is captureless, its arguments
+    /// are moved in and Sendable, and its result does not point into T.
     template <class F, class... Args>
-    auto with(F f, Args... args) -> std::invoke_result_t<F&, T&, Args&&...> {
+    auto with(const below<R>&, F f, Args... args)
+        -> detail::guard::body_result_t<F, held_cap, T&, Args...> {
         check<F, T&, Args...>();
-        kernel::lock_order::before_acquire(this, level_);
         std::unique_lock lk(m_);
-        kernel::lock_order::hold h{this, level_};
         Notify on_exit{*this};   // a writer may have made someone's predicate true
-        return f(value_, std::move(args)...);
+        return detail::guard::call<F, held_cap, T&>(f, value_, args...);
     }
 
-    /// Shared access: f(const T&, args...). Many readers at once, no
-    /// writer. Same rules as with().
+    /// Shared access: body([held<R>,] const T&, args...). Many readers at
+    /// once. Same rules as with().
     template <class F, class... Args>
-    auto read(F f, Args... args) const -> std::invoke_result_t<F&, const T&, Args&&...> {
+    auto read(const below<R>&, F f, Args... args) const
+        -> detail::guard::body_result_t<F, held_cap, const T&, Args...> {
         check<F, const T&, Args...>();
-        kernel::lock_order::before_acquire(this, level_);
         std::shared_lock lk(m_);
-        kernel::lock_order::hold h{this, level_};
-        return f(std::as_const(value_), std::move(args)...);
+        return detail::guard::call<F, held_cap, const T&>(f, std::as_const(value_), args...);
     }
 
-    /// Block until `pred(const T&, args...)` holds, then run f(T&, args...)
-    /// under the same lock. Every with() wakes waiters, so a writer never has
-    /// to remember to notify. pred is captureless too and sees the same
-    /// arguments as f, so "wait for MY entry" needs no capture:
+    /// Block until pred(const T&, const args&...) holds, then run
+    /// body([held<R>,] T&, args...) under the same lock. A wait can only be
+    /// for ANOTHER thread, and that thread may need any lock this one holds,
+    /// so it needs `unlocked`: a wait with any lock held does not compile.
     ///
-    ///     auto c = st.wait_with(
+    ///     auto c = st.wait_with(cap,
     ///         [](const S& s, Id id) { return s.done.contains(id); },
     ///         [](S& s, Id id) { return take(s.done, id); }, my_id);
-    ///
-    /// This is a worker's "sleep until there's work" without a hand-paired
-    /// mutex + condvar.
     template <class P, class F, class... Args>
-    auto wait_with(P pred, F f, Args... args) -> std::invoke_result_t<F&, T&, Args&&...> {
+    auto wait_with(const unlocked&, P pred, F f, Args... args)
+        -> detail::guard::body_result_t<F, held_cap, T&, Args...> {
         check<F, T&, Args...>();
-        static_assert(detail::guard::captureless<P>,
-                      "jaal: guarded<T>::wait_with takes a CAPTURELESS predicate");
-        static_assert(std::is_same_v<std::invoke_result_t<P&, const T&, const Args&...>, bool>,
-                      "jaal: guarded<T>::wait_with: the predicate is bool(const T&, const Args&...)");
-        kernel::lock_order::require_no_locks_held("guarded<T>::wait_with");
+        check_pred<P, Args...>();
         std::unique_lock lk(m_);
-        kernel::lock_order::hold h{this, level_};
         ++waiters_;
         cv_.wait(lk, [&] { return pred(std::as_const(value_), std::as_const(args)...); });
         --waiters_;
         Notify on_exit{*this};
-        return f(value_, std::move(args)...);
+        return detail::guard::call<F, held_cap, T&>(f, value_, args...);
     }
 
-    /// wait_with, bounded: wait up to `d` for pred, then run f under the same
-    /// lock either way. Returns f's result and whether pred held, so a caller
-    /// that wants "news, or whatever there is after 5s" needs no poll loop.
+    /// wait_with, bounded: wait up to `d` for pred, then run the body under
+    /// the same lock either way. Returns its result and whether pred held.
     template <class Rep, class Period, class P, class F, class... Args>
-    auto wait_with_for(std::chrono::duration<Rep, Period> d, P pred, F f, Args... args)
-        -> std::pair<std::invoke_result_t<F&, T&, Args&&...>, bool> {
+    auto wait_with_for(const unlocked&, std::chrono::duration<Rep, Period> d, P pred, F f,
+                       Args... args)
+        -> std::pair<detail::guard::body_result_t<F, held_cap, T&, Args...>, bool> {
         check<F, T&, Args...>();
-        static_assert(detail::guard::captureless<P>,
-                      "jaal: guarded<T>::wait_with_for takes a CAPTURELESS predicate");
-        static_assert(std::is_same_v<std::invoke_result_t<P&, const T&, const Args&...>, bool>,
-                      "jaal: guarded<T>::wait_with_for: the predicate is bool(const T&, const Args&...)");
-        kernel::lock_order::require_no_locks_held("guarded<T>::wait_with_for");
+        check_pred<P, Args...>();
         std::unique_lock lk(m_);
-        kernel::lock_order::hold h{this, level_};
         ++waiters_;
-        const bool held = cv_.wait_for(lk, d, [&] {
+        const bool ok = cv_.wait_for(lk, d, [&] {
             return pred(std::as_const(value_), std::as_const(args)...);
         });
         --waiters_;
         Notify on_exit{*this};
-        return {f(value_, std::move(args)...), held};
+        return {detail::guard::call<F, held_cap, T&>(f, value_, args...), ok};
     }
 
-    /// Non-blocking forms: run f only if the lock is free right now, else
-    /// return nullopt without waiting. For a reader that must never stall
-    /// (a status line drawn every frame). f must return a value.
+    /// Non-blocking forms: run the body only if the lock is free right now,
+    /// else return nullopt. For a reader that must never stall (a status
+    /// line drawn every frame). The body must return a value.
     template <class F, class... Args>
-    auto try_with(F f, Args... args)
-        -> std::optional<std::invoke_result_t<F&, T&, Args&&...>> {
+    auto try_with(const below<R>&, F f, Args... args)
+        -> std::optional<detail::guard::body_result_t<F, held_cap, T&, Args...>> {
         check<F, T&, Args...>();
         std::unique_lock lk(m_, std::try_to_lock);
         if (!lk.owns_lock()) return std::nullopt;
-        kernel::lock_order::hold h{this, level_};
         Notify on_exit{*this};
-        return f(value_, std::move(args)...);
+        return detail::guard::call<F, held_cap, T&>(f, value_, args...);
     }
 
     template <class F, class... Args>
-    auto try_read(F f, Args... args) const
-        -> std::optional<std::invoke_result_t<F&, const T&, Args&&...>> {
+    auto try_read(const below<R>&, F f, Args... args) const
+        -> std::optional<detail::guard::body_result_t<F, held_cap, const T&, Args...>> {
         check<F, const T&, Args...>();
         std::shared_lock lk(m_, std::try_to_lock);
         if (!lk.owns_lock()) return std::nullopt;
-        kernel::lock_order::hold h{this, level_};
-        return f(std::as_const(value_), std::move(args)...);
+        return detail::guard::call<F, held_cap, const T&>(f, std::as_const(value_), args...);
     }
 
 private:
     // One place, one message per rule, in the order a reader should fix
-    // them. static_assert inside the body (rather than a requires-clause)
-    // so the error is the sentence, not "no matching function".
+    // them. static_assert in the body (not a requires-clause) so the error
+    // is the sentence, not "no matching function".
     template <class F, class Ref, class... Args>
     static consteval void check() {
         static_assert(detail::guard::captureless<F>,
-                      "jaal: guarded<T>::with/read takes a CAPTURELESS function; pass what it "
-                      "needs as arguments after it. (A capture could name a second lock, and "
-                      "holding two locks is how deadlocks start.)");
+                      "jaal: guarded::with/read takes a CAPTURELESS body; pass what it needs "
+                      "as arguments after it. (A capture could reach a lock or a capability "
+                      "the rank check can't see.)");
         static_assert((Sendable<Args> && ...),
-                      "jaal: an argument to guarded<T>::with/read is not Sendable. A pointer, "
-                      "reference or guarded<U> could reach a second lock while this one is "
-                      "held; pass owned values.");
+                      "jaal: an argument to guarded::with/read is not Sendable. A pointer, "
+                      "reference, guarded or capability could reach a second lock out of "
+                      "order; pass owned values.");
         if constexpr (detail::guard::captureless<F> && (Sendable<Args> && ...)) {
-            static_assert(std::invocable<F&, Ref, Args&&...>,
-                          "jaal: guarded<T>::with/read: the function can't be called as "
-                          "f(T&, args...) (read: f(const T&, args...))");
-            if constexpr (std::invocable<F&, Ref, Args&&...>)
-                static_assert(detail::guard::escapable<std::invoke_result_t<F&, Ref, Args&&...>>,
-                              "jaal: guarded<T>::with/read returns something that points into "
-                              "the locked data (a reference, pointer or view); return a copy "
-                              "instead");
+            constexpr bool callable = detail::guard::takes_cap<F, held_cap, Ref, Args...>
+                                   || detail::guard::plain_body<F, held_cap, Ref, Args...>;
+            static_assert(callable,
+                          "jaal: guarded::with/read: the body can't be called as "
+                          "body(const jaal::held<R>&, T&, args...) or body(T&, args...) "
+                          "(read: const T&)");
+            if constexpr (callable)
+                static_assert(detail::guard::escapable<
+                                  detail::guard::body_result_t<F, held_cap, Ref, Args...>>,
+                              "jaal: guarded::with/read returns something that points into "
+                              "the locked data (a reference, pointer or view); return a copy");
         }
+    }
+
+    template <class P, class... Args>
+    static consteval void check_pred() {
+        static_assert(detail::guard::captureless<P>,
+                      "jaal: guarded::wait_with takes a CAPTURELESS predicate");
+        static_assert(std::is_same_v<std::invoke_result_t<P&, const T&, const Args&...>, bool>,
+                      "jaal: guarded::wait_with: the predicate is bool(const T&, const Args&...)");
+    }
+
+    // Take the lock once, on the constructing thread, before anyone else can
+    // see this object.
+    //
+    // winpthreads (MinGW/MSYS2) implements PTHREAD_RWLOCK_INITIALIZER, which
+    // libstdc++'s shared_mutex uses, as a sentinel that the FIRST lock call
+    // replaces with a real rwlock -- and that replacement is not thread-safe.
+    // Two threads taking a brand-new shared_mutex at the same instant can
+    // make one of the calls fail, which libstdc++ turns into an assertion
+    // abort (or, without assertions, a lock that silently wasn't taken: a
+    // data race on value_). A fault box made on the loop thread and first
+    // locked by a failing pool worker and the loop at once hit exactly this.
+    // Initialising here, single-threaded, removes the window on every
+    // platform at the cost of one uncontended lock pair per guarded.
+    void warm() noexcept {
+        m_.lock();
+        m_.unlock();
     }
 
     // Wakes wait_with() callers after any exclusive access, and only when
@@ -220,16 +282,16 @@ private:
         ~Notify() { if (g.waiters_ != 0) g.cv_.notify_all(); }
     };
 
-    mutable std::shared_mutex     m_;
-    std::condition_variable_any   cv_;
-    std::size_t                   waiters_ = 0;   // under m_
-    T                             value_{};
-    lock_level                    level_{};
+    mutable std::shared_mutex   m_;
+    std::condition_variable_any cv_;
+    std::size_t                 waiters_ = 0;   // under m_
+    T                           value_{};
 };
 
-// A guarded<T> owns a lock; it never crosses into another lock's body.
-template <class T> inline constexpr bool sendable_opt_out<guarded<T>> = true;
+// A guarded owns a mutex and is a process-wide slot: it never moves between
+// threads, and nothing can be passed into a lock body that reaches one.
+template <class T, class R> inline constexpr bool sendable_opt_out<guarded<T, R>> = true;
 // Every access to the value goes through the lock.
-template <class T> inline constexpr bool sync_opt_in<guarded<T>> = true;
+template <class T, class R> inline constexpr bool sync_opt_in<guarded<T, R>> = true;
 
 }  // namespace jaal

@@ -183,12 +183,17 @@ private:
     // Set by the kernel's wake (a worker posted, a fault arrived); cleared
     // by idle_for_a_moment. Shared so a late wake after ~headless is safe.
     std::function<void()> waker() {
-        return [w = woken_] { w->with([](bool& b) { b = true; }); };
+        // Called from a Sink post, which may happen inside a user lock's
+        // body. The lock is terminal (its body flips a bool), so that is safe.
+        return [w = woken_] { w->with(cap_access::terminal(), [](bool& b) { b = true; }); };
     }
 
     bool idle_for_a_moment() {
         // Give pool workers a moment to post. Wakes the instant one does.
-        const bool news = woken_->wait_with_for(std::chrono::milliseconds(20),
+        // This runs on the test's own thread, between steps: the kernel is
+        // not stepping and the test holds no lock.
+        const bool news = woken_->wait_with_for(cap_access::fresh_thread(),
+            std::chrono::milliseconds(20),
             [](const bool& b) { return b; },
             [](bool& b) { return std::exchange(b, false); }).first;
         k_.step(rec_);

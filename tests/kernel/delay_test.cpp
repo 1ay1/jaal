@@ -54,7 +54,7 @@ long long ms_since(clk::time_point t0) {
 
 }  // namespace
 
-int main() {
+static int run(const jaal::unlocked& cap) {
     // 1. A delay that is allowed to elapse reports "not stopped", and did
     //    actually block. Kept short: this one is on the critical path of the
     //    test's own runtime.
@@ -117,7 +117,7 @@ int main() {
                 f->finished = true;
             }, f);
             while (!f->entered.load()) std::this_thread::yield();
-            const std::size_t stuck = p.shutdown(jaal::kernel::pool::no_deadline);
+            const std::size_t stuck = p.shutdown(cap, jaal::kernel::pool::no_deadline);
             ok(stuck == 0, "no_deadline abandons nothing");
             ok(f->finished.load(),
                "no_deadline waited for a job that ignored its stop_token");
@@ -135,7 +135,7 @@ int main() {
         }, f);
         while (!f->entered.load()) std::this_thread::yield();
         const auto        t0    = clk::now();
-        const std::size_t stuck = p.shutdown(50ms);
+        const std::size_t stuck = p.shutdown(cap, 50ms);
         ok(stuck > 0, "a short grace reports what it abandoned");
         ok(ms_since(t0) < 1500, "and returns without waiting the job out");
     }
@@ -162,7 +162,7 @@ int main() {
            "dropping a submit() future does NOT join the job");
         ok(!f->finished.load(), "and the job really was still running");
         // The job is still owned: shutdown waits for it.
-        (void)p.shutdown(jaal::kernel::pool::no_deadline);
+        (void)p.shutdown(cap, jaal::kernel::pool::no_deadline);
         ok(f->finished.load(), "an abandoned result still runs to completion");
     }
 
@@ -186,7 +186,7 @@ int main() {
     // forever for a job nobody will run.
     {
         jaal::kernel::pool p;
-        (void)p.shutdown();
+        (void)p.shutdown(cap);
         auto fut   = p.submit([](std::stop_token) { return 1; });
         bool threw = false;
         try { (void)fut.get(); } catch (const std::future_error&) { threw = true; }
@@ -195,4 +195,8 @@ int main() {
 
     if (failures == 0) std::puts("delay: all checks OK");
     return failures == 0 ? 0 : 1;
+}
+
+int main() {
+    return jaal::thread_root([](const jaal::unlocked& cap) { return run(cap); });
 }

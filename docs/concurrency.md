@@ -484,69 +484,104 @@ at once. Two helpers both doing `++count` on a captured `int` is a race.
 TSan catches it (Level B). The discipline is: helpers return values through
 `join()`, and don't write to shared locals.
 
-### 4.8 `guarded<T>`: when there must be a lock
+### 4.8 `guarded<T, R>`: when there must be a lock
 
 Sometimes a lock is the right answer (a cache shared by many workers).
-`guarded<T>` makes the unsafe forms impossible to write:
+`guarded<T, R>` makes the unsafe forms impossible to write, and its rank `R`
+makes lock order a type:
 
 ```cpp
-template <class T>
-class guarded {
-public:
-    // f is captureless; args are Sendable, moved in; the result is Sendable.
-    template <class F, class... Args> auto with(F f, Args... args);         // exclusive
-    template <class F, class... Args> auto read(F f, Args... args) const;   // shared
-private:
-    mutable std::shared_mutex m_;
-    T value_;
-};
+using cache_rank = jaal::rank<40, "app.cache">;
+jaal::guarded<std::map<std::string, int>, cache_rank> cache;
 
-cache.with([](auto& m, std::string k) { ++m[k]; }, key);
+void bump(const jaal::below<cache_rank>& cap, std::string k) {
+    cache.with(cap, [](auto& m, std::string k) { ++m[k]; }, std::move(k));
+}
 ```
 
 - **The data is only reachable while the lock is held.** There's no getter,
   no raw mutex, nothing to forget to lock.
-- **Nothing escapes the lock.** The function's result must be Sendable,
-  which bans references, pointers and views into `T`. You get a copy out,
-  never a handle in.
-- **No second lock can be taken inside the first (Level A).** Every
-  lock-order deadlock starts with a thread holding lock A while taking lock
-  B. Inside `with`/`read` the code can only reach what it was given: the
-  function is captureless (so it can't capture a second `guarded`), and its
-  arguments must be Sendable (and `guarded<U>`, a pointer, a reference or a
-  `reference_wrapper` to one are not). The second lock has no name inside
-  the first. This replaced a debug-only runtime check (it was Level B); the
-  compile-fail tests `guarded_no_nested_capture` and `guarded_no_nested_arg`
-  pin it.
-  The remaining route is a global or static `guarded`, which a captureless
-  function can still name; that's the same hole as for task bodies, closed
-  the same way (the ban-list rejects mutable statics outside jaal).
-- Used rarely. The preferred answer is always an owner you send messages to.
+- **Nothing escapes the lock.** The body's result must be Sendable, which
+  bans references, pointers and views into `T`. You get a copy out, never a
+  handle in.
+- **Locks are taken in rank order, or not at all (Level A).** See below.
+- **Nothing that joins threads lives inside one.** `guarded<T>` requires
+  `JoinFree<T>`: no part of `T` is a pool, a `worker_group`, or another
+  `joins_on_destroy` type, because a destructor that waits would be a
+  blocking wait under the lock that no signature shows.
+- Used rarely. The preferred answer is always an owner you send messages
+  to, and a value read far more often than it changes is a `published<T>`,
+  which has no lock and no rank.
 
-#### Deadlocks are errors at the call
+#### Lock order is a type (core/capability.hpp)
 
-A deadlock needs a thread holding a lock while it waits for something. The
-body rule already stops a `with()` from naming a second guarded; what's left
-is one reached through a global or static, or a blocking wait under a lock.
-Both are checked on every call (kernel/lock_order.hpp), on one thread, with
-no timing involved:
+Every lock-order deadlock is one thread holding A and taking B while another
+holds B and takes A. jaal makes that program fail to compile.
 
-- **Levels.** A plain `guarded` is a leaf: taken last, never held with
-  another leaf. A guarded whose body takes others is built with a
-  `lock_level` below theirs. Taking a lock at or below one you hold throws
-  `lock_order_error`, naming both. So does re-entering the same guarded.
-  A cycle needs one of those, so none can form.
-- **No waiting under a lock.** `wait_with`, `pool::shutdown`, `scope()` and
-  `worker_group::stop` refuse to block while the thread holds a guarded.
-- **No self-join.** Shutting a pool down from one of its own jobs throws.
+Each `guarded` has a **rank**, a type: `jaal::rank<N, "name">`, or
+`jaal::leaf` (the default, taken last). A thread may only take a lock ranked
+strictly above everything it holds. Ranks are a strict total order, so
+threads following the rule can't wait on each other in a cycle.
 
-Noexcept paths (destructors, `worker_group::stop`) print the reason and
-abort instead. A forked child that keeps running C++ calls
-`forget_held_after_fork()` first.
+The rule is enforced with **capabilities**, values that prove what the
+current thread holds:
 
-What this can't see: a raw `std::mutex` (banned outside jaal by the lint),
-and a wait on something that isn't a jaal primitive (a socket read). Those
-stay a matter of care.
+| capability | means | made by |
+|---|---|---|
+| `const jaal::unlocked&` | holds no lock | thread entry (job, task, stream, scope helper), `thread_root` |
+| `const jaal::held<R>&` | holds a lock ranked `R`, nothing higher | `guarded<T, R>` hands it to the body |
+| `const jaal::below<R>&` | a *parameter*: "caller holds only ranks < R" | converts from the two above |
+
+Taking a lock ranked `R` needs a `below<R>`. `unlocked` and `held<Q>` with
+`Q < R` convert to it; nothing else does. So, each a compile error with a
+compile-fail test (`tests/compile_fail/capability.cpp`):
+
+- a lower-ranked lock inside a higher one (`cap_order_inversion`)
+- two leaves held together (`cap_two_leaves`)
+- re-entering the lock you hold (`cap_reentry`)
+- a function declared `below<R>`, called under a lock ranked `>= R`
+  (`cap_below_violated`)
+- `wait_with`, `scope()`, `pool::shutdown`, `worker_group::stop` with any
+  lock held: they take exactly `unlocked` (`cap_wait_under_lock`,
+  `cap_scope_under_lock`, `cap_shutdown_under_lock`)
+- taking a lock with no capability (`cap_missing`), forging one
+  (`cap_forged`), copying, moving or addressing one (`cap_copied`,
+  `cap_addressed`), sending one into a job (`cap_sent_to_job`), capturing one
+  into a lock body (`cap_captured`)
+
+A function that takes locks says so in its signature, and the requirement
+flows up the call graph like any other parameter:
+
+```cpp
+Token fresh_token(const jaal::below<auth_refresh>& cap);   // takes auth_refresh, then higher
+```
+
+Capabilities can't be copied, moved, stored, addressed or sent, so one can't
+outlive the frame that proved it or reach another thread. A lock body is
+captureless with Sendable arguments, so the only capability it has is the
+`held<R>` it was handed.
+
+**Where they come from.** Only jaal makes them, only where it knows what the
+thread holds: a job, task, stream body or scope helper may take
+`const jaal::unlocked&` first and gets a fresh one (a fresh thread holds
+nothing); a lock body gets `held<R>`; and `jaal::thread_root(f)` makes the
+root one for a thread jaal didn't start (main, a test). `thread_root` and
+jaal's internal `cap_access` are banned outside allowlisted files by the lint
+(`ban_cap_mint`), so every root is a reviewed line.
+
+**What stays runtime.** Shutting a pool down from one of its own jobs is a
+wait for itself. The job legitimately holds `unlocked`; only "which pool am I
+a job of" says it's wrong, so `pool::shutdown` checks that identity and
+throws `lock_order_error` (noexcept paths print and abort).
+
+**What it can't see.** A raw `std::mutex` (banned outside jaal by the lint),
+a destructor that joins in a type jaal can't walk into and that isn't marked
+`joins_on_destroy`, and a wait on something that isn't a jaal primitive (a
+socket read). Those stay a matter of care.
+
+This replaced a runtime checker (a per-thread stack of held levels that threw
+`lock_order_error`). That found an inversion only after a thread walked into
+it, and only on paths a test ran; agentty shipped two that way.
 
 ### 4.9 `once<T>` and `latch`-style results
 
@@ -599,7 +634,9 @@ documented).
 | data race on plain data | nothing mutable is shared: owned, moved, or frozen. `guarded<T>` for the rare lock | A |
 | forgot to lock | `guarded<T>` has no unlocked access | A |
 | reference escapes a lock | `with`/`read` results must be Sendable | A |
-| lock-order deadlock | a second lock can't be named inside `with`/`read`: captureless function, Sendable args, `guarded` isn't Sendable | A |
+| lock-order deadlock | lock ranks are types; taking a lock needs a capability proving every held lock ranks lower (`below<R>`), and a body only has its own `held<R>` | A |
+| wait / join / shutdown under a lock | they take exactly `unlocked`; `guarded<T>` refuses a `T` whose destructor joins | A |
+| pool shut down from its own job | identity check in `pool::shutdown`, throws `lock_order_error` | A-runtime |
 | waiting on a sibling helper (join cycle) | only the scope's own thread may `spawn`/`join`, so the wait graph is a tree; a helper that tries gets `scope_misuse` | A-runtime |
 | helper blocks sending to the loop that is joining it | the mailbox knows who waits on the sender (`kernel/waits.hpp`) and refuses instead of blocking; counted in `loop_full` | A-runtime |
 | loop blocks sending to its own full mailbox | refused and counted in `loop_full` | A-runtime |

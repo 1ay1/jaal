@@ -246,18 +246,51 @@ jaal_compile_fail(NAME loop_bound_not_sendable  SOURCE compile_fail/loop_bound.c
 
 # scope / guarded
 jaal_compile_fail(NAME guarded_no_escape  SOURCE compile_fail/scope.cpp CASE 1
-                  MATCH "jaal: guarded<T>::with/read returns something that points into")
+                  MATCH "jaal: guarded::with/read returns something that points into")
 # gcc: "use of deleted function 'jaal::handle<T>::handle(jaal::handle<T>&&) [with T = int]'"
 # clang: "call to deleted constructor of ... 'jaal::handle<int>'"
 jaal_compile_fail(NAME scope_handle_pinned SOURCE compile_fail/scope.cpp CASE 2
                   MATCH "deleted (function|constructor)[^\n]*jaal::handle<")
 jaal_compile_fail(NAME scope_nursery_private SOURCE compile_fail/scope.cpp CASE 3
                   MATCH "private")
-# lock-order deadlock can't be written: no second lock inside the first
 jaal_compile_fail(NAME guarded_no_nested_capture SOURCE compile_fail/scope.cpp CASE 4
-                  MATCH "jaal: guarded<T>::with/read takes a CAPTURELESS function")
+                  MATCH "jaal: guarded::with/read takes a CAPTURELESS body")
 jaal_compile_fail(NAME guarded_no_nested_arg SOURCE compile_fail/scope.cpp CASE 5
-                  MATCH "jaal: an argument to guarded<T>::with/read is not Sendable")
+                  MATCH "jaal: an argument to guarded::with/read is not Sendable")
+
+# capabilities: every lock-order shape and every smuggle fails to build
+# (compile_fail/capability.cpp). The conversion failures name below<R>, the
+# rule they broke; deleted operations name the capability.
+jaal_compile_fail(NAME cap_order_inversion   SOURCE compile_fail/capability.cpp CASE 1
+                  MATCH "below<[^\n]*test.outer|below<rank<10")
+jaal_compile_fail(NAME cap_two_leaves        SOURCE compile_fail/capability.cpp CASE 2
+                  MATCH "below<jaal::leaf>")
+jaal_compile_fail(NAME cap_reentry           SOURCE compile_fail/capability.cpp CASE 3
+                  MATCH "below<[^\n]*test.outer|below<rank<10")
+jaal_compile_fail(NAME cap_wait_under_lock   SOURCE compile_fail/capability.cpp CASE 4
+                  MATCH "held<jaal::detail::cap::nothing>|unlocked")
+jaal_compile_fail(NAME cap_scope_under_lock  SOURCE compile_fail/capability.cpp CASE 5
+                  MATCH "held<jaal::detail::cap::nothing>|unlocked")
+jaal_compile_fail(NAME cap_shutdown_under_lock SOURCE compile_fail/capability.cpp CASE 6
+                  MATCH "held<jaal::detail::cap::nothing>|unlocked")
+jaal_compile_fail(NAME cap_below_violated    SOURCE compile_fail/capability.cpp CASE 7
+                  MATCH "below<[^\n]*test.outer|below<rank<10")
+jaal_compile_fail(NAME cap_missing           SOURCE compile_fail/capability.cpp CASE 8
+                  MATCH "no matching (member )?function")
+jaal_compile_fail(NAME cap_forged            SOURCE compile_fail/capability.cpp CASE 9
+                  MATCH "private|protected")
+jaal_compile_fail(NAME cap_copied            SOURCE compile_fail/capability.cpp CASE 10
+                  MATCH "deleted")
+jaal_compile_fail(NAME cap_addressed         SOURCE compile_fail/capability.cpp CASE 11
+                  MATCH "deleted")
+jaal_compile_fail(NAME cap_sent_to_job       SOURCE compile_fail/capability.cpp CASE 12
+                  MATCH "not Sendable")
+jaal_compile_fail(NAME cap_captured          SOURCE compile_fail/capability.cpp CASE 13
+                  MATCH "CAPTURELESS body")
+jaal_compile_fail(NAME cap_joiner_in_lock    SOURCE compile_fail/capability.cpp CASE 14
+                  MATCH "can't own a pool, worker_group")
+jaal_compile_fail(NAME cap_bad_rank          SOURCE compile_fail/capability.cpp CASE 15
+                  MATCH "jaal::rank: values are 1..65534")
 
 # kernel / hosts
 jaal_compile_fail(NAME router_event_not_produced SOURCE compile_fail/kernel.cpp CASE 1

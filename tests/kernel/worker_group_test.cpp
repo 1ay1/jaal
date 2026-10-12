@@ -34,7 +34,7 @@ struct Flags {
 using flags_t = jaal::co_owned<Flags>;
 }  // namespace
 
-int main() {
+static int run(const jaal::unlocked& cap) {
     // 1. barrier: a job that ignores its token still finishes before stop()
     //    returns.
     {
@@ -46,7 +46,7 @@ int main() {
             f->finished = true;
         }, f);
         while (!f->started) std::this_thread::yield();
-        g.stop();
+        g.stop(cap);
         ok(f->finished.load(), "1: stop() waited for the running job");
     }
 
@@ -58,7 +58,7 @@ int main() {
             if (jaal::kernel::delay_for(st, 30s)) f->finished = true;
         }, f);
         const auto t0 = std::chrono::steady_clock::now();
-        g.stop();
+        g.stop(cap);
         ok(f->finished.load(), "2: the job's token was stopped");
         ok(std::chrono::steady_clock::now() - t0 < 5s, "2: and it ended promptly");
     }
@@ -67,9 +67,9 @@ int main() {
     {
         auto f = flags_t::make();
         jaal::kernel::worker_group g;
-        g.stop();
+        g.stop(cap);
         g.post([](std::stop_token, flags_t f) { ++f->ran; }, f);
-        g.stop();
+        g.stop(cap);
         ok(f->ran.load() == 0, "3: a post after stop() is dropped");
     }
 
@@ -89,4 +89,8 @@ int main() {
     if (failures) return 1;
     std::printf("worker_group: ok\n");
     return 0;
+}
+
+int main() {
+    return jaal::thread_root([](const jaal::unlocked& cap) { return run(cap); });
 }

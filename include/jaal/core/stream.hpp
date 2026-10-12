@@ -205,7 +205,7 @@ struct stream {
                   && (Sendable<Args> && ...)
                   && (std::copy_constructible<Args> && ...)
         [[nodiscard]] static Self stream(std::string key, Body body, Args... args) {
-            void (*fn)(Sink<Msg>, std::stop_token, Args...) = body;
+            auto fn = ::jaal::detail_task::plain_fn<Body, Msg, Args...>(body);
             return Self(type<Msg>{std::move(key),
                                   ::jaal::detail::stream_factory<Msg>::make(fn, std::move(args)...)});
         }

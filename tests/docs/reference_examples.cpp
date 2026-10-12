@@ -212,14 +212,15 @@ int main() {
         if (h.model().n != 2) return 1;
     }
 
-    // ── guarded<T>: arguments after the lambda ───────────────────────────
-    {
-        jaal::guarded<std::map<std::string, int>> cache;
-        const std::string key = "k";
-        cache.with([](auto& m, std::string k) { ++m[k]; }, key);
-        const int n = cache.read([](const auto& m) { return int(m.size()); });
-        if (n != 1) return 2;
-    }
+    // ── guarded<T>: a capability first, arguments after the lambda ───────
+    if (int r = jaal::thread_root([](const jaal::unlocked& cap) -> int {
+            jaal::guarded<std::map<std::string, int>> cache;
+            const std::string key = "k";
+            cache.with(cap, [](auto& m, std::string k) { ++m[k]; }, key);
+            const int n = cache.read(cap, [](const auto& m) { return int(m.size()); });
+            return n != 1 ? 2 : 0;
+        }))
+        return r;
 
     // ── loop_bound<T>: reachable on the loop, nowhere else ───────────────
     {

@@ -516,25 +516,46 @@ object that derives from `enable_shared_from_this`.
 
 > **Refuses:** a `T` with a writable field, naming the field.
 
-### `guarded<T>`
+### `guarded<T, R>`
 
-State behind a lock you cannot forget to take:
+State behind a lock you cannot forget to take, taken in an order the
+compiler checks:
 
 ```cpp
-guarded<std::map<std::string, int>> cache;
+using cache_rank = jaal::rank<40, "app.cache">;
+guarded<std::map<std::string, int>, cache_rank> cache;     // R defaults to jaal::leaf
 
-cache.with([](auto& m, std::string k) { ++m[k]; }, key);   // exclusive
-int n = cache.read([](const auto& m) { return int(m.size()); });  // shared
+cache.with(cap, [](auto& m, std::string k) { ++m[k]; }, key);       // exclusive
+int n = cache.read(cap, [](const auto& m) { return int(m.size()); });  // shared
 ```
 
-Note the arguments go **after** the lambda, not into a capture. That's the
-point: inside `with`/`read` you can only reach what you were *given*, so a
-closure can't quietly pull in a second lock and invent a lock-order
-inversion.
+`cap` is a **capability** (core/capability.hpp): `const jaal::unlocked&`
+(nothing held), `const jaal::held<Q>&` (inside a lock ranked `Q`), or a
+`const jaal::below<S>&` parameter. Taking a lock ranked `R` needs one that
+proves every held lock ranks lower. A body may take `const jaal::held<R>&`
+first to take further locks, which must rank above `R`:
 
-> **Refuses:** returning something that points *into* the guarded value —
-> that's the reference-escapes-the-lock bug, and it's a compile error naming
-> exactly that.
+```cpp
+outer.with(cap, [](const jaal::held<outer_rank>& h, Outer& o) {
+    inner.with(h, [](Inner& i) { ... });   // compiles only if inner ranks above outer
+});
+```
+
+Threads get their root capability at entry: a job, task, stream body or
+`scope` helper may take `const jaal::unlocked&` first, and `main` uses
+`jaal::thread_root([&](const jaal::unlocked& cap) { ... })`. Blocking calls
+(`wait_with`, `wait_with_for`, `scope`, `pool::shutdown`,
+`worker_group::stop`) take exactly `const jaal::unlocked&`.
+
+The arguments go **after** the lambda, not into a capture: inside
+`with`/`read` you can only reach what you were *given*, and a capability is
+never Sendable, so the body's own `held<R>` is the only one it has.
+
+> **Refuses:** a lock taken out of rank order, two leaves together,
+> re-entry, a wait under a lock, a missing or forged capability (each a
+> compile error, `tests/compile_fail/capability.cpp`); returning something
+> that points *into* the guarded value; a `T` that owns a pool or
+> `worker_group` (its destructor would wait under the lock).
 
 ### `loop_bound<T>`
 
@@ -768,7 +789,9 @@ jaal's errors are written to be read. Most name the rule:
 | `effect ... not in this Cmd's row` | add it to `Cmd<Msg, ...>` |
 | `host '...' cannot run effect '...'` | add `handle()` for it |
 | `a subscription routes events this host doesn't produce` | host's `event_type` doesn't cover it |
-| `guarded<T>::with/read returns something that points into` | return a copy |
+| `guarded::with/read returns something that points into` | return a copy |
+| `could not convert ... to 'jaal::below<...>'` | a lock taken out of rank order, or under one ranked at/above it: reorder, or give the outer lock a lower rank |
+| `... to 'const jaal::unlocked&'` from a `held<...>` | a blocking wait/join/shutdown inside a lock body: move it out |
 | `subs_key() reported no change, but subscribe() now returns different sources` | a field is missing from the key |
 
 **When something silently doesn't happen**, suspect an optional hook whose
@@ -805,7 +828,8 @@ Sub::on(on_key{}, filter)                  // router: may capture
 Sub::stream(key, body, args...)            // source: STOPS when key goes
 
 // ── safety ───────────────────────────────────────────────────────────
-Sendable<T>  Frozen<T>  shared<T>  guarded<T>  loop_bound<T>  scope  handle
+Sendable<T>  Frozen<T>  shared<T>  guarded<T, R>  loop_bound<T>  scope  handle
+rank<N, "name">  leaf  unlocked  held<R>  below<R>  thread_root  JoinFree<T>
 
 // ── testing ──────────────────────────────────────────────────────────
 jaal::headless<App>            // no host, records effects

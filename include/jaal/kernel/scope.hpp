@@ -62,7 +62,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "lock_order.hpp"
+#include "../core/capability.hpp"
 #include "waits.hpp"
 
 namespace jaal {
@@ -142,10 +142,15 @@ public:
     nursery(nursery&&)                 = delete;
     nursery& operator=(nursery&&)      = delete;
 
-    /// Start a helper. F may take a std::stop_token as its only argument,
-    /// or nothing. Returns a handle to join it by.
+    /// Start a helper. F takes (), (std::stop_token), (const unlocked&) or
+    /// (const unlocked&, std::stop_token). A helper is a fresh thread and
+    /// holds no lock, so one that asks for `unlocked` gets its own: it does
+    /// NOT inherit the owner's (the owner holds none either; scope() demanded
+    /// that). Returns a handle to join it by.
     template <class F>
         requires std::invocable<F&, std::stop_token> || std::invocable<F&>
+              || std::invocable<F&, const unlocked&, std::stop_token>
+              || std::invocable<F&, const unlocked&>
     [[nodiscard]] auto spawn(F f) {
         if (std::this_thread::get_id() != owner_) throw scope_misuse("nursery::spawn()");
         using R = decltype(invoke_body(f, std::stop_token{}));
@@ -182,8 +187,14 @@ public:
 private:
     template <class F>
     static decltype(auto) invoke_body(F& f, std::stop_token st) {
-        if constexpr (std::invocable<F&, std::stop_token>) return f(std::move(st));
-        else                                              return f();
+        if constexpr (std::invocable<F&, const unlocked&, std::stop_token>) {
+            const unlocked u = cap_access::fresh_thread();
+            return f(u, std::move(st));
+        } else if constexpr (std::invocable<F&, const unlocked&>) {
+            const unlocked u = cap_access::fresh_thread();
+            return f(u);
+        } else if constexpr (std::invocable<F&, std::stop_token>) return f(std::move(st));
+        else                                                     return f();
     }
 
     // A helper stops when EITHER its own jthread is asked to stop or the
@@ -210,7 +221,7 @@ private:
     }
 
     template <class B>
-    friend auto scope(std::stop_token parent, B&& block);
+    friend auto scope(const unlocked&, std::stop_token parent, B&& block);
 
     explicit nursery(std::stop_token parent)
         : on_parent_stop_(parent, [this] { stop_.request_stop(); }) {}
@@ -237,11 +248,12 @@ private:
 /// Run `block(nursery&)`, then join every helper it spawned. Returns the
 /// block's result. If the block or any helper threw, rethrows the first
 /// exception AFTER everything is joined.
+///
+/// Joining waits on other threads, and a helper may need any lock the
+/// caller holds, so scope() takes `unlocked`: opening a scope under a lock
+/// does not compile.
 template <class B>
-auto scope(std::stop_token parent, B&& block) {
-    // scope() joins its helpers before returning; a helper that needs a lock
-    // this thread holds would never finish.
-    kernel::lock_order::require_no_locks_held("scope()");
+auto scope(const unlocked&, std::stop_token parent, B&& block) {
     nursery n(std::move(parent));
     using R = std::invoke_result_t<B&, nursery&>;
     std::exception_ptr block_error;
@@ -261,8 +273,8 @@ auto scope(std::stop_token parent, B&& block) {
 
 /// scope() with no parent to inherit cancellation from.
 template <class B>
-auto scope(B&& block) {
-    return scope(std::stop_token{}, std::forward<B>(block));
+auto scope(const unlocked& cap, B&& block) {
+    return scope(cap, std::stop_token{}, std::forward<B>(block));
 }
 
 }  // namespace jaal

@@ -13,6 +13,8 @@
 #   const_cast                       breaks Frozen and const-correctness
 #   sink_access                      only the kernel mints sinks
 #   loop_key                         only the kernel mints loop tokens
+#   cap_access:: / thread_root(      only jaal mints lock capabilities
+#                                    (core/capability.hpp)
 #
 # The allowlist is the list of files a human checked by hand: jaal's own
 # kernel/platform code, where these ARE the implementation. Each entry says
@@ -42,7 +44,9 @@ set(ban_thread_local "thread_local")
 set(ban_const_cast  "const_cast")
 set(ban_sink_access "sink_access")
 set(ban_loop_key    "loop_key")
-set(ban_names thread detach async mutex atomic thread_local const_cast sink_access loop_key)
+# `[(]`, not `\\(`: MSYS grep's argv parsing eats the backslash.
+set(ban_cap_mint    "cap_access::|thread_root[(]")
+set(ban_names thread detach async mutex atomic thread_local const_cast sink_access loop_key cap_mint)
 
 # Parse the allowlist.
 file(STRINGS ${ALLOW} allow_lines)

@@ -759,7 +759,10 @@ private:
         task_faults_->pending.store(false, std::memory_order_relaxed);
         // Cleared BEFORE draining: an error queued between the clear and the
         // swap sets it again and is drained now or next step, never lost.
-        auto errs = task_faults_->errors.with([](auto& v) { return std::exchange(v, {}); });
+        // The fault box is a terminal lock (its bodies swap or push and call
+        // nothing), and the loop thread holds no user lock between steps.
+        auto errs = task_faults_->errors.with(cap_access::terminal(),
+                                              [](auto& v) { return std::exchange(v, {}); });
         // A task fault doesn't touch the model, so the model is kept. The
         // policy still applies: `stop` quits, `skip` carries on.
         for (auto& e : errs) fault_raised(fault_site::task, e, true);
@@ -1242,7 +1245,11 @@ private:
             std::function<void()> wake) {
         typename executor<msg_type>::error_fn on_error =
             [box = std::move(box), wake](std::exception_ptr e) {
-                box->errors.with([](auto& v, std::exception_ptr x) { v.push_back(std::move(x)); }, std::move(e));
+                // Terminal lock: this runs wherever the failed job ran, maybe
+                // unwinding out of a user lock body; the push calls nothing.
+                box->errors.with(cap_access::terminal(),
+                                 [](auto& v, std::exception_ptr x) { v.push_back(std::move(x)); },
+                                 std::move(e));
                 box->pending.store(true, std::memory_order_release);
                 if (wake) wake();
             };

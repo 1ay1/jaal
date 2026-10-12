@@ -527,6 +527,26 @@ runtime on every call, in every build. No debug-only checks.
    second lock has no name inside the first. Compile-fail tests pin both
    routes.
 
+   *Superseded: lock order is now a type.* The body rule left one route,
+   a global or static `guarded` named from inside another's body, and a
+   runtime level checker (a per-thread stack, `lock_order_error`) closed
+   it. That checker only fired after a thread walked into an inversion, on
+   a path a test happened to run. agentty shipped two that way: a leaf
+   cache whose body refreshed a token behind a ranked lock, and a logger
+   whose rotation lock was taken from inside any other lock's body once
+   the log reached 32 MB. Both aborted users' sessions, neither in CI.
+
+   Now every `guarded<T, R>` has a rank TYPE, and taking it needs a
+   capability (core/capability.hpp) proving every held lock ranks lower;
+   blocking calls need `unlocked`. Capabilities are made only at thread
+   entry, in a lock body, or by `thread_root` (lint-allowlisted), and can't
+   be copied, moved, addressed or sent. A function that takes locks says so
+   in its signature (`below<R>`), so the requirement travels up the call
+   graph like any parameter: the static named from the wrong body is now a
+   compile error at that call. The runtime checker is deleted; only the
+   identity check "is this pool's own job shutting it down" remains.
+   `tests/compile_fail/capability.cpp` pins fifteen shapes.
+
 3. *Join cycle in a scope.* A helper could reach a sibling's `handle`
    through `[&]` and join it while the sibling joined back. Now only the
    thread that opened the scope may `spawn` or `join`, so the only waits

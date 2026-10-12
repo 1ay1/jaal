@@ -13,6 +13,7 @@
 //
 // Docs: docs/scope.md (what's offered), docs/decisions.md (why).
 
+#include "core/capability.hpp"
 #include "core/child.hpp"
 #include "core/children.hpp"
 #include "core/cmd.hpp"

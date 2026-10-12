@@ -8,7 +8,8 @@ core/sink.hpp: sink_access
 # sync.hpp names std::atomic only to recognise it as a Sync field.
 core/sync.hpp: atomic
 # Task map builds a forwarding sink for the mapped task.
-core/fx.hpp: sink_access
+# `cap_mint`: a task body that takes `const unlocked&` gets a fresh one.
+core/fx.hpp: sink_access cap_mint
 # Stream map builds a forwarding sink for the mapped stream, the same way.
 core/stream.hpp: sink_access
 # The kernel mints each stream run's generation-gated sink. `atomic`: a
@@ -17,7 +18,8 @@ core/stream.hpp: sink_access
 # (`sink_access` dropped: the kernel reaches the mailbox's sink through
 # inbox_.sink()/sink_from(), which is mailbox.hpp's grant, not a private
 # backdoor of its own.)
-kernel/kernel.hpp: atomic
+# `cap_mint`: the loop thread and task threads start holding no lock.
+kernel/kernel.hpp: atomic cap_mint
 # given<P> runs tasks inline and mints a sink into a local vector for them.
 host/given.hpp: sink_access
 
@@ -47,9 +49,9 @@ kernel/mailbox.hpp: mutex sink_access atomic
 # of loop_bound<T> in jaal + maya + agentty was zero. See concurrency.md §4.5.
 kernel/loop.hpp: loop_key thread_local
 # The worker pool: threads, the job queue lock, and detached isolated threads.
-kernel/pool.hpp: thread detach mutex
+kernel/pool.hpp: thread detach mutex cap_mint
 # scope: joins every helper thread; `observed` is an atomic flag per helper.
-kernel/scope.hpp: thread atomic
+kernel/scope.hpp: thread atomic cap_mint
 # The "who waits on this thread" set that lets a mailbox refuse a post
 # that would deadlock (a scope helper sending to the loop that joins it).
 # Same as mailbox.hpp: it names std::thread::id, it never spawns a thread.
@@ -57,7 +59,7 @@ kernel/waits.hpp: thread_local
 # lock_order.hpp: per-thread record of held guarded locks and running jobs.
 kernel/lock_order.hpp: thread_local
 # guarded<T>: the shared_mutex it wraps.
-kernel/guarded.hpp: mutex
+kernel/guarded.hpp: mutex cap_mint
 # delay_for: condition_variable_any needs a Lockable to wait on, so the mutex
 # is a formality rather than a guard — nothing else can reach it, it is never
 # contended, and the shared state it "protects" is the stop_token. The whole
@@ -74,3 +76,14 @@ kernel/published.hpp: atomic mutex
 # The signal handler's test hook is an atomic (the only thing a handler
 # may touch). Declared here so tests and the .cpp agree on it.
 platform/posix/signals.hpp: atomic
+
+# Lock capabilities (core/capability.hpp) are minted only where jaal KNOWS
+# what the thread holds: the definition of cap_access / thread_root itself,
+# a thread's entry, a lock body, and the host-side terminal callers below.
+core/capability.hpp: cap_mint
+# replay: its event log is a guarded; host-side callers hold no jaal lock.
+kernel/replay.hpp: cap_mint
+# executor: the pool adapter's shutdown runs on a host thread holding nothing.
+kernel/executor.hpp: cap_mint
+# headless: the waker and the idle wait run on threads holding no jaal lock.
+host/headless.hpp: cap_mint

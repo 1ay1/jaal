@@ -44,6 +44,7 @@ set(ban_thread_local "thread_local")
 set(ban_const_cast   "const_cast")
 set(ban_sink_access  "sink_access")
 set(ban_loop_key     "loop_key")
+set(ban_cap_mint     "cap_access::|thread_root[(]")
 
 file(STRINGS ${ALLOW} allow_lines)
 set(dead "")

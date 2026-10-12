@@ -15,6 +15,7 @@
 // <jaal/kernel.hpp>, <jaal/platform.hpp>, <jaal/host.hpp>, and
 // <jaal/jaal.hpp> for everything.
 
+#include "core/capability.hpp"
 #include "core/child.hpp"
 #include "core/children.hpp"
 #include "core/cmd.hpp"
@@ -26,6 +27,7 @@
 #include "core/error.hpp"
 #include "core/frozen.hpp"
 #include "core/fx.hpp"
+#include "core/join_free.hpp"
 #include "core/program.hpp"
 #include "core/report.hpp"
 #include "core/rng.hpp"

@@ -55,23 +55,42 @@
 
 #include "../core/sendable.hpp"
 #include "../core/unique_function.hpp"
+#include "../core/capability.hpp"
 #include "lock_order.hpp"
 
 namespace jaal::kernel {
 
-// A job body: a CAPTURELESS function of (std::stop_token, Args...), every
-// Args Sendable. Same rule as Cmd::task (core/fx.hpp): the body can't borrow
-// `this` or a local, it owns its inputs, and state two threads share has to
-// be passed in as a co_owned<T> (core/co_owned.hpp), which requires Sync.
+// A job body: a CAPTURELESS function of (std::stop_token, Args...) or of
+// (const jaal::unlocked&, std::stop_token, Args...), every Args Sendable.
+// Same rule as Cmd::task (core/fx.hpp): the body can't borrow `this` or a
+// local, it owns its inputs, and state two threads share has to be passed in
+// as a co_owned<T> (core/co_owned.hpp), which requires Sync.
+//
+// A job runs on a thread that holds no lock, so a body that asks for the
+// `unlocked` capability gets one: that is how background work takes locks
+// (core/capability.hpp). A body that doesn't ask can't take any.
+namespace detail_pool {
 template <class F, class... Args>
-concept JobBody =
-    std::is_convertible_v<
-        F, std::invoke_result_t<F&, std::stop_token, Args...> (*)(std::stop_token, Args...)>;
+concept cap_job = std::is_convertible_v<
+    F, std::invoke_result_t<F&, const unlocked&, std::stop_token, Args...> (*)(
+           const unlocked&, std::stop_token, Args...)>;
+template <class F, class... Args>
+concept plain_job = std::is_convertible_v<
+    F, std::invoke_result_t<F&, std::stop_token, Args...> (*)(std::stop_token, Args...)>;
+}  // namespace detail_pool
 
 template <class F, class... Args>
-concept CheckedJob =
-    std::is_invocable_v<F&, std::stop_token, Args...> && JobBody<F, Args...>
-    && (Sendable<Args> && ...);
+concept JobBody = detail_pool::cap_job<F, Args...> || detail_pool::plain_job<F, Args...>;
+
+template <class F, class... Args>
+concept CheckedJob = JobBody<F, Args...> && (Sendable<Args> && ...);
+
+/// What a job body returns.
+template <class F, class... Args>
+using job_result_t = typename std::conditional_t<
+    detail_pool::cap_job<F, Args...>,
+    std::invoke_result<F&, const unlocked&, std::stop_token, Args...>,
+    std::invoke_result<F&, std::stop_token, Args...>>::type;
 
 struct pool_access;   // the kernel's key for posting an already-erased job
 
@@ -81,14 +100,34 @@ consteval void explain() {
     if constexpr (!(Sendable<Args> && ...))
         static_assert((Sendable<Args> && ...),
             "jaal: a job argument is not Sendable; pass owned values, and share "
-            "state through jaal::co_owned<T>");
-    else if constexpr (!std::is_invocable_v<F&, std::stop_token, Args...>)
+            "state through jaal::co_owned<T> (a capability is never Sendable: a job "
+            "asks for its own `const jaal::unlocked&` instead)");
+    else if constexpr (!std::is_invocable_v<F&, std::stop_token, Args...>
+                       && !std::is_invocable_v<F&, const unlocked&, std::stop_token, Args...>)
         static_assert(std::is_invocable_v<F&, std::stop_token, Args...>,
-            "jaal: a job body must be callable as (std::stop_token, Args...)");
+            "jaal: a job body must be callable as (std::stop_token, Args...) or "
+            "(const jaal::unlocked&, std::stop_token, Args...)");
     else
         static_assert(JobBody<F, Args...>,
             "jaal: a job body must not capture anything; pass what it needs as "
             "arguments after the body (shared state as a jaal::co_owned<T>)");
+}
+
+template <class F, class... Args>
+using job_fn_t = std::conditional_t<cap_job<F, Args...>,
+    job_result_t<F, Args...> (*)(const unlocked&, std::stop_token, Args...),
+    job_result_t<F, Args...> (*)(std::stop_token, Args...)>;
+
+// Call an erased job body, handing it a fresh `unlocked` if it asks: the
+// job runs on a pool thread, between jobs, where nothing is held.
+template <class F, class... Args>
+decltype(auto) invoke_job(job_fn_t<F, Args...> fp, std::stop_token st, Args&... a) {
+    if constexpr (cap_job<F, Args...>) {
+        const unlocked u = cap_access::fresh_thread();
+        return fp(u, std::move(st), std::move(a)...);
+    } else {
+        return fp(std::move(st), std::move(a)...);
+    }
 }
 }  // namespace detail_pool
 
@@ -133,7 +172,7 @@ public:
     ~pool() { (void)shutdown_noexcept(std::chrono::seconds(2)); }
 
     /// shutdown() for noexcept callers (destructors, worker_group::stop): a
-    /// self-join or a lock held aborts with the reason instead of throwing.
+    /// self-join aborts with the reason instead of throwing.
     std::size_t shutdown_noexcept(std::optional<std::chrono::milliseconds> grace) noexcept {
         lock_order::check_or_abort(c_.get(), "pool shutdown");
         return shutdown_unchecked(grace);
@@ -164,11 +203,12 @@ private:
     // An erased job: a function pointer plus its owned arguments.
     template <class F, class... Args>
     static job erase(F body, Args... args) {
-        using R = std::invoke_result_t<F&, std::stop_token, Args...>;
-        R (*fp)(std::stop_token, Args...) = body;
+        detail_pool::job_fn_t<F, Args...> fp = body;
         return [fp, tup = std::tuple<Args...>(std::move(args)...)](
                    std::stop_token st) mutable {
-            std::apply([&](Args&... a) { (void)fp(std::move(st), std::move(a)...); }, tup);
+            std::apply([&](Args&... a) {
+                (void)detail_pool::invoke_job<F, Args...>(fp, std::move(st), a...);
+            }, tup);
         };
     }
 
@@ -299,12 +339,13 @@ public:
     /// its own timeout", which is a bug with a stack trace.
     static constexpr std::optional<std::chrono::milliseconds> no_deadline{};
 
-    std::size_t shutdown(std::optional<std::chrono::milliseconds> grace
-                             = std::chrono::seconds(2)) {
-        // Both would wait forever (no_deadline) or for the whole grace for
-        // something that can't happen while we wait. Errors, every time.
+    /// Shutdown waits for other threads, which may need any lock this one
+    /// holds, so it takes `unlocked`: a shutdown under a lock doesn't compile.
+    std::size_t shutdown(const unlocked&, std::optional<std::chrono::milliseconds> grace
+                                              = std::chrono::seconds(2)) {
+        // Shutting down your OWN pool from one of its jobs would wait for
+        // itself; that is a runtime error, every time.
         lock_order::require_not_own_job(c_.get(), "pool::shutdown");
-        lock_order::require_no_locks_held("pool::shutdown");
         return shutdown_unchecked(grace);
     }
 
@@ -376,19 +417,22 @@ private:
             detail_pool::explain<F, Args...>();
             return std::future<void>{};
         } else {
-            using R = std::invoke_result_t<F&, std::stop_token, Args...>;
-            R (*fp)(std::stop_token, Args...) = body;
+            using R = job_result_t<F, Args...>;
+            detail_pool::job_fn_t<F, Args...> fp = body;
             auto pr  = std::make_shared<std::promise<R>>();
             auto fut = pr->get_future();
             job j = [pr, fp, tup = std::tuple<Args...>(std::move(args)...)](
                         std::stop_token st) mutable {
                 try {
                     if constexpr (std::is_void_v<R>) {
-                        std::apply([&](Args&... a) { fp(std::move(st), std::move(a)...); }, tup);
+                        std::apply([&](Args&... a) {
+                            detail_pool::invoke_job<F, Args...>(fp, std::move(st), a...);
+                        }, tup);
                         pr->set_value();
                     } else {
-                        pr->set_value(std::apply(
-                            [&](Args&... a) { return fp(std::move(st), std::move(a)...); }, tup));
+                        pr->set_value(std::apply([&](Args&... a) {
+                            return detail_pool::invoke_job<F, Args...>(fp, std::move(st), a...);
+                        }, tup));
                     }
                 } catch (...) {
                     // The future carries the failure, so run_guarded's on_error
@@ -488,3 +532,6 @@ struct pool_access {
 };
 
 }  // namespace jaal::kernel
+
+// ~pool waits (bounded) for its workers: never owned by a guarded<T>.
+template <> inline constexpr bool jaal::joins_on_destroy<jaal::kernel::pool> = true;

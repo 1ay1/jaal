@@ -115,12 +115,12 @@ int unbounded_is_default() {
 // mailbox. Only the loop can drain it, and the loop is waiting on the
 // helper: a deadlock that used to hang forever. Now the helper's post is
 // refused (counted in loop_full) and both finish.
-int scope_helper_of_the_loop_never_blocks() {
+int scope_helper_of_the_loop_never_blocks(const jaal::unlocked& cap) {
     k::inbox<M> in({}, opts(1, k::overflow::block));   // made here: this thread is the loop
     auto s = in.sink();
     if (!s.send(M{0})) return 701;                     // now full
     bool sent = true;
-    jaal::scope([&](jaal::nursery& n) {
+    jaal::scope(cap, [&](jaal::nursery& n) {
         auto h = n.spawn([&s] { return s.send(M{1}); });   // would wait for a drain
         sent = h.join();                                     // the loop waits on it
     });
@@ -151,11 +151,17 @@ int main() {
     });
     int (*const checks[])() = {drop_newest, drop_oldest, block_backpressure,
                                close_releases_blocked_sender, loop_thread_never_blocks,
-                               unbounded_is_default, scope_helper_of_the_loop_never_blocks};
+                               unbounded_is_default};
     for (auto f : checks)
         if (int r = f()) {
             std::fprintf(stderr, "mailbox_bound_test: check %d failed\n", r);
             return 1;
         }
+    if (int r = jaal::thread_root([](const jaal::unlocked& cap) {
+            return scope_helper_of_the_loop_never_blocks(cap);
+        })) {
+        std::fprintf(stderr, "mailbox_bound_test: check %d failed\n", r);
+        return 1;
+    }
     return 0;
 }

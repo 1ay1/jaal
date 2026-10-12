@@ -23,11 +23,11 @@ static_assert(!std::is_move_constructible_v<jaal::handle<int>>);
 // no public way to make a nursery outside scope()
 static_assert(!std::is_constructible_v<jaal::nursery, std::stop_token>);
 
-static int scope_tests() {
+static int scope_tests(const jaal::unlocked& cap) {
     // 1. values come back through join(); [&] borrowing of locals is fine
     {
         const std::string text = "hello world";
-        auto [a, b] = jaal::scope([&](jaal::nursery& n) {
+        auto [a, b] = jaal::scope(cap, [&](jaal::nursery& n) {
             auto x = n.spawn([&] { return text.size(); });
             auto y = n.spawn([&] { return text.find('w'); });
             return std::pair{x.join(), y.join()};
@@ -39,7 +39,7 @@ static int scope_tests() {
     //    returns: the block can't leak it by forgetting
     {
         std::atomic<bool> finished{false};
-        jaal::scope([&](jaal::nursery& n) {
+        jaal::scope(cap, [&](jaal::nursery& n) {
             (void)n.spawn([&] {
                 std::this_thread::sleep_for(20ms);
                 finished = true;
@@ -55,7 +55,7 @@ static int scope_tests() {
         std::atomic<bool> sibling_saw_stop{false};
         bool caught = false;
         try {
-            jaal::scope([&](jaal::nursery& n) {
+            jaal::scope(cap, [&](jaal::nursery& n) {
                 (void)n.spawn([&](std::stop_token st) {
                     while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
                     sibling_saw_stop = true;
@@ -76,7 +76,7 @@ static int scope_tests() {
         std::atomic<int> after_exit_writes{0};
         std::atomic<bool> scope_left{false};
         try {
-            jaal::scope([&](jaal::nursery& n) {
+            jaal::scope(cap, [&](jaal::nursery& n) {
                 (void)n.spawn([&](std::stop_token st) {
                     while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
                     if (scope_left) ++after_exit_writes;   // would be use-after-scope
@@ -94,7 +94,7 @@ static int scope_tests() {
     //    it a second time
     {
         bool joined_err = false;
-        jaal::scope([&](jaal::nursery& n) {
+        jaal::scope(cap, [&](jaal::nursery& n) {
             auto h = n.spawn([]() -> int { throw std::runtime_error("x"); });
             try { (void)h.join(); } catch (const std::runtime_error&) { joined_err = true; }
         });
@@ -109,7 +109,7 @@ static int scope_tests() {
             std::this_thread::sleep_for(20ms);
             parent.request_stop();
         });
-        jaal::scope(parent.get_token(), [&](jaal::nursery& n) {
+        jaal::scope(cap, parent.get_token(), [&](jaal::nursery& n) {
             (void)n.spawn([&](std::stop_token st) {
                 while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
                 stopped = true;
@@ -121,7 +121,7 @@ static int scope_tests() {
     // 7. void helpers and many of them
     {
         std::atomic<int> sum{0};
-        jaal::scope([&](jaal::nursery& n) {
+        jaal::scope(cap, [&](jaal::nursery& n) {
             for (int i = 1; i <= 16; ++i) (void)n.spawn([&sum, i] { sum += i; });
         });
         if (sum != 136) return 108;
@@ -133,7 +133,7 @@ static int scope_tests() {
     {
         bool refused = false;
         try {
-            jaal::scope([&](jaal::nursery& n) {
+            jaal::scope(cap, [&](jaal::nursery& n) {
                 auto b = n.spawn([](std::stop_token st) {
                     while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
                     return 2;
@@ -150,7 +150,7 @@ static int scope_tests() {
     {
         bool refused = false;
         try {
-            jaal::scope([&](jaal::nursery& n) {
+            jaal::scope(cap, [&](jaal::nursery& n) {
                 (void)n.spawn([&n] { (void)n.spawn([] {}); });
             });
         } catch (const jaal::scope_misuse&) {
@@ -162,7 +162,7 @@ static int scope_tests() {
     // 10. join() twice is refused (the result was moved out the first time)
     {
         bool refused = false;
-        jaal::scope([&](jaal::nursery& n) {
+        jaal::scope(cap, [&](jaal::nursery& n) {
             auto h = n.spawn([] { return 1; });
             (void)h.join();
             try { (void)h.join(); } catch (const std::logic_error&) { refused = true; }
@@ -200,18 +200,20 @@ static_assert(!jaal::Sendable<GMap*>);                       // nor a pointer to
 static_assert(!jaal::Sendable<std::reference_wrapper<GMap>>); // nor a reference
 static_assert(!std::is_copy_constructible_v<GMap>);
 
-static int guarded_tests() {
+static int guarded_tests(const jaal::unlocked& cap) {
     // many writers, one guarded map, no lost updates
     GMap g;
     {
         std::vector<std::jthread> ts;
         for (int t = 0; t < 8; ++t)
             ts.emplace_back([&g, t] {
-                for (int i = 0; i < 1000; ++i)
-                    g.with([](Map& m, std::string k) { ++m[k]; }, "k" + std::to_string(t % 3));
+                jaal::thread_root([&](const jaal::unlocked& tc) {
+                    for (int i = 0; i < 1000; ++i)
+                        g.with(tc, [](Map& m, std::string k) { ++m[k]; }, "k" + std::to_string(t % 3));
+                });
             });
     }
-    const int total = g.read([](const Map& m) {
+    const int total = g.read(cap, [](const Map& m) {
         int s = 0;
         for (auto& [_, v] : m) s += v;
         return s;
@@ -223,32 +225,42 @@ static int guarded_tests() {
     {
         std::vector<std::jthread> ts;
         for (int t = 0; t < 4; ++t)
-            ts.emplace_back([&] { for (int i = 0; i < 500; ++i) counter.with([](int& v) { ++v; }); });
+            ts.emplace_back([&] {
+                jaal::thread_root([&](const jaal::unlocked& tc) {
+                    for (int i = 0; i < 500; ++i) counter.with(tc, [](int& v) { ++v; });
+                });
+            });
         for (int t = 0; t < 4; ++t)
-            ts.emplace_back([&] { for (int i = 0; i < 500; ++i) (void)counter.read([](const int& v) { return v; }); });
+            ts.emplace_back([&] {
+                jaal::thread_root([&](const jaal::unlocked& tc) {
+                    for (int i = 0; i < 500; ++i) (void)counter.read(tc, [](const int& v) { return v; });
+                });
+            });
     }
-    if (counter.read([](const int& v) { return v; }) != 2000) return 202;
+    if (counter.read(cap, [](const int& v) { return v; }) != 2000) return 202;
 
     // arguments are moved in, results copied out
     jaal::guarded<std::string> s;
-    s.with([](std::string& v, std::string a, int n) { v = a + std::to_string(n); }, std::string("x"), 7);
-    if (s.read([](const std::string& v) { return v; }) != "x7") return 203;
+    s.with(cap, [](std::string& v, std::string a, int n) { v = a + std::to_string(n); }, std::string("x"), 7);
+    if (s.read(cap, [](const std::string& v) { return v; }) != "x7") return 203;
 
     // try_*: run when the lock is free, nullopt (no wait) while it is held
     jaal::guarded<int> busy(5);
-    if (busy.try_read([](const int& v) { return v; }) != std::optional<int>{5}) return 204;
-    if (busy.try_with([](int& v) { return ++v; }) != std::optional<int>{6}) return 205;
+    if (busy.try_read(cap, [](const int& v) { return v; }) != std::optional<int>{5}) return 204;
+    if (busy.try_with(cap, [](int& v) { return ++v; }) != std::optional<int>{6}) return 205;
     {
         static std::atomic<bool> holding{false}, release{false};
         std::jthread holder([&] {
-            busy.with([](int&) {
-                holding.store(true);
-                while (!release.load()) std::this_thread::yield();
+            jaal::thread_root([&](const jaal::unlocked& tc) {
+                busy.with(tc, [](int&) {
+                    holding.store(true);
+                    while (!release.load()) std::this_thread::yield();
+                });
             });
         });
         while (!holding.load()) std::this_thread::yield();
-        const bool r_none = !busy.try_read([](const int& v) { return v; });
-        const bool w_none = !busy.try_with([](int& v) { return v; });
+        const bool r_none = !busy.try_read(cap, [](const int& v) { return v; });
+        const bool w_none = !busy.try_with(cap, [](int& v) { return v; });
         release.store(true);
         if (!r_none || !w_none) return 206;
     }
@@ -259,17 +271,19 @@ static int guarded_tests() {
         static jaal::guarded<Q> q;
         static std::atomic<int> sum{0};
         std::jthread worker([] {
-            for (;;) {
-                auto batch = q.wait_with(
-                    [](const Q& w) { return !w.items.empty() || w.stop; },
-                    [](Q& w) { return std::exchange(w.items, {}); });
-                if (batch.empty()) return;   // stop with nothing left
-                for (int v : batch) sum += v;
-            }
+            jaal::thread_root([](const jaal::unlocked& tc) {
+                for (;;) {
+                    auto batch = q.wait_with(tc,
+                        [](const Q& w) { return !w.items.empty() || w.stop; },
+                        [](Q& w) { return std::exchange(w.items, {}); });
+                    if (batch.empty()) return;   // stop with nothing left
+                    for (int v : batch) sum += v;
+                }
+            });
         });
         for (int i = 1; i <= 100; ++i)
-            q.with([](Q& w, int v) { w.items.push_back(v); }, i);
-        q.with([](Q& w) { w.stop = true; });
+            q.with(cap, [](Q& w, int v) { w.items.push_back(v); }, i);
+        q.with(cap, [](Q& w) { w.stop = true; });
         worker.join();
         if (sum.load() != 5050) return 207;
     }
@@ -280,17 +294,19 @@ static int guarded_tests() {
         using namespace std::chrono_literals;
         static jaal::guarded<int> v(0);
         const auto t0 = std::chrono::steady_clock::now();
-        auto [got, held] = v.wait_with_for(50ms,
+        auto [got, held] = v.wait_with_for(cap, 50ms,
             [](const int& x) { return x > 0; }, [](int& x) { return x; });
         const auto waited = std::chrono::steady_clock::now() - t0;
         if (held || got != 0 || waited < 40ms) return 208;
 
         std::jthread writer([] {
             std::this_thread::sleep_for(20ms);
-            v.with([](int& x) { x = 7; });
+            jaal::thread_root([](const jaal::unlocked& tc) {
+                v.with(tc, [](int& x) { x = 7; });
+            });
         });
         const auto t1 = std::chrono::steady_clock::now();
-        auto [got2, held2] = v.wait_with_for(5s,
+        auto [got2, held2] = v.wait_with_for(cap, 5s,
             [](const int& x) { return x > 0; }, [](int& x) { return x; });
         if (!held2 || got2 != 7 || std::chrono::steady_clock::now() - t1 > 2s) return 209;
     }
@@ -298,11 +314,13 @@ static int guarded_tests() {
 }
 
 int main() {
-    int (*const checks[])() = {scope_tests, guarded_tests};
-    for (auto f : checks)
-        if (int r = f()) {
-            std::fprintf(stderr, "scope_test: check %d failed\n", r);
-            return 1;
-        }
-    return 0;
+    return jaal::thread_root([&](const jaal::unlocked& cap) -> int {
+        int (*const checks[])(const jaal::unlocked&) = {scope_tests, guarded_tests};
+        for (auto f : checks)
+            if (int r = f(cap)) {
+                std::fprintf(stderr, "scope_test: check %d failed\n", r);
+                return 1;
+            }
+        return 0;
+    });
 }

@@ -75,7 +75,11 @@ public:
         });
     }
 
-    std::size_t shutdown(std::chrono::milliseconds grace) override { return pool_.shutdown(grace); }
+    // Called by the kernel's teardown on the loop thread, which holds no lock
+    // (update and the host hooks are not running), so it may wait.
+    std::size_t shutdown(std::chrono::milliseconds grace) override {
+        return pool_.shutdown(cap_access::fresh_thread(), grace);
+    }
 
 private:
     pool pool_;

@@ -114,7 +114,10 @@ subscription lifecycle. Everything else is a library on top of `task` and
 - `Sink<Msg>`: the only way back into the loop; weak, can't keep the
   runtime alive.
 - `scope`: helper threads always joined before the block returns.
-- `guarded<T>`: data only reachable under its lock; nothing escapes it.
+- `guarded<T, R>`: data only reachable under its lock; nothing escapes it;
+  locks are taken in rank order, proved by capabilities (`unlocked`,
+  `held<R>`, `below<R>`), so a lock-order deadlock or a wait under a lock
+  does not compile.
 - `loop_bound<T>`: loop-thread-only state, reachable only with a token only
   the kernel makes.
 

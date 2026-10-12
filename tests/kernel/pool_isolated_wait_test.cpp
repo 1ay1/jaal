@@ -56,7 +56,7 @@ using flags_t = jaal::co_owned<Flags>;
 // The task holds a flag that stands in for "something the program owns is
 // still being read". If shutdown() returns while the flag is set, a real
 // program would be destroying that thing right now.
-void waits_for_busy_isolated() {
+void waits_for_busy_isolated(const jaal::unlocked& cap) {
     std::printf("--- shutdown() waits for a busy isolated task ---\n");
 
     auto f = flags_t::make();
@@ -79,7 +79,7 @@ void waits_for_busy_isolated() {
         while (!f->inside.load(std::memory_order_acquire))
             std::this_thread::sleep_for(200us);
 
-        const auto abandoned = p.shutdown(2s);
+        const auto abandoned = p.shutdown(cap, 2s);
         still_inside_at_shutdown = f->inside.load(std::memory_order_acquire);
         check(abandoned == 0, "a cooperative task is not reported abandoned");
     }
@@ -93,7 +93,7 @@ void waits_for_busy_isolated() {
 // ── 2. a wedged task is still abandoned ─────────────────────────────────
 // This is the promise the original design was protecting. A task that never
 // checks its token must NOT hold teardown open past the grace.
-void abandons_wedged_isolated() {
+void abandons_wedged_isolated(const jaal::unlocked& cap) {
     std::printf("--- shutdown() stays bounded when a task ignores stop ---\n");
 
     auto f = flags_t::make();
@@ -112,7 +112,7 @@ void abandons_wedged_isolated() {
             std::this_thread::sleep_for(200us);
 
         const auto t0 = std::chrono::steady_clock::now();
-        abandoned = p.shutdown(150ms);
+        abandoned = p.shutdown(cap, 150ms);
         took = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0);
 
@@ -128,27 +128,29 @@ void abandons_wedged_isolated() {
 }
 
 // ── 3. the count is right when nothing is running ───────────────────────
-void clean_shutdown_reports_zero() {
+void clean_shutdown_reports_zero(const jaal::unlocked& cap) {
     std::printf("--- a pool with no work shuts down clean ---\n");
     jaal::kernel::pool p{2};
     auto f = flags_t::make();
     p.post_isolated([](std::stop_token, flags_t f) { f->ran.fetch_add(1); }, f);
     std::this_thread::sleep_for(30ms);          // let it finish on its own
-    check(p.shutdown(1s) == 0, "a finished isolated task is not abandoned");
+    check(p.shutdown(cap, 1s) == 0, "a finished isolated task is not abandoned");
     check(f->ran.load() == 1, "the task ran exactly once");
 }
 
 }  // namespace
 
 int main() {
-    std::printf("=== pool_isolated_wait_test ===\n");
-    waits_for_busy_isolated();
-    abandons_wedged_isolated();
-    clean_shutdown_reports_zero();
-    if (failures) {
-        std::printf("FAILED (%d)\n", failures);
-        return 1;
-    }
-    std::printf("PASS\n");
-    return 0;
+    return jaal::thread_root([](const jaal::unlocked& cap) -> int {
+        std::printf("=== pool_isolated_wait_test ===\n");
+        waits_for_busy_isolated(cap);
+        abandons_wedged_isolated(cap);
+        clean_shutdown_reports_zero(cap);
+        if (failures) {
+            std::printf("FAILED (%d)\n", failures);
+            return 1;
+        }
+        std::printf("PASS\n");
+        return 0;
+    });
 }

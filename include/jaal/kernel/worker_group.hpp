@@ -15,9 +15,13 @@
 //     jaal::kernel::worker_group g;
 //     g.post([](std::stop_token st, jaal::co_owned<Pump> p) { p->run(st); }, pump);
 //     ...
-//     g.stop();   // stop requested on every job, then waits for all of them
+//     g.stop(cap);   // stop requested on every job, then waits for all of them
 //
-// Jobs follow pool's rule: a captureless body, Sendable arguments.
+// Jobs follow pool's rule: a captureless body, Sendable arguments, and an
+// optional leading `const jaal::unlocked&` (a job's thread holds no lock).
+//
+// stop() waits for other threads, which may need any lock the caller holds,
+// so it takes `unlocked`: stopping under a lock does not compile.
 //
 // Admission: post() after stop() is dropped, decided under the pool's lock,
 // so no job slips in between "still open?" and "counted".
@@ -41,18 +45,24 @@ class worker_group {
     worker_group& operator=(const worker_group&) = delete;
 
     /// Joins on destruction, so an owner that forgets stop() is still safe.
-    ~worker_group() { stop(); }
+    /// A destructor can't be handed a capability; it runs where the owner
+    /// dies, and an owner holding the group inside a lock body is the one
+    /// shape this can't see. Call stop(cap) explicitly to have it checked.
+    ~worker_group() { (void)pool_.shutdown_noexcept(pool::no_deadline); }
 
-    /// Run `body(stop_token, args...)` on a thread of its own. Dropped once
-    /// the group is stopped.
+    /// Run `body([unlocked,] stop_token, args...)` on a thread of its own.
+    /// Dropped once the group is stopped.
     template <class F, class... Args>
     void post(F body, Args... args) { pool_.post_isolated(body, std::move(args)...); }
 
     /// Barrier: when this returns, no job posted here is running. Idempotent.
-    void stop() noexcept { (void)pool_.shutdown_noexcept(pool::no_deadline); }
+    void stop(const unlocked&) noexcept { (void)pool_.shutdown_noexcept(pool::no_deadline); }
 
   private:
     pool pool_;
 };
 
 }  // namespace jaal::kernel
+
+// ~worker_group waits for every job: never owned by a guarded<T>.
+template <> inline constexpr bool jaal::joins_on_destroy<jaal::kernel::worker_group> = true;

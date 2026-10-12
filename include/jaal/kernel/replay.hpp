@@ -43,15 +43,19 @@ class recording {
 public:
     /// A hook for kernel::options::record.
     [[nodiscard]] std::function<void(const Msg&)> hook() {
-        return [this](const Msg& m) { log_.with([](auto& v, Msg c) { v.push_back(std::move(c)); }, m); };
+        // A terminal lock: the bodies below push or copy and call nothing.
+        return [this](const Msg& m) {
+            log_.with(cap_access::terminal(),
+                      [](auto& v, Msg c) { v.push_back(std::move(c)); }, m);
+        };
     }
 
     [[nodiscard]] std::vector<Msg> messages() const {
-        return log_.read([](const auto& v) { return v; });
+        return log_.read(cap_access::terminal(), [](const auto& v) { return v; });
     }
 
     [[nodiscard]] std::size_t size() const {
-        return log_.read([](const auto& v) { return v.size(); });
+        return log_.read(cap_access::terminal(), [](const auto& v) { return v.size(); });
     }
 
 private:
@@ -131,13 +135,13 @@ public:
 
     [[nodiscard]] std::function<void(const typename P::Msg&, time_point)> hook() {
         return [this](const typename P::Msg& m, time_point at) {
-            log_.with([](auto& v, entry e) { v.push_back(std::move(e)); },
+            log_.with(cap_access::terminal(), [](auto& v, entry e) { v.push_back(std::move(e)); },
                       entry{at, m});
         };
     }
 
     [[nodiscard]] std::vector<entry> entries() const {
-        return log_.read([](const auto& v) { return v; });
+        return log_.read(cap_access::terminal(), [](const auto& v) { return v; });
     }
 
 private:

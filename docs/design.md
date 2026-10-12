@@ -966,7 +966,7 @@ jaal/
 │   │   ├── pool.hpp  executor.hpp  worker pool, stop tokens, placement
 │   │   ├── loop.hpp              loop_token, loop_bound<T>
 │   │   ├── scope.hpp             scope + nursery (structured concurrency)
-│   │   ├── guarded.hpp           guarded<T>
+│   │   ├── guarded.hpp           guarded<T, R>: a lock, taken in rank order
 │   │   ├── fault.hpp             fault_policy, fault_site, handlers
 │   │   ├── trace.hpp             trace_hook, trace_event
 │   │   ├── replay.hpp            recorder, replay, replay_each

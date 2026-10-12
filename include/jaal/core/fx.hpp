@@ -31,6 +31,7 @@
 #include <utility>
 
 #include "../meta/fixed_string.hpp"
+#include "capability.hpp"
 #include "effect.hpp"
 #include "rng.hpp"
 #include "sendable.hpp"
@@ -56,9 +57,47 @@ namespace jaal {
 /// static_assert in an instantiated body is a hard error instead — so the
 /// probe answers "fine" and the build then fails anyway at the call.
 /// tests/core/task_gate_test.cpp pins both halves of this.
+///
+/// A body may also take `const jaal::unlocked&` FIRST:
+///     (const unlocked&, Sink<Msg>, std::stop_token, Args...)
+/// A task runs on a worker thread that holds no lock, so jaal hands it one.
+/// That is how background work earns the right to take locks
+/// (core/capability.hpp); a body that doesn't ask can't take any.
+namespace detail_task {
+template <class F, class Msg, class... Args>
+concept cap_task_body =
+    std::is_convertible_v<F, void (*)(const unlocked&, Sink<Msg>, std::stop_token, Args...)>;
+template <class F, class Msg, class... Args>
+concept plain_task_body =
+    std::is_convertible_v<F, void (*)(Sink<Msg>, std::stop_token, Args...)>;
+
+// Adapt a capability-taking body to the plain form: a captureless shim
+// whose only job is to mint the fresh thread's `unlocked` and call through.
+// Body is captureless (cap_task_body proved it), so Body{} IS the function.
+template <class Body, class Msg, class... Args>
+void with_fresh_cap(Sink<Msg> out, std::stop_token st, Args... args) {
+    const unlocked u = cap_access::fresh_thread();
+    Body{}(u, std::move(out), std::move(st), std::move(args)...);
+}
+
+/// The plain-form function pointer for any well-formed body.
+template <class Body, class Msg, class... Args>
+auto plain_fn(Body body) -> void (*)(Sink<Msg>, std::stop_token, Args...) {
+    if constexpr (plain_task_body<Body, Msg, Args...>) {
+        void (*fn)(Sink<Msg>, std::stop_token, Args...) = body;
+        return fn;
+    } else {
+        (void)body;
+        return &with_fresh_cap<Body, Msg, Args...>;
+    }
+}
+}  // namespace detail_task
+
 template <class F, class Msg, class... Args>
 concept TaskBody =
-    std::is_convertible_v<F, void (*)(Sink<Msg>, std::stop_token, Args...)>;
+    detail_task::plain_task_body<F, Msg, Args...>
+    || (detail_task::cap_task_body<F, Msg, Args...> && std::is_empty_v<F>
+        && std::default_initializable<F>);
 
 namespace detail {
 
@@ -349,7 +388,7 @@ struct task {
     private:
         template <class Body, class... Args>
         static Self make(placement where, Body body, Args... args) {
-            void (*fn)(Sink<Msg>, std::stop_token, Args...) = body;
+            auto fn = ::jaal::detail_task::plain_fn<Body, Msg, Args...>(body);
             return Self(type<Msg>{::jaal::detail::task_thunk<Msg>::make(fn, std::move(args)...),
                                   where});
         }
@@ -358,15 +397,19 @@ struct task {
             if constexpr (!(Sendable<Args> && ...))
                 static_assert((Sendable<Args> && ...),
                     "jaal: a task argument is not Sendable; pass owned values "
-                    "(std::string, not std::string_view or a pointer)");
-            else if constexpr (std::is_invocable_v<Body, Sink<Msg>, std::stop_token, Args...>)
+                    "(std::string, not std::string_view or a pointer). A capability is "
+                    "never Sendable: the body asks for its own `const jaal::unlocked&`.");
+            else if constexpr (std::is_invocable_v<Body, Sink<Msg>, std::stop_token, Args...>
+                               || std::is_invocable_v<Body, const unlocked&, Sink<Msg>,
+                                                      std::stop_token, Args...>)
                 static_assert(TaskBody<Body, Msg, Args...>,
                     "jaal: a task body must not capture anything; pass what it "
                     "needs as arguments after the body");
             else
                 static_assert(TaskBody<Body, Msg, Args...>,
                     "jaal: a task body must be callable as "
-                    "(Sink<Msg>, std::stop_token, Args...)");
+                    "(Sink<Msg>, std::stop_token, Args...) or "
+                    "(const jaal::unlocked&, Sink<Msg>, std::stop_token, Args...)");
         }
     };
 };

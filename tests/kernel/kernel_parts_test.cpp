@@ -208,7 +208,7 @@ struct Counters {
 using counters_t = jaal::co_owned<Counters>;
 }  // namespace
 
-static int pool_tests() {
+static int pool_tests(const jaal::unlocked& cap) {
     // jobs run, and the pool reuses workers rather than one thread per job
     {
         k::pool p(4);
@@ -239,9 +239,9 @@ static int pool_tests() {
             c->saw_stop = true;
         }, c);
         while (!c->started) std::this_thread::sleep_for(1ms);
-        p.shutdown();                                // must return
+        p.shutdown(cap);                             // must return
         if (!c->saw_stop) return 42;
-        p.shutdown();                                // idempotent
+        p.shutdown(cap);                             // idempotent
         p.post([](std::stop_token) {});              // ignored after shutdown
         if (p.queued() != 0) return 43;
     }
@@ -281,6 +281,5 @@ int main() {
 
     if (int r = mailbox_tests()) return r;
     if (int r = timer_tests())   return r;
-    if (int r = pool_tests())    return r;
-    return 0;
+    return jaal::thread_root([](const jaal::unlocked& cap) { return pool_tests(cap); });
 }
