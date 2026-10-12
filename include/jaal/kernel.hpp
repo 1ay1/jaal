@@ -32,5 +32,6 @@
 #include "kernel/replay.hpp"
 #include "kernel/run.hpp"
 #include "kernel/scope.hpp"
+#include "kernel/snapshot.hpp"
 #include "kernel/timeline.hpp"
 #include "kernel/trace.hpp"

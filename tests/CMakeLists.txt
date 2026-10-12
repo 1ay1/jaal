@@ -67,6 +67,8 @@ jaal_test(kernel_stop_group_test kernel/stop_group_test.cpp)
 # worker_group: stop() is a barrier with no grace. Check 1 is the point.
 jaal_test(kernel_worker_group_test kernel/worker_group_test.cpp)
 jaal_test(kernel_lock_order_test kernel/lock_order_test.cpp)
+# snapshot<T>: the lock-free alternative for read-mostly values.
+jaal_test(kernel_snapshot_test kernel/snapshot_test.cpp)
 # A program that declares a Clock gets the step time as update's third
 # argument. Pins: one `now` per step, sim advance moves it exactly, and a
 # timed recording replays to the live model.
