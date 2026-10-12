@@ -86,6 +86,12 @@ struct sync_policy {
         else if constexpr (is_plain_atomic<U>)                 return d::accept{};
         else if constexpr (std::is_array_v<U> || meta::aggregate_struct<U>)
             return d::structural{};
+        // No field reflection (MSVC): a plain class can't be looked inside,
+        // so hand it to walk's structural step, which owns the documented
+        // shallow rule. Rejecting it here instead made co_owned<AnyStruct>
+        // fail to compile on MSVC only -- Sendable already defers this way.
+        else if constexpr (!meta::has_fields_support && std::is_class_v<U>)
+            return d::structural{};
         else                                                   return d::reject{};
     }
 };
