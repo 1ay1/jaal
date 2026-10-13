@@ -571,7 +571,7 @@ private:
           model_(std::move(m)),
           inbox_(wake, opt.mailbox),
           task_faults_(std::make_shared<task_fault_box>()),
-          pool_(make_executor(host, opt, task_faults_, wake)) {
+          pool_(make_executor(host, opt, task_faults_, inbox_.weak())) {
         // `skip` promises the model survives a fault, which needs a copy
         // taken before update(). A move-only model can't be copied, so a
         // fault would lose it: that's `stop`, not `skip`. Say so instead of
@@ -1239,19 +1239,22 @@ private:
     // The error callback runs on whatever thread the job ran on: it just
     // queues the error (under a lock) and wakes the loop, which reports it
     // on its own thread.
+    // A failed job may run after the kernel (and its reactor) are gone: an
+    // abandoned worker at the shutdown grace. So it wakes the loop through
+    // the mailbox, weakly and only while open, never the raw reactor.
     template <class H>
     static std::unique_ptr<executor<msg_type>> make_executor(
             H& host, const options& opt, std::shared_ptr<task_fault_box> box,
-            std::function<void()> wake) {
+            std::weak_ptr<mailbox<msg_type>> mb) {
         typename executor<msg_type>::error_fn on_error =
-            [box = std::move(box), wake](std::exception_ptr e) {
+            [box = std::move(box), mb = std::move(mb)](std::exception_ptr e) {
                 // Terminal lock: this runs wherever the failed job ran, maybe
                 // unwinding out of a user lock body; the push calls nothing.
                 box->errors.with(cap_access::terminal(),
                                  [](auto& v, std::exception_ptr x) { v.push_back(std::move(x)); },
                                  std::move(e));
                 box->pending.store(true, std::memory_order_release);
-                if (wake) wake();
+                if (auto m = mb.lock()) m->wake_if_open();
             };
         if constexpr (requires { host.template make_executor<msg_type>(on_error); }) {
             if (auto e = host.template make_executor<msg_type>(on_error)) return e;

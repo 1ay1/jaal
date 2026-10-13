@@ -91,8 +91,9 @@ void bench_fold_effect() {
 }
 
 // ── cross-thread ─────────────────────────────────────────────────────────
-void bench_cross_thread() {
-    constexpr std::size_t P = 4, PER = 250'000, N = P * PER;
+template <std::size_t P>
+void bench_cross_thread_n() {
+    constexpr std::size_t PER = 1'000'000 / P, N = P * PER;
     jaal::kernel::options opt;
     opt.fold_budget = 1u << 20;
     jaal::headless<Counter> h(opt);
@@ -104,8 +105,15 @@ void bench_cross_thread() {
             ps.emplace_back([sink] { for (std::size_t i = 0; i < PER; ++i) sink.send(Counter::Inc{}); });
         while (h.model().n < N) k.step(h.record());
     });
-    report("cross-thread", N, ns);
-    std::printf("  %-14s %s\n", "", "(4 producers; per message: lock, maybe wake, drain, fold)");
+    char name[32];
+    std::snprintf(name, sizeof name, "cross x%zu", P);
+    report(name, N, ns);
+}
+
+void bench_cross_thread() {
+    bench_cross_thread_n<1>();
+    bench_cross_thread_n<4>();
+    std::printf("  %-14s %s\n", "", "(producers; per message: lock, maybe wake, drain, fold)");
 }
 
 // ── step with nothing to do ──────────────────────────────────────────────

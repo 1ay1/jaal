@@ -65,6 +65,8 @@
 
 #include <concepts>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <string_view>
 
 #include "../meta/fixed_string.hpp"
@@ -117,6 +119,43 @@ concept ranked_before = detail::cap::has_rank_shape<A> && detail::cap::has_rank_
                         && (A::value < B::value);
 
 struct cap_access;
+
+namespace detail::cap {
+// The rank of the innermost lock this thread holds through a guarded (0 =
+// none). The types already forbid every bad order; this catches the one way
+// around them -- a capability minted where it was a lie (thread_root inside
+// a lock body) -- at the wait or lock it would have deadlocked on.
+// One TLS load per lock, next to a mutex that costs ~20x that.
+inline std::uint16_t& held_top() noexcept {
+    thread_local std::uint16_t top = 0;
+    return top;
+}
+
+[[noreturn]] inline void lie(const char* what) noexcept {
+    std::fprintf(stderr,
+                 "jaal: %s while this thread holds a lock (rank %u). A capability "
+                 "was minted where it wasn't true: thread_root() inside a lock body?\n",
+                 what, static_cast<unsigned>(held_top()));
+    std::abort();
+}
+
+/// A blocking wait: the thread must hold nothing.
+inline void require_unlocked(const char* what) noexcept {
+    if (held_top() != 0) [[unlikely]] lie(what);
+}
+}  // namespace detail::cap
+
+/// jaal's own terminal locks (core/capability.hpp cap_access::terminal).
+/// A distinct type, so a terminal lock can never be confused with a real
+/// `unlocked` and needs no tracking.
+class terminal_cap {
+    constexpr terminal_cap() noexcept = default;
+    friend struct cap_access;
+public:
+    terminal_cap(const terminal_cap&)            = delete;
+    terminal_cap& operator=(const terminal_cap&) = delete;
+    void operator&() const                       = delete;
+};
 
 /// Proof that the current thread holds a lock of rank Top and nothing
 /// ranked higher. held<nothing> is `unlocked`.
@@ -186,16 +225,18 @@ struct cap_access {
     /// cycle no matter what its caller holds -- which is why it may run from
     /// a user lock's body (a Sink post that wakes the headless host). Never
     /// for a lock whose body runs user code.
-    [[nodiscard]] static constexpr unlocked terminal() noexcept { return unlocked{}; }
+    [[nodiscard]] static constexpr terminal_cap terminal() noexcept { return terminal_cap{}; }
 };
 
 /// The root capability for a thread jaal did not start: main(), a test's
 /// main, a thread a C library calls back on. f(const jaal::unlocked&) runs
 /// with it. Calling this anywhere a lock might be held is a lie the type
-/// system cannot see, so the ban-list only allows it in allowlisted files.
+/// system cannot see, so the ban-list only allows it in allowlisted files,
+/// and it aborts at runtime if this thread holds a guarded lock.
 template <class F>
     requires std::invocable<F&, const unlocked&>
 decltype(auto) thread_root(F&& f) {
+    detail::cap::require_unlocked("jaal::thread_root");
     const unlocked u = cap_access::fresh_thread();
     return f(u);
 }
@@ -205,6 +246,7 @@ namespace detail::cap {
 template <class T> inline constexpr bool is_capability = false;
 template <class Top> inline constexpr bool is_capability<held<Top>> = true;
 template <class R> inline constexpr bool is_capability<below<R>> = true;
+template <> inline constexpr bool is_capability<terminal_cap> = true;
 
 /// Does a body take a leading `const unlocked&`? Thread-entry points use
 /// this to decide whether to hand one over.
@@ -228,5 +270,6 @@ inline constexpr bool joins_on_destroy = false;
 // argument, job argument or lock-body argument can be one.
 template <class Top> inline constexpr bool sendable_opt_out<held<Top>> = true;
 template <class R>   inline constexpr bool sendable_opt_out<below<R>> = true;
+template <>          inline constexpr bool sendable_opt_out<terminal_cap> = true;
 
 }  // namespace jaal

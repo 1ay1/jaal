@@ -66,6 +66,7 @@
 #include <utility>
 #include <vector>
 
+#include "../core/capability.hpp"
 #include "../core/sendable.hpp"
 #include "../core/sink.hpp"
 #include "waits.hpp"
@@ -105,11 +106,10 @@ public:
     /// Thread-safe. False when closed, or when full under drop_newest (or
     /// block, on the loop thread).
     ///
-    /// The wake happens UNDER the lock. With a real reactor behind wake_,
-    /// waking after unlocking races shutdown: a detached task could be
-    /// between unlock and wake when the kernel closes the mailbox and the
-    /// reactor is destroyed, and its wake would write into a closed fd.
-    /// Under the lock, close() waits for any post in progress.
+    /// The wake happens AFTER unlocking, so other senders never queue
+    /// behind a syscall. It's still shutdown-safe: the sender counts itself
+    /// into waking_ before it unlocks, and close() waits for that count to
+    /// drain, so no wake can reach a reactor that's already gone.
     bool post(Msg m) override { return post_from(0, std::move(m)); }
 
     /// post(), tagged with where it came from (see "Origins" above). A
@@ -125,7 +125,14 @@ public:
                     ++stats_.dropped;
                     return false;
                 case overflow::drop_oldest:
-                    q_.pop_front();
+                    ++head_;                     // O(1); compacted at drain
+                    // A stalled loop must not let the evicted prefix grow
+                    // forever: compacting once it reaches capacity keeps the
+                    // buffer under 2x capacity at amortised O(1).
+                    if (head_ >= opt_.capacity) {
+                        q_.erase(q_.begin(), q_.begin() + static_cast<std::ptrdiff_t>(head_));
+                        head_ = 0;
+                    }
                     ++stats_.dropped;
                     break;
                 case overflow::block:
@@ -134,7 +141,10 @@ public:
                     // itself, or a scope helper the loop is joining. Refuse
                     // instead of waiting forever (kernel/waits.hpp).
                     if (std::this_thread::get_id() == loop_
-                        || waits_detail::waited_on_by(loop_)) {
+                        || waits_detail::waited_on_by(loop_)
+                        || jaal::detail::cap::held_top() != 0) {
+                        // Also refused under a held lock: the loop's host
+                        // hooks may need that lock before they drain.
                         ++stats_.loop_full;
                         return false;
                     }
@@ -146,11 +156,15 @@ public:
                     break;
             }
         }
-        const bool first = q_.empty();
+        const bool first = live_count() == 0;
         q_.push_back({from, std::move(m)});
         nonempty_.store(true, std::memory_order_release);
-        if (q_.size() > stats_.high_water) stats_.high_water = q_.size();
-        if (first && wake_) wake_();             // only on empty → non-empty
+        if (live_count() > stats_.high_water) stats_.high_water = live_count();
+        if (!first || !wake_) return true;       // only on empty → non-empty
+        waking_.fetch_add(1, std::memory_order_relaxed);   // under m_: close() sees it
+        lk.unlock();
+        wake_();
+        waking_.fetch_sub(1, std::memory_order_release);
         return true;
     }
 
@@ -183,15 +197,25 @@ public:
         out.clear();
         if (!nonempty_.load(std::memory_order_acquire)) return;
         {
+            // Swap the whole buffer: O(1) under the lock however much is
+            // queued, and `out`'s capacity comes back as the next buffer,
+            // so a steady stream allocates nothing.
             std::lock_guard lk(m_);
             nonempty_.store(false, std::memory_order_relaxed);
-            if (q_.empty()) return;
-            out.reserve(q_.size());
-            for (auto& e : q_) {
-                if (e.from != 0 && is_retired(e.from)) { ++stats_.retired; continue; }
-                out.push_back(std::move(e));
+            if (live_count() == 0) return;
+            q_.swap(out);
+            // drop_oldest evicted a prefix: it's dead weight in `out`.
+            if (const auto h = std::exchange(head_, 0); h != 0)
+                out.erase(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(h));
+            // Retired origins. Other threads only read live_ (under m_), but
+            // the check is cheap and keeping it here keeps it obviously right.
+            if (last_origin_ != 0) {
+                const auto before = out.size();
+                std::erase_if(out, [&](const entry& e) {
+                    return e.from != 0 && is_retired(e.from);
+                });
+                stats_.retired += before - out.size();
             }
-            q_.clear();
         }
         if (opt_.capacity != 0) room_.notify_all();   // blocked senders: go
     }
@@ -233,12 +257,12 @@ public:
 
     [[nodiscard]] bool empty() const {
         std::lock_guard lk(m_);
-        return q_.empty();
+        return live_count() == 0;
     }
 
     [[nodiscard]] std::size_t size() const {
         std::lock_guard lk(m_);
-        return q_.size();
+        return live_count();
     }
 
     [[nodiscard]] mailbox_stats stats() const {
@@ -253,10 +277,26 @@ public:
             std::lock_guard lk(m_);
             closed_ = true;
             q_.clear();
+            head_ = 0;
             live_.clear();
             nonempty_.store(false, std::memory_order_relaxed);
         }
         room_.notify_all();
+        // A sender that queued before closed_ may still be inside wake_().
+        // No new one can start, and a wake is one syscall, so spin it out.
+        while (waking_.load(std::memory_order_acquire) != 0) std::this_thread::yield();
+    }
+
+    /// Wake the loop without posting, unless closed. close() waits for us,
+    /// so a wake can never reach a reactor that's already gone.
+    void wake_if_open() {
+        {
+            std::lock_guard lk(m_);
+            if (closed_ || !wake_) return;
+            waking_.fetch_add(1, std::memory_order_relaxed);
+        }
+        wake_();
+        waking_.fetch_sub(1, std::memory_order_release);
     }
 
     [[nodiscard]] bool closed() const {
@@ -271,7 +311,9 @@ public:
     }
 
 private:
-    bool full() const noexcept { return opt_.capacity != 0 && q_.size() >= opt_.capacity; }
+    bool full() const noexcept { return opt_.capacity != 0 && live_count() >= opt_.capacity; }
+    // q_[0, head_) were evicted by drop_oldest and are dropped at drain.
+    std::size_t live_count() const noexcept { return q_.size() - head_; }
 
     // Origins are handed out in increasing order and never reused, so
     // "retired" is "issued, and not in live_". Called with m_ held.
@@ -281,8 +323,12 @@ private:
 
     mutable std::mutex      m_;
     std::condition_variable room_;
-    std::deque<entry>       q_;
+    // A vector, not a deque: drain swaps it out whole, and the drained
+    // buffer's capacity comes back as the next queue.
+    std::vector<entry>      q_;
+    std::size_t             head_ = 0;
     std::atomic<bool>       nonempty_{false};    // hint for drain's lock-free empty check
+    std::atomic<int>        waking_{0};          // senders inside wake_() right now
     std::function<void()>   wake_;
     mailbox_options         opt_;
     mailbox_stats           stats_{};
@@ -349,6 +395,9 @@ public:
     [[nodiscard]] std::size_t size() const     { return box_->size(); }
     [[nodiscard]] mailbox_stats stats() const  { return box_->stats(); }
     void close()                               { box_->close(); }
+
+    /// A weak handle for waking the loop from a thread that may outlive it.
+    [[nodiscard]] std::weak_ptr<mailbox<Msg>> weak() const noexcept { return box_; }
 
     /// Post directly (the loop's own re-entrant sends).
     bool post(Msg m) { return box_->post(std::move(m)); }

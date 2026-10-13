@@ -48,6 +48,7 @@
 #include <utility>
 
 #include "../core/capability.hpp"
+#include <cstdint>
 #include "../core/join_free.hpp"
 #include "../core/sendable.hpp"
 #include "../core/sync.hpp"
@@ -98,6 +99,23 @@ decltype(auto) call(F& f, Ref ref, Args&... args) {
     }
 }
 
+// Records the rank held for the duration of a lock body and checks the
+// order at runtime too: the types forbid every bad order, so this only
+// fires when a capability was minted where it was a lie.
+template <std::uint16_t V>
+class hold {
+public:
+    hold() noexcept : prev_(cap::held_top()) {
+        if (prev_ >= V) [[unlikely]] cap::lie("lock taken out of rank order");
+        cap::held_top() = V;
+    }
+    ~hold() { cap::held_top() = prev_; }
+    hold(const hold&)            = delete;
+    hold& operator=(const hold&) = delete;
+private:
+    std::uint16_t prev_;
+};
+
 }  // namespace detail::guard
 
 template <class T, class R = leaf>
@@ -143,9 +161,32 @@ public:
     auto with(const below<R>&, F f, Args... args)
         -> detail::guard::body_result_t<F, held_cap, T&, Args...> {
         check<F, T&, Args...>();
+        detail::guard::hold<R::value> h;
         std::unique_lock lk(m_);
         Notify on_exit{*this};   // a writer may have made someone's predicate true
         return detail::guard::call<F, held_cap, T&>(f, value_, args...);
+    }
+
+    /// jaal-internal terminal access: the body is a plain push/swap that
+    /// takes no capability and calls nothing, so it's safe from any thread
+    /// whatever it holds, and isn't tracked.
+    template <class F, class... Args>
+        requires(!detail::guard::takes_cap<F, held_cap, T&, Args...>)
+    auto with(const terminal_cap&, F f, Args... args)
+        -> detail::guard::body_result_t<F, held_cap, T&, Args...> {
+        check<F, T&, Args...>();
+        std::unique_lock lk(m_);
+        Notify on_exit{*this};
+        return f(value_, std::move(args)...);
+    }
+
+    template <class F, class... Args>
+        requires(!detail::guard::takes_cap<F, held_cap, const T&, Args...>)
+    auto read(const terminal_cap&, F f, Args... args) const
+        -> detail::guard::body_result_t<F, held_cap, const T&, Args...> {
+        check<F, const T&, Args...>();
+        std::shared_lock lk(m_);
+        return f(std::as_const(value_), std::move(args)...);
     }
 
     /// Shared access: body([held<R>,] const T&, args...). Many readers at
@@ -154,6 +195,7 @@ public:
     auto read(const below<R>&, F f, Args... args) const
         -> detail::guard::body_result_t<F, held_cap, const T&, Args...> {
         check<F, const T&, Args...>();
+        detail::guard::hold<R::value> h;
         std::shared_lock lk(m_);
         return detail::guard::call<F, held_cap, const T&>(f, std::as_const(value_), args...);
     }
@@ -171,6 +213,8 @@ public:
         -> detail::guard::body_result_t<F, held_cap, T&, Args...> {
         check<F, T&, Args...>();
         check_pred<P, Args...>();
+        detail::cap::require_unlocked("guarded::wait_with");
+        detail::guard::hold<R::value> h;
         std::unique_lock lk(m_);
         ++waiters_;
         cv_.wait(lk, [&] { return pred(std::as_const(value_), std::as_const(args)...); });
@@ -187,6 +231,8 @@ public:
         -> std::pair<detail::guard::body_result_t<F, held_cap, T&, Args...>, bool> {
         check<F, T&, Args...>();
         check_pred<P, Args...>();
+        detail::cap::require_unlocked("guarded::wait_with_for");
+        detail::guard::hold<R::value> h;
         std::unique_lock lk(m_);
         ++waiters_;
         const bool ok = cv_.wait_for(lk, d, [&] {
@@ -204,6 +250,7 @@ public:
     auto try_with(const below<R>&, F f, Args... args)
         -> std::optional<detail::guard::body_result_t<F, held_cap, T&, Args...>> {
         check<F, T&, Args...>();
+        detail::guard::hold<R::value> h;
         std::unique_lock lk(m_, std::try_to_lock);
         if (!lk.owns_lock()) return std::nullopt;
         Notify on_exit{*this};
@@ -214,6 +261,7 @@ public:
     auto try_read(const below<R>&, F f, Args... args) const
         -> std::optional<detail::guard::body_result_t<F, held_cap, const T&, Args...>> {
         check<F, const T&, Args...>();
+        detail::guard::hold<R::value> h;
         std::shared_lock lk(m_, std::try_to_lock);
         if (!lk.owns_lock()) return std::nullopt;
         return detail::guard::call<F, held_cap, const T&>(f, std::as_const(value_), args...);

@@ -80,7 +80,9 @@ platform/posix/signals.hpp: atomic
 # Lock capabilities (core/capability.hpp) are minted only where jaal KNOWS
 # what the thread holds: the definition of cap_access / thread_root itself,
 # a thread's entry, a lock body, and the host-side terminal callers below.
-core/capability.hpp: cap_mint
+# thread_local: the held-rank backstop (detail::cap::held_top) that catches
+# a capability minted where it was a lie.
+core/capability.hpp: cap_mint thread_local
 # replay: its event log is a guarded; host-side callers hold no jaal lock.
 kernel/replay.hpp: cap_mint
 # executor: the pool adapter's shutdown runs on a host thread holding nothing.

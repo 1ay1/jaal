@@ -65,6 +65,8 @@
 #include <optional>
 #include <stop_token>
 
+#include "../core/capability.hpp"
+
 namespace jaal::kernel {
 
 class stop_group {
@@ -157,6 +159,8 @@ class stop_group {
     ///
     /// Idempotent: a second call closes nothing new and just waits again.
     std::size_t stop_and_wait(std::optional<std::chrono::milliseconds> grace) {
+        // A member may need any lock this thread holds to finish.
+        jaal::detail::cap::require_unlocked("stop_group::stop_and_wait");
         {
             std::lock_guard lk(c_->m);
             c_->closed = true;

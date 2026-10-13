@@ -67,6 +67,11 @@ jaal_test(kernel_stop_group_test kernel/stop_group_test.cpp)
 # worker_group: stop() is a barrier with no grace. Check 1 is the point.
 jaal_test(kernel_worker_group_test kernel/worker_group_test.cpp)
 jaal_test(kernel_lock_order_test kernel/lock_order_test.cpp)
+if(UNIX)
+    # The audit's fixes: forged capabilities abort, shutdown is a barrier
+    # every time, no blocking post under a lock, no wake after teardown.
+    jaal_test(kernel_backstop_test kernel/backstop_test.cpp)
+endif()
 # snapshot<T>: the lock-free alternative for read-mostly values.
 jaal_test(kernel_snapshot_test kernel/snapshot_test.cpp)
 # A program that declares a Clock gets the step time as update's third

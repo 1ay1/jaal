@@ -169,13 +169,15 @@ public:
     pool(const pool&)            = delete;
     pool& operator=(const pool&) = delete;
 
-    ~pool() { (void)shutdown_noexcept(std::chrono::seconds(2)); }
+    // A pool already shut down (and maybe abandoned a wedged worker) isn't
+    // waited for a second time here.
+    ~pool() { (void)shutdown_unchecked(std::chrono::seconds(2), /*rewait=*/false); }
 
     /// shutdown() for noexcept callers (destructors, worker_group::stop): a
     /// self-join aborts with the reason instead of throwing.
     std::size_t shutdown_noexcept(std::optional<std::chrono::milliseconds> grace) noexcept {
         lock_order::check_or_abort(c_.get(), "pool shutdown");
-        return shutdown_unchecked(grace);
+        return shutdown_unchecked(grace, /*rewait=*/true);
     }
 
     /// Queue `body(stop_token, args...)` for the shared workers. The body is
@@ -219,7 +221,9 @@ private:
             std::lock_guard lk(c_->m);
             if (c_->stopping) return;
             c_->queue.push_back(std::move(j));
-            if (c_->idle == 0 && workers_.size() < c_->max) spawn_worker();
+            // Idle workers that haven't woken yet still count as idle, so
+            // compare against the queue, not just idle == 0.
+            if (c_->queue.size() > c_->idle && workers_.size() < c_->max) spawn_worker();
         }
         c_->cv.notify_one();
     }
@@ -233,27 +237,41 @@ private:
                                          // so a shutdown racing this post
                                          // still waits for it
         }
+        // The job lives in a box we keep a hold of: if the OS refuses the
+        // thread, the half-built thread state is destroyed and would take
+        // the job with it.
+        auto box = std::make_shared<job>(std::move(j));
+        std::jthread t;
         try {
             // The thread co-owns the core, so it can report an error even
             // if it outlives the pool.
-            std::jthread t([c = c_, j = std::move(j)](std::stop_token st) mutable {
-                run_guarded(*c, j, std::move(st));
+            t = std::jthread([c = c_, box](std::stop_token st) mutable {
+                job mine = std::move(*box);
+                box.reset();
+                run_guarded(*c, mine, std::move(st));
+                mine = nullptr;          // captures die before we count out
                 {
                     std::lock_guard lk(c->m);
                     --c->isolated_running;
                 }
                 c->exited_cv.notify_all();
             });
-            std::lock_guard lk(c_->m);
-            c_->isolated.push_back(t.get_stop_source());
-            t.detach();
         } catch (...) {
             {
                 std::lock_guard lk(c_->m);
                 --c_->isolated_running;  // no thread was created
             }
-            post_job(std::move(j));  // the OS refused a thread: use the pool
+            post_job(std::move(*box));   // the OS refused a thread: use the pool
+            return;
         }
+        std::stop_source src = t.get_stop_source();
+        t.detach();
+        std::lock_guard lk(c_->m);
+        // Shutdown may have run since we counted this one in. It already
+        // stopped the list, so stop this thread here.
+        if (c_->stopping) { src.request_stop(); return; }
+        try { c_->isolated.push_back(std::move(src)); }
+        catch (...) { src.request_stop(); }   // can't track it: don't let it run unasked
     }
 
 public:
@@ -346,31 +364,42 @@ public:
         // Shutting down your OWN pool from one of its jobs would wait for
         // itself; that is a runtime error, every time.
         lock_order::require_not_own_job(c_.get(), "pool::shutdown");
-        return shutdown_unchecked(grace);
+        return shutdown_unchecked(grace, /*rewait=*/true);
     }
 
 private:
-    std::size_t shutdown_unchecked(std::optional<std::chrono::milliseconds> grace) noexcept {
+    // `rewait`: a second call still waits for the jobs to finish (within its
+    // own grace) rather than returning at once, so "returned = nothing is
+    // running" holds for every caller, not just the first.
+    std::size_t shutdown_unchecked(std::optional<std::chrono::milliseconds> grace,
+                                   bool rewait) noexcept {
         std::vector<std::jthread> workers;
+        std::deque<job> dropped;
         {
             std::lock_guard lk(c_->m);
-            if (c_->stopping) return 0;
-            c_->stopping = true;
-            c_->queue.clear();
-            for (auto& s : c_->isolated) s.request_stop();
-            c_->isolated.clear();
-            workers.swap(workers_);
+            if (c_->stopping) {
+                if (!rewait) return 0;
+            } else {
+                c_->stopping = true;
+                dropped.swap(c_->queue);     // destroyed below, outside the lock
+                for (auto& s : c_->isolated) s.request_stop();
+                c_->isolated.clear();
+                workers.swap(workers_);
+                c_->to_exit = workers.size();
+            }
         }
+        dropped.clear();
         for (auto& w : workers) w.request_stop();
         c_->cv.notify_all();
 
         // Wait for every worker to leave its loop AND every isolated task to
         // return, or for the grace to end. One deadline covers both: the
         // grace is a bound on teardown, not a per-thread budget.
-        const std::size_t n = workers.size();
         bool all_out;
+        std::size_t n;
         {
             std::unique_lock lk(c_->m);
+            n = c_->to_exit;
             const auto done = [&] {
                 return c_->exited >= n && c_->isolated_running == 0;
             };
@@ -456,6 +485,7 @@ private:
         std::vector<std::stop_source> isolated;
         std::size_t                   idle     = 0;
         std::size_t                   exited   = 0;
+        std::size_t                   to_exit  = 0;   // workers alive at shutdown
         // Isolated tasks currently running. shutdown() waits for this to
         // reach zero inside the SAME grace it gives pool workers, so a task
         // that co-owns nothing of jaal's -- an app static, a process-wide

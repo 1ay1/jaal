@@ -40,6 +40,8 @@
 #include <mutex>
 #include <stop_token>
 
+#include "../core/capability.hpp"
+
 namespace jaal::kernel {
 
 /// Block for `d`, or until `st` is stopped, whichever comes first.
@@ -66,6 +68,8 @@ template <class Rep, class Period>
     // there is shared state to protect — the shared state IS the token.
     std::mutex                   m;
     std::condition_variable_any  cv;
+    // A sleep under a lock stalls every thread that needs it.
+    jaal::detail::cap::require_unlocked("delay_for");
     std::unique_lock             lk(m);
     // wait_for returns the PREDICATE's value, so making the predicate "were
     // we stopped" is what makes the result mean "stopped" rather than the

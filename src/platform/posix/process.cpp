@@ -131,11 +131,11 @@ struct posix_process::impl {
         err.close_both();
         in.close_both();
         death.close_both();
-        if (is_valid(pidfd)) close_handle(pidfd);
         // A child we never reaped would become a zombie held by this
         // process for its lifetime. Best effort: ask it to go, then reap
         // without blocking. We do NOT wait — a destructor that can hang is
-        // worse than a zombie.
+        // worse than a zombie. The pidfd is closed only after: signalling a
+        // closed fd number could hit whatever another thread opened there.
         if (pid > 0 && !reaped) {
             if (leads_own_group()) ::kill(-pid, SIGKILL);
 #if defined(__linux__)
@@ -146,6 +146,7 @@ struct posix_process::impl {
             int st = 0;
             ::waitpid(pid, &st, WNOHANG);
         }
+        if (is_valid(pidfd)) close_handle(pidfd);
     }
 
     /// Asked, not remembered: setsid() fails when the caller already leads a

@@ -67,13 +67,16 @@ struct sigaction g_prev[signal_count];             // what we replaced
 
 extern "C" void on_signal(int sig) {
     const int saved_errno = errno;
-    g_in_handler.fetch_add(1, std::memory_order_acq_rel);
+    g_in_handler.fetch_add(1, std::memory_order_seq_cst);
     const int idx = index_of(sig);
     if (idx >= 0) {
         const unsigned b = 1u << static_cast<unsigned>(idx);
         for (auto& s : g_slots) {
             if (!(s.wants.load(std::memory_order_acquire) & b)) continue;
-            const int fd = s.fd.load(std::memory_order_acquire);
+            // seq_cst pairs with release()'s exchange + count load: either
+            // release sees us counted in, or we see -1. acq_rel alone allows
+            // both to miss each other (store-buffering).
+            const int fd = s.fd.load(std::memory_order_seq_cst);
             if (fd < 0) continue;
             for (int spin = test::signals_window.load(std::memory_order_relaxed);
                  spin > 0; --spin)
@@ -186,7 +189,7 @@ void posix_signals::release() noexcept {
     auto& s = g_slots[slot_];
     // 1. unpublish: new handler runs skip this slot
     s.wants.store(0, std::memory_order_release);
-    const int wfd = s.fd.exchange(-1, std::memory_order_acq_rel);
+    const int wfd = s.fd.exchange(-1, std::memory_order_seq_cst);
     // 2. drop our share of each handler; the last one restores the old one
     for (unsigned i = 0; i < signal_count; ++i)
         if (got_.contains(static_cast<sig>(i))) drop_handler(i);
@@ -195,7 +198,7 @@ void posix_signals::release() noexcept {
     //    now sees -1. Bounded in practice: a handler is a handful of
     //    instructions. (A signal storm could keep this >0 indefinitely; that
     //    would already be a stuck program.)
-    while (g_in_handler.load(std::memory_order_acquire) != 0) std::this_thread::yield();
+    while (g_in_handler.load(std::memory_order_seq_cst) != 0) std::this_thread::yield();
     // 4. now nothing can write to wfd: close it
     if (wfd >= 0) ::close(wfd);
     if (s.read_fd >= 0) ::close(s.read_fd);
