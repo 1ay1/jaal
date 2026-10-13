@@ -64,7 +64,14 @@ struct join_free_policy {
                            || std::is_same_v<S, s::sync_handle>)     return d::accept{};
         else if constexpr (s::is_owns_shape<S> || s::is_value_of_shape<S>)
             return typename s::elements<S>::template as<d::into>{};
-        else if constexpr (std::is_class_v<U>)                       return d::structural{};
+        // A struct the walker can see into: check its fields.
+        else if constexpr (std::is_class_v<U> && meta::aggregate_struct<U>) return d::structural{};
+        // A class it can't see into (user constructors, private members) is
+        // accepted at ANY depth, not just at the top: JoinFree is an opt-OUT
+        // property -- a joining type is marked joins_on_destroy where it is
+        // defined, and the walker only needs to find marked types it can
+        // reach. Treating every opaque class as "unproven" would reject
+        // std::string-like user types, json, every handle class.
         else                                                         return d::accept{};
     }
 };
@@ -72,18 +79,8 @@ struct join_free_policy {
 template <class T>
 using join_free_run = walk::run<join_free_policy, std::remove_cv_t<T>>;
 
-// A class the walker can't look inside is accepted (it has no fields it can
-// see; its author marks it if it joins).
 template <class T>
-consteval bool join_free_value() {
-    using U = std::remove_cv_t<T>;
-    if constexpr (std::is_class_v<U> && !meta::aggregate_struct<U> && !joins_on_destroy<U>
-                  && std::is_same_v<stdshape::shape_t<U>, stdshape::unknown>
-                  && std::is_void_v<typename join_pointee<U>::type>)
-        return true;
-    else
-        return join_free_run<T>::ok;
-}
+consteval bool join_free_value() { return join_free_run<T>::ok; }
 
 }  // namespace detail
 

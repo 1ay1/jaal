@@ -74,53 +74,58 @@ endforeach()
 # REPLACE hit the same class of failures at the escape boundary.
 #
 # Delegate line boundaries to `grep`, which is line-oriented by definition.
-# One `execute_process` per file per ban name is bounded work (a few dozen
-# names × a few hundred files) and cannot lose data at a `;`. Each call
-# returns matching lines with their line numbers, which we then filter
-# against comment-only lines (prose about std::thread isn't a use) and the
-# per-file allowlist. grep is present on every platform jaal supports.
+# ONE `execute_process` per ban name over ALL files (`grep -nHE`, each hit
+# prefixed `<file>:<lineno>:`), not one per file per name: on Windows a
+# process spawn costs tens of milliseconds, and ~1000 files x 10 names took
+# the lint past its 300 s timeout. Each hit is then filtered against
+# comment-only lines (prose about std::thread isn't a use) and the per-file
+# allowlist. grep is present on every platform jaal supports.
 file(GLOB_RECURSE files RELATIVE ${ROOT} ${ROOT}/*.hpp ${ROOT}/*.cpp)
 find_program(GREP_EXE grep REQUIRED)
 set(errors "")
-foreach(f IN LISTS files)
-    string(MAKE_C_IDENTIFIER "${f}" key)
-    set(allowed "${allow_${key}}")
-    foreach(name IN LISTS ban_names)
-        execute_process(
-            COMMAND ${GREP_EXE} -nE "${ban_${name}}" ${ROOT}/${f}
-            OUTPUT_VARIABLE hits
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            RESULT_VARIABLE grep_rc
-            ERROR_QUIET)
-        # rc=1 means no match (fine); rc=0 means one or more; rc>1 is an
-        # error. Any non-empty output is a candidate; filter out comment-only
-        # lines and allowlisted uses.
-        if(NOT hits)
+list(SORT files)
+foreach(name IN LISTS ban_names)
+    if(NOT files)
+        break()
+    endif()
+    execute_process(
+        COMMAND ${GREP_EXE} -nHE "${ban_${name}}" ${files}
+        WORKING_DIRECTORY ${ROOT}
+        OUTPUT_VARIABLE hits
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE grep_rc
+        ERROR_QUIET)
+    # rc=1 means no match (fine); rc=0 means one or more; rc>1 is an
+    # error. Any non-empty output is a candidate.
+    if(NOT hits)
+        continue()
+    endif()
+    string(ASCII 1 _sc)
+    string(REPLACE ";" "${_sc}" hits "${hits}")
+    string(REGEX MATCHALL "[^\n]+" hit_lines "${hits}")
+    foreach(hl IN LISTS hit_lines)
+        string(REPLACE "${_sc}" ";" hl "${hl}")
+        # grep -nH prefixes `<file>:<lineno>:`. File names are the RELATIVE
+        # paths we passed (no drive colon), so the first two colons split.
+        string(REGEX MATCH "^([^:]+):([0-9]+):(.*)$" _ "${hl}")
+        set(f "${CMAKE_MATCH_1}")
+        set(lineno "${CMAKE_MATCH_2}")
+        set(content "${CMAKE_MATCH_3}")
+        # skip comment-only lines
+        if(content MATCHES "^[ \t]*//")
             continue()
         endif()
-        string(ASCII 1 _sc)
-        string(REPLACE ";" "${_sc}" hits "${hits}")
-        string(REGEX MATCHALL "[^\n]+" hit_lines "${hits}")
-        foreach(hl IN LISTS hit_lines)
-            string(REPLACE "${_sc}" ";" hl "${hl}")
-            # grep -n prefixes `<lineno>:`; strip that to get line content
-            string(REGEX MATCH "^([0-9]+):(.*)$" _ "${hl}")
-            set(lineno "${CMAKE_MATCH_1}")
-            set(content "${CMAKE_MATCH_2}")
-            # skip comment-only lines
-            if(content MATCHES "^[ \t]*//")
-                continue()
-            endif()
-            # skip if the hit is entirely inside a trailing `//` comment
-            string(REGEX REPLACE "//.*" "" code "${content}")
-            if(NOT code MATCHES "${ban_${name}}")
-                continue()
-            endif()
-            list(FIND allowed "${name}" idx)
-            if(idx EQUAL -1)
-                list(APPEND errors "${f}:${lineno}: '${name}' not allowed here: ${content}")
-            endif()
-        endforeach()
+        # skip if the hit is entirely inside a trailing `//` comment
+        string(REGEX REPLACE "//.*" "" code "${content}")
+        if(NOT code MATCHES "${ban_${name}}")
+            continue()
+        endif()
+        string(MAKE_C_IDENTIFIER "${f}" key)
+        set(allowed "${allow_${key}}")
+        list(FIND allowed "${name}" idx)
+        if(idx EQUAL -1)
+            list(APPEND errors "${f}:${lineno}: '${name}' not allowed here: ${content}")
+        endif()
     endforeach()
 endforeach()
 
