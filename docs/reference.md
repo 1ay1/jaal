@@ -282,12 +282,26 @@ return Cmd::task(
     m.url);                       // arguments, BY VALUE
 ```
 
+**One rule for every body** (`task`, `stream`, `perform`, `attempt`):
+
+- it captures nothing; everything it needs is an argument after it
+- it may be a lambda, a generic lambda, or a plain function (`&load`)
+- parameters can be `T` or `const T&`
+- `std::stop_token` comes after the Sink, only if the body wants it
+- `const jaal::unlocked&` comes first, only if it takes locks
+
+```cpp
+Cmd::task([](jaal::Sink<Msg> out, const std::string& url) { ... }, m.url);
+Cmd::task(&poll_device, m.port);
+```
+
 > **Refuses:**
 > - **a body that captures anything.** Everything it needs is an argument.
 >   A capture can outlive the call that made it; an argument is copied.
 > - **an argument that isn't `Sendable`.** It crosses threads.
+> - **a body that can't be called with the arguments given.**
 >
-> Both fail with a named diagnostic, not a template dump.
+> Each fails with a named diagnostic, not a template dump.
 
 **`task_isolated`** is identical but gets its own thread, for work that
 blocks for a long time and shouldn't occupy a pool slot.

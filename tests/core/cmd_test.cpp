@@ -113,7 +113,25 @@ static_assert(!can_task<view_body, std::string_view>);
 using ptr_body = decltype([](Sink<Msg>, std::stop_token, int*) {});
 static_assert(!can_task<ptr_body, int*>);
 
+// One rule for every body: captureless, stop_token only if it wants one,
+// parameters by value or const&, generic lambdas, plain functions.
+using no_stop   = decltype([](Sink<Msg>, std::string) {});
+using by_cref   = decltype([](Sink<Msg>, std::stop_token, const std::string&) {});
+using generic   = decltype([](Sink<Msg>, const auto&) {});
+using with_cap  = decltype([](const jaal::unlocked&, Sink<Msg>, std::string) {});
+void plain_fn_body(Sink<Msg>, std::string) {}
+static_assert(can_task<no_stop, std::string>);
+static_assert(can_task<by_cref, std::string>);
+static_assert(can_task<generic, std::string>);
+static_assert(can_task<with_cap, std::string>);
+static_assert(can_task<decltype(&plain_fn_body), std::string>);
+// the same three are refused as tasks, streams and performs alike
+using wrong_args = decltype([](Sink<Msg>, int, int) {});
+static_assert(!can_task<wrong_args, std::string>);
+
 // ── Sink ─────────────────────────────────────────────────────────────────
+void sends_len(Sink<Msg> out, std::string s) { out.send(Msg{static_cast<int>(s.size())}); }
+
 static_assert(jaal::Sendable<Sink<Msg>>);
 static_assert(std::default_initializable<Sink<Msg>>);
 // Can't forge one from a mailbox without the kernel's key:
@@ -180,6 +198,24 @@ int main() {
         return jaal::sink_access::make<Msg>(std::weak_ptr<jaal::detail::mailbox_iface<Msg>>(tmp));
     }();
     if (s2.send(Msg{1}) || s2.open()) return 11;
+
+    // every accepted shape actually runs, and gets its arguments
+    auto run = [&](C c) {
+        box->got.clear();
+        auto* p = std::get_if<fx::task::type<Msg>>(&c.inner);
+        if (!p) return -1;
+        std::move(p->thunk).run(sink, {});
+        return box->got.empty() ? -2 : box->got[0].v;
+    };
+    if (run(C::task([](Sink<Msg> o, std::string s) { o.send(Msg{static_cast<int>(s.size())}); },
+                    std::string("abc"))) != 3) return 12;                  // no stop_token
+    if (run(C::task([](Sink<Msg> o, const std::string& s) { o.send(Msg{static_cast<int>(s.size())}); },
+                    std::string("abcd"))) != 4) return 13;                 // const&
+    if (run(C::task([](Sink<Msg> o, const auto& s) { o.send(Msg{static_cast<int>(s.size())}); },
+                    std::string("ab"))) != 2) return 14;                   // generic
+    if (run(C::task(&sends_len, std::string("abcdef"))) != 6) return 15;   // plain function
+    if (run(C::task([](const jaal::unlocked&, Sink<Msg> o, int n) { o.send(Msg{n}); },
+                    9)) != 9) return 16;                                   // capability
 
     return 0;
 }

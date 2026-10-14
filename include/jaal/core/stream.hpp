@@ -205,15 +205,18 @@ struct stream {
                   && (Sendable<Args> && ...)
                   && (std::copy_constructible<Args> && ...)
         [[nodiscard]] static Self stream(std::string key, Body body, Args... args) {
-            auto fn = ::jaal::detail_task::plain_fn<Body, Msg, Args...>(body);
+            namespace dt = ::jaal::detail_task;
             return Self(type<Msg>{std::move(key),
-                                  ::jaal::detail::stream_factory<Msg>::make(fn, std::move(args)...)});
+                                  ::jaal::detail::stream_factory<Msg>::make(
+                                      dt::entry<Body, Msg, Args...>(), dt::carried(body),
+                                      std::move(args)...)});
         }
         // Wrong shape: say which rule it broke.
         template <class Body, class... Args>
             requires (!(TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...)
                         && (std::copy_constructible<Args> && ...)))
         static Self stream(std::string, Body, Args...) {
+            namespace dt = ::jaal::detail_task;
             if constexpr (!(Sendable<Args> && ...))
                 static_assert((Sendable<Args> && ...),
                     "jaal: a stream argument is not Sendable; pass owned values");
@@ -221,13 +224,14 @@ struct stream {
                 static_assert((std::copy_constructible<Args> && ...),
                     "jaal: a stream argument must be copyable: the stream can be "
                     "started again after a re-subscribe, and each run gets its own copy");
-            else if constexpr (std::is_invocable_v<Body, Sink<Msg>, std::stop_token, Args...>)
-                static_assert(TaskBody<Body, Msg, Args...>,
+            else if constexpr (!dt::callable_body<Body, Msg, Args...>)
+                static_assert(dt::callable_body<Body, Msg, Args...>,
+                    "jaal: a stream body must be callable as "
+                    "([const jaal::unlocked&,] Sink<Msg>, [std::stop_token,] Args...)");
+            else
+                static_assert(dt::captureless<Body>,
                     "jaal: a stream body must not capture anything; pass what it needs "
                     "as arguments after the body");
-            else
-                static_assert(TaskBody<Body, Msg, Args...>,
-                    "jaal: a stream body must be callable as (Sink<Msg>, std::stop_token, Args...)");
             return Self{};
         }
     };

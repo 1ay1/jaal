@@ -6,12 +6,16 @@
 // Tasks are where memory and concurrency bugs are born, so they get the
 // strictest shape (docs/concurrency.md §4.6):
 //
-//   * the body is a CAPTURELESS function: it can't borrow `this`, the model,
-//     a local, or the mailbox. Checked by conversion to a function pointer,
-//     which the standard only allows for captureless lambdas.
+//   * the body is CAPTURELESS: it can't borrow `this`, the model, a local,
+//     or the mailbox. A lambda with any capture (even an unused [&]) is not
+//     default-constructible; one without is, and so it holds nothing. A
+//     plain function is the other captureless shape.
 //   * everything the body needs is passed as ARGUMENTS, moved in, and every
 //     argument must be Sendable. The body owns its inputs outright.
-//   * it gets a Sink (weak) and a stop_token, nothing else.
+//   * it gets a Sink (weak), and a stop_token if it asks for one.
+//
+// The same rule covers task, stream, perform and attempt. A body may take
+// its parameters as `const T&` or `T`, and may be a generic lambda.
 //
 //   return Cmd::task([](Sink<Msg> out, std::stop_token st, std::string path) {
 //       out.send(Loaded{read_file(path, st)});
@@ -22,6 +26,7 @@
 
 #include <chrono>
 #include <concepts>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -66,40 +71,81 @@ namespace jaal {
 /// That is how background work earns the right to take locks
 /// (core/capability.hpp); a body that doesn't ask can't take any.
 namespace detail_task {
-template <class F, class Msg, class... Args>
-concept cap_task_body =
-    std::is_convertible_v<F, void (*)(const unlocked&, Sink<Msg>, std::stop_token, Args...)>;
-template <class F, class Msg, class... Args>
-concept plain_task_body =
-    std::is_convertible_v<F, void (*)(Sink<Msg>, std::stop_token, Args...)>;
 
-// Adapt a capability-taking body to the plain form: a captureless shim
-// whose only job is to mint the fresh thread's `unlocked` and call through.
-// Body is captureless (cap_task_body proved it), so Body{} IS the function.
-template <class Body, class Msg, class... Args>
-void with_fresh_cap(Sink<Msg> out, std::stop_token st, Args... args) {
-    const unlocked u = cap_access::fresh_thread();
-    Body{}(u, std::move(out), std::move(st), std::move(args)...);
+// Captureless: an empty lambda (Body{} IS the function) or a plain function
+// pointer, which is carried along as data since its value isn't its type.
+template <class B>
+concept empty_body = std::is_empty_v<B> && std::default_initializable<B>;
+template <class B>
+concept fn_ptr = std::is_pointer_v<B> && std::is_function_v<std::remove_pointer_t<B>>;
+template <class B>
+concept captureless = empty_body<B> || fn_ptr<B>;
+
+// The four call shapes a body may have, most specific first.
+enum class shape : std::uint8_t { none, cap_stop, cap, stop, plain };
+
+template <class B, class Msg, class... Args>
+consteval shape shape_of() {
+    using S = Sink<Msg>;
+    if constexpr (std::is_invocable_v<B&, const unlocked&, S, std::stop_token, Args...>)
+        return shape::cap_stop;
+    else if constexpr (std::is_invocable_v<B&, const unlocked&, S, Args...>)
+        return shape::cap;
+    else if constexpr (std::is_invocable_v<B&, S, std::stop_token, Args...>)
+        return shape::stop;
+    else if constexpr (std::is_invocable_v<B&, S, Args...>)
+        return shape::plain;
+    else
+        return shape::none;
 }
 
-/// The plain-form function pointer for any well-formed body.
-template <class Body, class Msg, class... Args>
-auto plain_fn(Body body) -> void (*)(Sink<Msg>, std::stop_token, Args...) {
-    if constexpr (plain_task_body<Body, Msg, Args...>) {
-        void (*fn)(Sink<Msg>, std::stop_token, Args...) = body;
-        return fn;
+template <class B, class Msg, class... Args>
+concept callable_body = shape_of<B, Msg, Args...>() != shape::none;
+
+// The one function every body is erased to. `F` is the body itself when it's
+// a function pointer, and an empty tag otherwise.
+template <class Body, class Msg, class F, class... Args>
+void invoke_body(Sink<Msg> out, std::stop_token st, F f, Args... args) {
+    auto&& body = [&]() -> decltype(auto) {
+        if constexpr (fn_ptr<Body>) return f;
+        else                        return Body{};
+    }();
+    constexpr shape s = shape_of<Body, Msg, Args...>();
+    if constexpr (s == shape::cap_stop || s == shape::cap) {
+        const unlocked u = cap_access::fresh_thread();
+        if constexpr (s == shape::cap_stop)
+            body(u, std::move(out), std::move(st), std::move(args)...);
+        else
+            body(u, std::move(out), std::move(args)...);
+    } else if constexpr (s == shape::stop) {
+        body(std::move(out), std::move(st), std::move(args)...);
     } else {
-        (void)body;
-        return &with_fresh_cap<Body, Msg, Args...>;
+        body(std::move(out), std::move(args)...);
     }
+}
+
+struct no_fn {};
+template <class Body>
+using carried_t = std::conditional_t<fn_ptr<Body>, Body, no_fn>;
+
+/// The erased entry point for a well-formed body, and what it carries.
+template <class Body, class Msg, class... Args>
+auto entry() -> void (*)(Sink<Msg>, std::stop_token, carried_t<Body>, Args...) {
+    return &invoke_body<Body, Msg, carried_t<Body>, Args...>;
+}
+template <class Body>
+carried_t<Body> carried(Body b) {
+    if constexpr (fn_ptr<Body>) return b;
+    else                        { (void)b; return no_fn{}; }
 }
 }  // namespace detail_task
 
+/// Is Body a well-formed task body for Msg and Args? Captureless, and
+/// callable with one of the shapes above. Pair it with Sendable<Args>...:
+///
+///     concept ok = TaskBody<Body, Msg, Args...> && (Sendable<Args> && ...);
 template <class F, class Msg, class... Args>
-concept TaskBody =
-    detail_task::plain_task_body<F, Msg, Args...>
-    || (detail_task::cap_task_body<F, Msg, Args...> && std::is_empty_v<F>
-        && std::default_initializable<F>);
+concept TaskBody = detail_task::captureless<F> && detail_task::callable_body<F, Msg, Args...>;
 
 namespace detail {
 
@@ -350,21 +396,9 @@ inline task_key key(std::string name, fx::placement where = fx::placement::pool)
 
 namespace detail_perform {
 
-// Captureless, by the standard's own rule: a lambda with a capture (even
-// an unused [&]) has a deleted default constructor; one without has a
-// defaulted one. So an empty, default-constructible body holds nothing,
-// and Body{} IS the function. Unlike a function-pointer conversion this
-// accepts `const std::string&` parameters and generic lambdas. A plain
-// function (`&search`) is the other captureless shape: it's carried as an
-// argument, since a pointer's value isn't part of its type.
-template <class B>
-concept empty_body = std::is_empty_v<B> && std::default_initializable<B>;
-
-template <class B>
-concept fn_ptr = std::is_pointer_v<B> && std::is_function_v<std::remove_pointer_t<B>>;
-
-template <class B>
-concept captureless = empty_body<B> || fn_ptr<B>;
+// The same captureless rule as every other body (detail_task).
+using detail_task::captureless;
+using detail_task::fn_ptr;
 
 template <class B, class... Args>
 concept takes_stop = std::is_invocable_v<B&, std::stop_token, Args...>;
@@ -528,9 +562,11 @@ struct task {
     private:
         template <class Body, class... Args>
         static Self make(placement where, std::string key, Body body, Args... args) {
-            auto fn = ::jaal::detail_task::plain_fn<Body, Msg, Args...>(body);
-            return Self(type<Msg>{::jaal::detail::task_thunk<Msg>::make(fn, std::move(args)...),
-                                  where, std::move(key)});
+            namespace dt = ::jaal::detail_task;
+            return Self(type<Msg>{
+                ::jaal::detail::task_thunk<Msg>::make(dt::entry<Body, Msg, Args...>(),
+                                                      dt::carried(body), std::move(args)...),
+                where, std::move(key)});
         }
 
     public:
@@ -621,22 +657,21 @@ struct task {
         }
         template <class Body, class... Args>
         static void explain() {
+            namespace dt = ::jaal::detail_task;
             if constexpr (!(Sendable<Args> && ...))
                 static_assert((Sendable<Args> && ...),
                     "jaal: a task argument is not Sendable; pass owned values "
                     "(std::string, not std::string_view or a pointer). A capability is "
                     "never Sendable: the body asks for its own `const jaal::unlocked&`.");
-            else if constexpr (std::is_invocable_v<Body, Sink<Msg>, std::stop_token, Args...>
-                               || std::is_invocable_v<Body, const unlocked&, Sink<Msg>,
-                                                      std::stop_token, Args...>)
-                static_assert(TaskBody<Body, Msg, Args...>,
+            else if constexpr (!dt::callable_body<Body, Msg, Args...>)
+                static_assert(dt::callable_body<Body, Msg, Args...>,
+                    "jaal: a task body must be callable as "
+                    "([const jaal::unlocked&,] Sink<Msg>, [std::stop_token,] Args...) "
+                    "with the arguments given after it");
+            else
+                static_assert(dt::captureless<Body>,
                     "jaal: a task body must not capture anything; pass what it "
                     "needs as arguments after the body");
-            else
-                static_assert(TaskBody<Body, Msg, Args...>,
-                    "jaal: a task body must be callable as "
-                    "(Sink<Msg>, std::stop_token, Args...) or "
-                    "(const jaal::unlocked&, Sink<Msg>, std::stop_token, Args...)");
         }
     };
 };
