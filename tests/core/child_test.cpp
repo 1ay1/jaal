@@ -114,7 +114,7 @@ int child_api_direct() {
     // wrap<> builds the parent's Msg from a child Msg.
     Pair::Msg w = Pair::R::wrap<>(Counter::Msg{Counter::Inc{}});
     CHECK(std::holds_alternative<Pair::Right>(w));
-    // And the parent's update overload for a Wrap case is the router.
+    // And the parent's update overload for a Wrap case does the dispatch.
     Pair::Model m;
     (void)jaal::prog::update<Pair>(m, Pair::Msg{Pair::Right{Counter::Inc{}}});
     CHECK(m.left.n == 0 && m.right.n == 1);

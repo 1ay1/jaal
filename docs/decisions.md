@@ -261,6 +261,9 @@ expects it.
 
 ## D22. Hosts produce a variant of event kinds
 
+*Partly superseded by [D43](#d43-input-is-onmodel-event-not-a-subscription):
+the variant stays; routers are replaced by `on()` overloads.*
+
 **Decision.** A host's event type can be a `std::variant`; each router takes
 one alternative. A router for a kind the host never produces is a compile
 error.
@@ -828,7 +831,8 @@ dozen fields of a 665-line model.
 **The rule, and the part that bites.** `subs_key` must cover everything
 `subscribe()` reads, *including anything a router captures*. Routers may
 capture the model freely because they're rebuilt on every subscribe; skip
-the rebuild and a captured copy goes stale.
+the rebuild and a captured copy goes stale. (D43 removed routers, so only
+the first half of the rule remains, and debug builds check it.)
 
 **How it stays honest.** Debug builds, on every call the key says is
 unchanged, run `subscribe()` anyway and check the running sources would be

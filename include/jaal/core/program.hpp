@@ -479,34 +479,23 @@ concept HasVisualHash = requires(const typename P::Model& m) {
 ///
 /// With subs_key, the kernel compares the key against the last one and
 /// calls subscribe() only when it changed. The key is the program's own
-/// statement of "these are the fields subscribe() reads" — the same idea as
-/// visual_hash for view(), and agentty already structures its subscribe()
-/// that way (it reads a dozen fields of a 665-line model).
+/// statement of "these are the fields subscribe() reads", the same idea as
+/// visual_hash for view().
 ///
 /// It's a VALUE, not a hash, on purpose: a hash can collide, and a collision
 /// here would silently keep a stale subscription (a timer that should have
-/// stopped, a router for a closed panel). Equality can't be wrong in that
-/// direction. Any equality-comparable, copyable type works: a tuple of the
-/// fields, a small struct, an int.
+/// stopped). Equality can't be wrong in that direction. Any
+/// equality-comparable, copyable type works: a tuple of the fields, a small
+/// struct, an int.
 ///
-/// The rule that keeps it honest: subs_key must cover EVERYTHING subscribe()
-/// reads — including anything its routers CAPTURE. That second half is the
-/// one that bites. A router may capture the model freely (it's rebuilt on
-/// every subscribe, see core/router.hpp), so
-///
-///     Sub::on(on_key{}, [text = m.composer](const Key& k) { ... })
-///
-/// holds a COPY of m.composer. Skip the rebuild and that copy goes stale:
-/// the next key is routed against old text. So a field a router captures
-/// belongs in subs_key exactly as much as a field that decides which timers
-/// run. Leave one out and a change to it won't re-subscribe.
+/// The rule: subs_key must cover everything subscribe() reads. Input goes
+/// through on(model, event), which reads the live model, so there is
+/// nothing else for the key to cover.
 ///
 /// Debug builds check it: on every call the key says is unchanged, the
 /// kernel runs subscribe() anyway and asserts the result is equivalent
 /// (same sources, same payloads). So a key that's too narrow fails loudly
-/// in development instead of silently in production. The check can't see
-/// inside a router's captures (they're opaque callables), which is why the
-/// rule above is stated for them in words.
+/// in development instead of silently in production.
 template <class P>
 concept HasSubsKey = requires(const typename P::Model& m) {
     { P::subs_key(m) };

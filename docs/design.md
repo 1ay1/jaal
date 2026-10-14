@@ -318,33 +318,29 @@ namespace maya { template <class Msg> using Cmd = jaal::Cmd<Msg, tui_fx>; }
 
 ### 3.5 Sub
 
-A subscription has two different kinds of source. The type keeps them apart.
+Everything in a Sub is a **source**: it has a lifetime (started, kept,
+stopped) and a key. `every` and `stream` are the core ones; a host can add
+more (a file watcher). Concept:
 
-- **Routers** are stateless filters over the host's event type:
-  `on_key`, `on_mouse`, `on_paste`. They come from the host. Concept:
+```cpp
+template <class D, class Msg>
+concept Source = requires(const typename D::template type<Msg>& s) {
+    typename D::key_type;
+    requires std::regular<typename D::key_type>;
+    requires hashable<typename D::key_type>;
+    { s.key() } -> std::same_as<typename D::key_type>;
+};
+```
 
-  ```cpp
-  template <class D, class Event, class Msg>
-  concept Router = requires(const typename D::template type<Msg>& r, const Event& ev) {
-      { r.route(ev) } -> std::same_as<std::optional<Msg>>;
-  };
-  ```
-
-- **Sources** have a lifetime: they're started, kept and stopped. `every` is
-  the core one. A future `watch(path)` would be another. Concept:
-
-  ```cpp
-  template <class D, class Msg>
-  concept Source = requires(const typename D::template type<Msg>& s) {
-      typename D::key_type;
-      requires std::regular<typename D::key_type>;
-      requires hashable<typename D::key_type>;
-      { s.key() } -> std::same_as<typename D::key_type>;
-  };
-  ```
+**Input is not a subscription.** A program turns host events into messages
+with overloads, `static std::optional<Msg> on(const Model&, const E&)`, one
+per event kind, signals included (`jaal::sig`). The kernel calls the one for
+the event's type, on the model as it is when the event arrives, so a burst
+like `^T m o` is judged correctly without re-subscribing between events
+(D43).
 
 `Sub<Msg, Row>` works like `Cmd`: descriptor rows, `map`, `batch`,
-widening, constructor mixins (so `Sub<Msg>::on_key(...)` keeps working).
+widening, constructor mixins (so `Sub<Msg>::every(...)` reads naturally).
 
 **The key space is a sum type.** The reconciler keys running sources by
 
@@ -535,10 +531,12 @@ return fx::task<Msg>(path, [](Sink<Msg> out, std::stop_token st, std::string pat
 });
 ```
 
-- The body must be captureless (checked by conversion to a function
-  pointer), and every argument must be `Sendable`. So a task owns all its
-  inputs and can't hold `this`, the model, a raw pointer or the mailbox.
-  Why, and the one hole left (globals), are in concurrency.md 4.6.
+- The body must be captureless (a lambda with no capture, which is
+  default-constructible, or a plain function), and every argument must be
+  `Sendable`. So a task owns all its inputs and can't hold `this`, the
+  model, a raw pointer or the mailbox. Parameters can be `T` or `const T&`;
+  the stop_token is optional. Why, and the one hole left (globals), are in
+  concurrency.md 4.6.
 - Internally the body and its arguments are stored together, type-erased
   once, in the effect. The erasure is jaal's, not the user's, so nothing
   unchecked goes in.
@@ -582,9 +580,9 @@ return fx::task<Msg>(path, [](Sink<Msg> out, std::stop_token st, std::string pat
 ```cpp
 template <class H, class P>
 concept HostFor = Program<P> && requires(H& h) {
-        typename H::event_type;                 // what its routers see
+        typename H::event_type;                 // what it emits (optional)
         typename H::fx;                         // effects it adds
-        typename H::src;                        // sources and routers it adds
+        typename H::src;                        // sources it adds
     }
     && subrow_of<fx_of<P>,  row_union_t<core_fx,  typename H::fx>>
     && subrow_of<src_of<P>, row_union_t<core_src, typename H::src>>
@@ -941,8 +939,8 @@ jaal/
 │   │   ├── effect.hpp            Effect concept, pure_fx
 │   │   ├── row.hpp               row, subrow_of, row_union
 │   │   ├── cmd.hpp               basic_cmd<Msg, Row>, map, map_with
-│   │   ├── sub.hpp               basic_sub<Msg, Row>, every, routers
-│   │   ├── fx.hpp                quit, send, after, task, now, random
+│   │   ├── sub.hpp               basic_sub<Msg, Row>, every, sources
+│   │   ├── fx.hpp                quit, send, after, task, cancel, perform, now, random
 │   │   ├── core_fx.hpp           core_fx / core_src; Cmd<Msg, extra...>, Sub<Msg, extra...>
 │   │   ├── stream.hpp            the stream source
 │   │   ├── sink.hpp              Sink<Msg>
@@ -1006,8 +1004,8 @@ jaal/
 │   └── lint/                     raw-concurrency banlist + allowlist
 │
 ├── examples/
-│   ├── ticker.cpp                every + after + a signal, on the real clock
-│   └── host.cpp                  a complete host: events, router, effect, draw
+│   ├── ticker.cpp                every + perform + a signal, on the real clock
+│   └── host.cpp                  a complete host: events, on(), effect, draw
 │
 └── bench/
     └── bench.cpp                 fold, cross-thread wake, reconcile, sim
@@ -1177,9 +1175,9 @@ Answered since this was written (kept so the reasoning is visible):
 1. ~~**Row order.**~~ Settled: `make_row` sorts by `D::name` and
    deduplicates, so rows are sets and spelling never creates a new type
    ([decisions.md](decisions.md) D2).
-2. ~~**Where routers live.**~~ Settled: a router names its `event_type`; a
-   host's event type may be a variant, and each router takes one
-   alternative ([decisions.md](decisions.md) D22).
+2. ~~**Where routers live.**~~ Settled, then removed: input is
+   `on(model, event)` overloads, and a host's event type may be a variant
+   ([decisions.md](decisions.md) D43, superseding D22).
 3. ~~**`Sendable` strictness.**~~ Settled: strict, with explicit per-type
    opt-ins. It found a real race in agentty on its first run
    ([decisions.md](decisions.md) D7).

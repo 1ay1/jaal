@@ -380,9 +380,11 @@ return fx::task<Msg>(path, [](Sink<Msg> out, std::stop_token st, std::string pat
 });
 ```
 
-- **Captureless** is checked by convertibility to a plain function pointer,
-  which the standard guarantees only for captureless lambdas. Verified on all
-  three compilers.
+- **Captureless** is checked by the standard's own rule: a lambda with any
+  capture (even an unused `[&]`) is not default-constructible, and one with
+  none is empty and is. A plain function pointer is the other accepted
+  shape. This lets bodies take `const T&` and be generic, which a
+  function-pointer conversion couldn't. Verified on all three compilers.
 - **Everything the body needs is an argument**, and every argument must be
   `Sendable`. The body owns its inputs outright.
 - So a task can't hold `this`, a reference to the model, a raw pointer,

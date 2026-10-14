@@ -16,7 +16,7 @@ Two worked hosts, both built as part of the examples so they can't drift
 from the library:
 
 - **[`examples/host.cpp`](../examples/host.cpp)** — every piece below in one
-  small file: one input handle, a router, one effect of its own.
+  small file: one input handle, one effect of its own, a line drawn.
 - **[`examples/server.cpp`](../examples/server.cpp)** — the other shape: a
   TCP server with many handles coming and going, line framing, and writes
   that block (§3b).

@@ -223,7 +223,7 @@ These are **deliberate** — each one is someone else's job or a later layer.
   maya (terminals) or a GUI library, plugged in as a host.
 - **Protocols and I/O batteries.** No HTTP client, no TCP helpers, no file
   watching, no database. They're effects and sources a library can add
-  with `pure_fx` / `router` / custom sources. jaal's core stays small.
+  with `pure_fx` / custom sources. jaal's core stays small.
   The line is the reactor: jaal gives a host everything it needs to wait on
   handles and change what it waits for (`watch`, `modify`, level-triggered
   readiness), and [`examples/server.cpp`](../examples/server.cpp) shows a

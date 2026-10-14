@@ -296,8 +296,8 @@ public:
     /// init() and its Cmd do NOT run: those effects already happened in the
     /// run that produced the model, and effects are outputs, never re-run
     /// (the same rule as replay). What must be live again comes back on its
-    /// own: subscribe(model) runs before the first fold, so timers, streams
-    /// and routers the model asks for restart. For one-shot work a resumed
+    /// own: subscribe(model) runs before the first fold, so timers and
+    /// streams the model asks for restart. For one-shot work a resumed
     /// program must redo (reconnect, re-announce), pass `resume_cmd`.
     template <class H>
     [[nodiscard]] static kernel start_from(H& host, model_type model,

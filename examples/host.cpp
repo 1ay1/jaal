@@ -1,8 +1,8 @@
 // examples/host.cpp — a complete host, the one docs/hosts.md walks through.
 //
-// It reads stdin, turns bytes into typed Key events, lets the program
-// subscribe to them through a router it defines, adds one host effect
-// (ring_bell), and draws a line whenever the model changes.
+// It reads stdin, turns bytes into typed Key events (the program handles
+// them with on(model, Key)), adds one host effect (ring_bell), and draws a
+// line whenever the model changes.
 //
 // This is the shape maya or a GUI binding takes: the program below knows
 // nothing about terminals, and this file knows nothing about the program.

@@ -443,7 +443,7 @@ int run(H& host, run_options opt, durable<P> d) {
         // Draw when the model changed, or when the host says it owes a frame
         // (an animation tick, a deferred write). NOT on every step that
         // folded nothing: that clause made every idle wakeup a frame, so an
-        // event the program ignored (a key its router maps to nullopt) was
+        // event the program ignored (a key its on() maps to nullopt) was
         // drawn anyway. Measured with maya's host: 1500 frames for 1500
         // ignored keys, 67 us of CPU per key against the old loop's 20.
         if constexpr (requires { host.present(k); }) {
