@@ -17,9 +17,14 @@
 //     A raw cast of a 64-bit count wraps to a small value (a busy poll).
 //   * a byte-mode NAMED PIPE is not a readiness object: waiting on one does
 //     not block until data arrives. This is why stdin under mintty/MSYS2
-//     busy-spun in maya. Pipes are watched with `watch_pipe`, which polls
-//     PeekNamedPipe in short slices while blocking on the waker, the way
-//     Cygwin's own select() does. A failed peek is reported as hangup.
+//     busy-spun in maya. A pipe watched for reading gets a small thread
+//     parked in a zero-byte ReadFile (it consumes nothing); when that
+//     returns, an event the reactor waits on is set. So an idle pipe costs
+//     no wakeups. A failed peek is reported as hangup.
+//   * interest is honoured: a console or file is always writable, a pipe is
+//     writable while it has free space (polled only while that's wanted and
+//     the pipe is full, since nothing signals space freeing up), and a plain
+//     waitable reports whatever was asked for when it's signalled.
 //   * WaitForMultipleObjects takes at most 64 handles. watch() refuses the
 //     65th with an error instead of failing every later wait.
 
@@ -82,19 +87,21 @@ public:
     wait_reactor& operator=(const wait_reactor&) = delete;
     ~wait_reactor();
 
-    /// Watch a waitable handle (event, process, console input, socket
-    /// event). Signalled = readable. `interest::write` isn't meaningful for
-    /// NT waitables and is treated as read.
+    /// Watch a handle. The kind is asked of the OS: a pipe gets a reader
+    /// thread (see above), a console or file reports writable at once, and
+    /// anything else (event, process, console input) is waited on directly.
     [[nodiscard]] result<registration> watch(handle h, interest what, std::uint64_t token);
 
-    /// Watch a byte-mode named pipe (mintty/MSYS2 stdin, a child's stdout).
-    /// Readiness is polled with PeekNamedPipe, since a pipe handle can't be
-    /// waited on for data.
+    /// Force the pipe path for read interest. watch() finds pipes by itself.
     [[nodiscard]] result<registration> watch_pipe(handle h, std::uint64_t token);
 
     [[nodiscard]] result<wait_result> wait(std::optional<std::chrono::milliseconds> timeout);
     [[nodiscard]] waker_ref           waker() const noexcept;
     [[nodiscard]] std::size_t         watched() const noexcept;
+
+    /// How many times wait() has blocked in the OS, over this reactor's
+    /// life. For tests: an idle wait is one call, not a poll loop.
+    [[nodiscard]] std::uint64_t       os_waits() const noexcept;
 
 private:
     explicit wait_reactor(std::shared_ptr<state> s) noexcept;
