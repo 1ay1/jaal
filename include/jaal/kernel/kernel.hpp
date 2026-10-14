@@ -858,11 +858,17 @@ private:
             } else if constexpr (std::same_as<U, payload_t<fx::after, msg_type>>) {
                 timers_.after(step_now(), x.delay, queued{0, std::move(x.msg)});
             } else if constexpr (std::same_as<U, payload_t<fx::task, msg_type>>) {
-                auto job = [t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
-                            s = inbox_.sink()](std::stop_token st) mutable {
-                    std::move(*t).run(s, std::move(st));
-                };
-                pool_->post(std::move(job), x.where);
+                if (x.key.empty()) {
+                    auto job = [t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
+                                s = inbox_.sink()](std::stop_token st) mutable {
+                        std::move(*t).run(s, std::move(st));
+                    };
+                    pool_->post(std::move(job), x.where);
+                } else {
+                    start_keyed_task(std::move(x));
+                }
+            } else if constexpr (std::same_as<U, payload_t<fx::cancel, msg_type>>) {
+                stop_keyed_task(x.key);
             } else if constexpr (std::same_as<U, payload_t<fx::now, msg_type>>) {
                 // The KERNEL's clock, so tests control it. The time is
                 // expressed as a steady_clock time_point: the sim clock's
@@ -1168,6 +1174,61 @@ private:
         streams_.erase(it);
     }
 
+    // ── keyed tasks ──────────────────────────────────────────────────────────
+    // A keyed task is a one-shot stream: its own origin and stop source.
+    // Starting a key that's running stops the old run first, so its
+    // messages, even ones already queued, never reach update(). The run
+    // keeps itself in the table until it finishes: its sink outlives the
+    // body only through the tagger we hold, and the entry is dropped when
+    // the next task with that key replaces it, or by cancel.
+    struct keyed_run {
+        origin_id                                        origin;
+        std::stop_source                                 stop;
+        std::shared_ptr<detail::mailbox_iface<msg_type>> tagger;
+    };
+
+    void start_keyed_task(payload_t<fx::task, msg_type>&& x) {
+        stop_keyed_task(x.key);
+        const origin_id origin = inbox_.open_origin();
+        live_origins_.insert(origin);
+        auto [tagger, sink] = inbox_.sink_from(origin);
+        keyed_run run{origin, std::stop_source{}, std::move(tagger)};
+        auto own = run.stop.get_token();
+        tasks_.insert_or_assign(std::move(x.key), std::move(run));
+
+        // Stop on EITHER a replace/cancel (own) or kernel shutdown (the
+        // pool's token), like a stream.
+        auto job = [t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
+                    s = std::move(sink), own](std::stop_token pool_stop) mutable {
+            std::stop_source merged;
+            std::stop_callback a(own,       [&] { merged.request_stop(); });
+            std::stop_callback b(pool_stop, [&] { merged.request_stop(); });
+            std::move(*t).run(s, merged.get_token());
+        };
+        pool_->post(std::move(job), x.where);
+    }
+
+    void stop_keyed_task(const std::string& key) {
+        auto it = tasks_.find(key);
+        if (it == tasks_.end()) return;
+        live_origins_.erase(it->second.origin);   // queued or batched: dropped at fold
+        inbox_.retire(it->second.origin);         // still in the mailbox: dropped at drain
+        it->second.stop.request_stop();
+        tasks_.erase(it);
+    }
+
+public:
+    /// Keyed tasks started and not yet replaced or cancelled. One that has
+    /// finished still counts until its key is reused: the kernel can't know
+    /// a body returned without being told, and doesn't need to.
+    [[nodiscard]] std::size_t keyed_tasks() const noexcept { return tasks_.size(); }
+
+    /// Is a task with this key the current one for it?
+    [[nodiscard]] bool has_task(std::string_view key) const {
+        return tasks_.find(std::string(key)) != tasks_.end();
+    }
+private:
+
     template <class TK> struct key_desc { using type = void; };
     template <class D> struct key_desc<tagged_key<D>> { using type = D; };
 
@@ -1189,6 +1250,11 @@ private:
             run.stop.request_stop();
         }
         streams_.clear();
+        for (auto& [k, run] : tasks_) {
+            inbox_.retire(run.origin);
+            run.stop.request_stop();
+        }
+        tasks_.clear();
         live_origins_.clear();
         // Close the mailbox FIRST. A worker blocked in send() on a full
         // mailbox is released with `false`, and every later send fails at
@@ -1269,6 +1335,7 @@ private:
     };
     std::unordered_map<src_key, running_timer, detail::rec::key_hash> timer_of_;
     std::unordered_map<src_key, stream_run, detail::rec::key_hash> streams_;
+    std::unordered_map<std::string, keyed_run> tasks_;
     std::vector<router_fn> routers_;
     std::vector<msg_type>  routed_;              // scratch for route()
     std::vector<queued> pending_;

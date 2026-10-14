@@ -8,7 +8,7 @@
 // The core row is ALWAYS in: a program lists only what it adds, so there's
 // one way to spell a program's effects and nothing to union by hand.
 //
-//   core_fx   quit, send, after, task, now, random       (Cmd)
+//   core_fx   quit, send, after, task, cancel, now, random (Cmd)
 //   core_src  every, stream                              (Sub)
 //
 // A program that only uses these runs on ANY host; a host adds its own
@@ -25,7 +25,8 @@
 
 namespace jaal {
 
-using core_fx  = make_row<fx::quit, fx::send, fx::after, fx::task, fx::now, fx::random>;
+using core_fx  = make_row<fx::quit, fx::send, fx::after, fx::task, fx::cancel, fx::now,
+                          fx::random>;
 using core_src = make_row<fx::every, fx::stream>;
 
 /// A program's Cmd: the core effects plus `Extra`.

@@ -170,7 +170,7 @@ struct Late {
 void late_fault() {
     std::printf("--- a task that faults after shutdown doesn't wake anyone ---\n");
     using K = jaal::kernel::kernel<Late, jaal::platform::steady_clock>;
-    struct no_host { using event_type = jaal::kernel::no_events; };
+    struct no_host {};
     {
         jaal::kernel::options opt;
         opt.shutdown_grace = 10ms;

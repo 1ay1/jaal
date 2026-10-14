@@ -149,6 +149,10 @@ private:
     /// the Cmd goes anywhere; nothing that reaches a worker holds it.
     template <class C>
     static auto lift(const id_type& id, C c) {
+        // Two children both running task "search" must be two tasks.
+        std::string prefix = detail::kids::key_of(id);
+        prefix += '/';
+        detail::childx::prefix_task_keys(c, prefix);
         auto mapped = std::move(c).map_with(id, &wrap<>);
         if constexpr (reports) {
             using PM = typename Parent::Msg;

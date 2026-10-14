@@ -19,8 +19,10 @@
 #include <chrono>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <variant>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -42,11 +44,7 @@ struct Counter {
 };
 static_assert(jaal::Program<Counter>);
 
-// The static_assert the reference recommends for the "absent hook" trap.
-static_assert(requires(Counter::Model& m) {
-                  { Counter::init(m) } -> std::convertible_to<Counter::Cmd>;
-              },
-              "init must be Cmd init(Model&)");
+// (The hook signature check is the kernel's: a drifted hook doesn't compile.)
 
 // ── "Effects: Cmd" ───────────────────────────────────────────────────────
 struct Fx {
@@ -81,6 +79,46 @@ struct Fx {
     }
 };
 static_assert(jaal::Program<Fx>);
+
+// ── "Cmd::perform and Cmd::attempt" / "Keyed tasks" ──────────────────────
+std::string fetch(const std::string& url) {
+    if (url.empty()) throw std::runtime_error("no url");
+    return "body of " + url;
+}
+std::vector<std::string> search(std::string q) { return {q + " 1", q + " 2"}; }
+
+struct Perform {
+    struct Model {
+        std::string url, body, error, query;
+        std::vector<std::string> results;
+    };
+    struct Open {};
+    struct Loaded { std::string body; };
+    struct LoadFailed { std::string why; };
+    struct Typed { std::string text; };
+    struct Results { std::vector<std::string> items; };
+    struct Esc {};
+    using Msg = std::variant<Open, Loaded, LoadFailed, Typed, Results, Esc>;
+    using Cmd = jaal::Cmd<Msg>;
+
+    static Cmd update(Model& m, Open) {
+        return Cmd::attempt<Loaded, LoadFailed>([](const std::string& url) {
+            return fetch(url);                    // returns std::string, may throw
+        }, m.url);
+    }
+    static Cmd update(Model& m, Loaded l)     { m.body = std::move(l.body); return {}; }
+    static Cmd update(Model& m, LoadFailed f) { m.error = std::move(f.why); return {}; }
+
+    static Cmd update(Model& m, Typed t) {
+        m.query = t.text;
+        return Cmd::perform<Results>("search", &search, m.query);
+    }
+    static Cmd update(Model& m, Results r) { m.results = std::move(r.items); return {}; }
+    static Cmd update(Model&, Esc) { return Cmd::cancel("search"); }
+};
+static_assert(jaal::Program<Perform>);
+// a key with a placement
+inline const jaal::task_key scan_key = jaal::key("scan", jaal::fx::isolated);
 
 // ── "Your own effects" ───────────────────────────────────────────────────
 struct SaveFile { std::string path, contents; };
@@ -254,6 +292,16 @@ int main() {
         if (q.ready(second)) return 7;         // invalidated
         if (!q.ready(bumped)) return 8;
         if (q.value() != "abc") return 9;
+    }
+
+    // ── perform / attempt / keyed: the reference's samples, run ──────────────
+    {
+        jaal::headless<Perform> h;
+        h.send(Perform::Open{});               // url empty: fetch throws
+        h.send(Perform::Typed{"ki"});
+        h.run_until_idle(std::chrono::seconds(3));
+        if (h.model().error != "no url") return 10;
+        if (h.model().results != std::vector<std::string>{"ki 1", "ki 2"}) return 11;
     }
 
     return 0;

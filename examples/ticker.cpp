@@ -6,7 +6,8 @@
 //
 // Shows the whole shape of a program: one update per message, a timer, a
 // keyed stream (cancelled the moment the program stops subscribing), a
-// signal as a message, an effect of the program's own (`say`), and quit.
+// one-shot background job whose result comes back as a message (perform),
+// a signal as a message, an effect of the program's own (`say`), and quit.
 
 #include <jaal/jaal.hpp>
 
@@ -33,8 +34,9 @@ struct Ticker {
     struct Tick {};
     struct Progress { int percent; };
     struct Done {};
+    struct Checked { std::string sum; };
     struct Interrupted {};
-    using Msg = std::variant<Tick, Progress, Done, Interrupted>;
+    using Msg = std::variant<Tick, Progress, Done, Checked, Interrupted>;
 
     using Cmd = jaal::Cmd<Msg, say>;                   // core effects + say
     using Sub = jaal::Sub<Msg, jaal::fx::on_signal>;   // core sources + signals
@@ -49,7 +51,18 @@ struct Ticker {
     }
     static Cmd update(Model& m, Done) {
         m.fetching = false;
-        return Cmd::batch(Say{"done after " + std::to_string(m.ticks) + " ticks"}, Cmd::quit(0));
+        // One-shot work: the body returns a value, and it arrives as
+        // Checked{value}. No Sink, no send. The key means a second Done
+        // would replace this check rather than run beside it.
+        return Cmd::batch(
+            Say{"done after " + std::to_string(m.ticks) + " ticks, checking..."},
+            Cmd::perform<Checked>("checksum", [](unsigned bytes) {
+                std::this_thread::sleep_for(50ms);           // pretend hashing
+                return "sha:" + std::to_string(bytes * 2654435761u % 100000);
+            }, 4096u));
+    }
+    static Cmd update(Model&, Checked c) {
+        return Cmd::batch(Say{"checksum " + c.sum}, Cmd::quit(0));
     }
     static Cmd update(Model&, Interrupted) { return Cmd::batch(Say{"bye"}, Cmd::quit(0)); }
 

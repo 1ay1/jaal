@@ -36,7 +36,7 @@ using Cmd = jaal::Cmd<Msg>;
 using Sub = jaal::Sub<Msg>;
 static_assert(std::same_as<Cmd, jaal::basic_cmd<Msg, jaal::core_fx>>);   // basic_cmd exported
 static_assert(std::same_as<Sub, jaal::basic_sub<Msg, jaal::core_src>>);
-static_assert(jaal::core_fx::size == 6);          // quit send after task now random
+static_assert(jaal::core_fx::size == 7);          // quit send after task cancel now random
 static_assert(jaal::Sendable<Msg>);
 static_assert(jaal::Frozen<Msg>);
 static_assert(jaal::Sendable<jaal::debounce<std::string>>);

@@ -45,6 +45,7 @@
 #include <utility>
 #include <variant>
 
+#include "../meta/type_name.hpp"
 #include "program.hpp"
 #include "report.hpp"
 #include "stream.hpp"
@@ -71,6 +72,25 @@ void prefix_streams(S& s, std::string_view prefix) {
             x.key.insert(0, prefix.data(), prefix.size());
         }
     }, s.inner);
+}
+
+// Add a prefix to every task and cancel key in a Cmd, in place, so two
+// children both running "search" are two tasks, not one replacing the other.
+template <class C>
+void prefix_task_keys(C& c, std::string_view prefix) {
+    using M = typename C::msg_type;
+    std::visit([&]<class X>(X& x) {
+        using U = std::remove_cvref_t<X>;
+        if constexpr (std::same_as<U, typename C::Batch>) {
+            for (auto& inner : x.cmds) prefix_task_keys(inner, prefix);
+        } else if constexpr (in_row<fx::task, typename C::row_type>
+                             && std::same_as<U, payload_t<fx::task, M>>) {
+            if (!x.key.empty()) x.key.insert(0, prefix.data(), prefix.size());
+        } else if constexpr (in_row<fx::cancel, typename C::row_type>
+                             && std::same_as<U, payload_t<fx::cancel, M>>) {
+            x.key.insert(0, prefix.data(), prefix.size());
+        }
+    }, c.inner);
 }
 
 // The child's Msg inside a one-field wrapper case.
@@ -187,6 +207,10 @@ private:
     /// report turned into a send of the From case.
     template <class C>
     static auto lift(C c) {
+        // The child's task keys live under its Wrap's name, so a child's
+        // "search" can't replace the parent's or a sibling's.
+        static const std::string prefix = std::string(meta::type_name<Wrap>()) + '/';
+        detail::childx::prefix_task_keys(c, prefix);
         auto mapped = std::move(c).map(&wrap<>);
         if constexpr (reports)
             return detail::childx::resolve_reports(

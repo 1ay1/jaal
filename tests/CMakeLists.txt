@@ -67,6 +67,8 @@ jaal_test(kernel_stop_group_test kernel/stop_group_test.cpp)
 # worker_group: stop() is a barrier with no grace. Check 1 is the point.
 jaal_test(kernel_worker_group_test kernel/worker_group_test.cpp)
 jaal_test(kernel_lock_order_test kernel/lock_order_test.cpp)
+# Keyed tasks (latest wins, cancel), perform and attempt.
+jaal_test(kernel_keyed_task_test kernel/keyed_task_test.cpp)
 if(UNIX)
     # The audit's fixes: forged capabilities abort, shutdown is a barrier
     # every time, no blocking post under a lock, no wake after teardown.
@@ -182,6 +184,16 @@ jaal_compile_fail(NAME isolated_body_shape   SOURCE compile_fail/task_isolated.c
                   MATCH "jaal: a task body must be callable as")
 jaal_compile_fail(NAME sink_msg_sendable     SOURCE compile_fail/cmd.cpp CASE 6
                   MATCH "jaal: a Sink's Msg must be Sendable")
+jaal_compile_fail(NAME perform_no_capture    SOURCE compile_fail/cmd.cpp CASE 7
+                  MATCH "jaal: a perform body must not capture anything")
+jaal_compile_fail(NAME perform_arg_sendable  SOURCE compile_fail/cmd.cpp CASE 8
+                  MATCH "jaal: a perform argument is not Sendable")
+jaal_compile_fail(NAME perform_ok_wraps      SOURCE compile_fail/cmd.cpp CASE 9
+                  MATCH "jaal: perform<Ok>: can't build the message Ok")
+jaal_compile_fail(NAME perform_callable      SOURCE compile_fail/cmd.cpp CASE 10
+                  MATCH "jaal: a perform body must be callable as")
+jaal_compile_fail(NAME attempt_fail_case     SOURCE compile_fail/cmd.cpp CASE 11
+                  MATCH "jaal: attempt<Ok, Fail>: Fail must be a case of Msg")
 
 # Jobs on pool / worker_group follow the task rule: no captures, Sendable
 # arguments, and shared state only as co_owned<T> of a Sync T.

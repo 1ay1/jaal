@@ -110,25 +110,17 @@ never call "unsubscribe"; you stop returning it.
 | `visual_hash` | `uint64_t visual_hash(const Model&)` | host redraws every wakeup |
 | `needs_warmup` | `bool needs_warmup(const Model&)` | no off-screen warm pass |
 
-> ⚠️ **The one trap worth memorising.** Every optional hook is detected with
-> a `requires` test. A hook whose signature jaal *can't call* reads as **"this
-> program doesn't have that hook"** — not as an error.
->
-> This has bitten real code twice. An app kept `std::pair<Model, Cmd> init()`
-> from an older runtime: `has_init` was false, the kernel value-initialised
-> the model, and everything `init()` loaded was silently thrown away. A host
-> declared `attach(host_context<base>&)` instead of accepting the derived
-> context: the kernel skipped `attach`, input was never registered, and the
-> app ran taking no keys.
->
-> **Neither logged anything.** If a hook seems not to run, check its
-> signature first. A `static_assert` beside the program is cheap insurance:
->
-> ```cpp
-> static_assert(requires(App::Model& m) {
->                   { App::init(m) } -> std::convertible_to<App::Cmd>;
->               }, "init must be Cmd init(Model&)");
-> ```
+A hook with the wrong signature doesn't compile. `check_hooks<P>()` runs at
+`kernel::start`, and a hook that's declared but can't be called fails with
+the shape it should have:
+
+```
+jaal: P::init is declared but its signature doesn't match.
+Expected: static Cmd init(Model&).
+```
+
+So `std::pair<Model, Cmd> init()` left over from an older runtime can't
+silently throw the model away, which it once did.
 
 ### `subs_key` in detail
 
@@ -186,11 +178,82 @@ row fails to compile with the effect **named**.
 | `Cmd::quit(int = 0)` | end the program with this exit code |
 | `Cmd::now(f)` | `f(now)` → Msg; the clock as an effect, so tests control it |
 | `Cmd::random(f)` | `f(rng)` → Msg; seeded, so a test replays exactly |
-| `Cmd::task(body, args...)` | run on the pool |
+| `Cmd::perform<Ok>(body, args...)` | run `body(args...)` off the loop; its result arrives as `Ok{result}` |
+| `Cmd::attempt<Ok, Fail>(body, args...)` | same, and a throw arrives as `Fail{...}` |
+| `Cmd::task(body, args...)` | run on the pool; the body sends what it likes through a Sink |
 | `Cmd::task_isolated(body, args...)` | run on its own thread |
+| `Cmd::cancel(key)` | stop the keyed task with this key |
 | `Cmd::batch(a, b, ...)` | several, in order |
 
+Every way to run work takes an optional key first: `Cmd::perform<Ok>("search",
+body, q)`. A keyed task **replaces** the running one with the same key. See
+[keyed tasks](#keyed-tasks-latest-wins-and-cancel).
+
+#### `Cmd::perform` and `Cmd::attempt`
+
+Most background work computes one thing and hands it back. `perform` is
+that, with no Sink and no `send`:
+
+```cpp
+struct Loaded { std::string body; };
+struct LoadFailed { std::string why; };
+
+static Cmd update(Model& m, Open) {
+    return Cmd::attempt<Loaded, LoadFailed>([](const std::string& url) {
+        return fetch(url);                    // returns std::string, may throw
+    }, m.url);
+}
+static Cmd update(Model& m, Loaded l)     { m.body = std::move(l.body); return {}; }
+static Cmd update(Model& m, LoadFailed f) { m.error = std::move(f.why); return {}; }
+```
+
+- `perform<Ok>`: the body's return value arrives as `Ok{value}`. A `void`
+  body arrives as `Ok{}`. A throw is a task fault, like any task.
+- `attempt<Ok, Fail>`: a throw arrives as a message instead. `Fail` is built
+  from whatever it can hold: `Fail{e.what()}` for a string field, `Fail{ptr}`
+  for a `std::exception_ptr`, or `Fail{}`.
+- The body may take a `std::stop_token` first, when it wants to notice a
+  cancel: `[](std::stop_token st, std::string url) { ... }`.
+- Parameters can be `const T&`, and the body can be a generic lambda.
+
+> **Refuses**, each with its own message: a body that captures, an argument
+> that isn't `Sendable`, a body that can't be called with the arguments
+> given, an `Ok` that can't hold the result, and a `Fail` that can't be
+> built from an exception.
+
+#### Keyed tasks: latest wins, and cancel
+
+```cpp
+static Cmd update(Model& m, Typed t) {
+    m.query = t.text;
+    return Cmd::perform<Results>("search", &search, m.query);
+}
+static Cmd update(Model&, Esc) { return Cmd::cancel("search"); }
+```
+
+Starting a task with a key that's already running:
+
+1. asks the old one to stop (its `stop_token` fires)
+2. drops **everything** it sends from then on, including messages it had
+   already queued before the replace
+
+So `update` never sees a result for a query that isn't current, and there
+is no token to check by hand. `Cmd::cancel(key)` does steps 1 and 2 without
+starting anything; cancelling a key with nothing running is a no-op.
+
+The dropping is decided on the loop thread, so no thread timing can let a
+stale result through. `tests/kernel/keyed_task_test.cpp` runs the
+search-as-you-type shape across 300 `sim` seeds to check it.
+
+Keys are per program: a `child` or `children` entry gets its own key space,
+so two tabs both running `"search"` are two tasks.
+
+A key can carry a placement: `jaal::key("scan", jaal::fx::isolated)`.
+
 #### `Cmd::task`
+
+For work that sends more than one message (progress, partial results), or
+none:
 
 ```cpp
 return Cmd::task(
@@ -211,26 +274,23 @@ return Cmd::task(
 **`task_isolated`** is identical but gets its own thread, for work that
 blocks for a long time and shouldn't occupy a pool slot.
 
-#### The stop_token, and what it does *not* do
+#### The stop_token
 
-Every task body gets a `std::stop_token`. **It fires when the work is no
-longer subscribed — which for a one-shot task means at kernel shutdown, and
-nowhere else.**
+A task's `std::stop_token` fires when:
 
-This is the single most misread thing in jaal. A task is fire-and-forget:
-nothing cancels an individual one.
+- a keyed task is replaced or cancelled
+- the program shuts down
 
-If you need "stop this when the user hits Esc", that is a
-[`Sub::stream`](#substream) keyed on the thing — the kernel stops it when you
-stop asking. Real bug from real code: a login flow ran as a `Cmd::task` and
-polled its `stop_token`; Esc closed the modal and the worker kept polling for
-another 900 seconds, one leaked thread per attempt.
+An **unkeyed** task is fire-and-forget: only shutdown stops it. Give it a
+key if anything should be able to stop it.
 
 | You want | Use |
 |---|---|
-| run once, result comes back | `Cmd::task` |
+| run once, result comes back | `Cmd::perform` / `Cmd::attempt` |
+| run once, the newest replaces the rest | the same, with a key |
+| stop it from a later step | a key, then `Cmd::cancel(key)` |
 | run while the model says so, stop when it doesn't | `Sub::stream` |
-| cancel *this specific* in-flight job from a later step | your own flag — jaal has no effect for it |
+| several messages over time | `Cmd::task` (keyed, if it should be stoppable) |
 
 #### `Cmd::batch` and ordering
 
@@ -793,10 +853,10 @@ jaal's errors are written to be read. Most name the rule:
 | `could not convert ... to 'jaal::below<...>'` | a lock taken out of rank order, or under one ranked at/above it: reorder, or give the outer lock a lower rank |
 | `... to 'const jaal::unlocked&'` from a `held<...>` | a blocking wait/join/shutdown inside a lock body: move it out |
 | `subs_key() reported no change, but subscribe() now returns different sources` | a field is missing from the key |
-
-**When something silently doesn't happen**, suspect an optional hook whose
-signature drifted. That failure mode has no diagnostic by construction — the
-`requires` test just says "absent".
+| `a perform body must not capture anything` | pass it as an argument after the body |
+| `perform<Ok>: can't build the message Ok{result}` | give `Ok` one field of the body's result type |
+| `attempt<Ok, Fail>: Fail must be a case of Msg built from ...` | give `Fail` a `std::string` field |
+| `P::init is declared but its signature doesn't match` | the message gives the shape to use |
 
 ---
 
@@ -819,8 +879,11 @@ struct App {
 // ── effects ──────────────────────────────────────────────────────────
 Cmd::none()  Cmd::send(msg)  Cmd::after(ms, msg)  Cmd::quit(code)
 Cmd::now(f)  Cmd::random(f)  Cmd::batch(a, b)     cmd.map(f)
-Cmd::task(body, args...)         // once, pool     — no per-job cancel
-Cmd::task_isolated(body, args...)// once, own thread
+Cmd::perform<Ok>([key,] body, args...)        // result -> Ok{result}
+Cmd::attempt<Ok, Fail>([key,] body, args...)  // ... and a throw -> Fail{what}
+Cmd::task([key,] body, args...)               // body sends through a Sink
+Cmd::cancel(key)                              // stop a keyed task
+// a key: the latest task with it wins, older ones stop and their messages drop
 
 // ── subscriptions ────────────────────────────────────────────────────
 Sub::none()  Sub::every(ms, msg)  Sub::batch(a, b)
@@ -838,12 +901,9 @@ jaal::sim<App, Event>          // simulated time, seeded order, invariants
 jaal::explore<App, Event>(...) // the same, across seeds
 ```
 
-### Three things that cost real debugging time
+### Two things that cost real debugging time
 
-1. **An optional hook with the wrong signature is "absent", not an error.**
-   `init`, `subscribe`, `subs_key`, `visual_hash`, `needs_warmup`, and a
-   host's `attach`/`on_ready`. Static-assert them.
-2. **A `Cmd::task`'s stop_token only fires at shutdown.** Cancellable work is
-   a `Sub::stream` keyed on the thing you'd cancel.
-3. **`subs_key` must cover what routers CAPTURE**, not just what
+1. **An unkeyed task can't be stopped.** Its stop_token only fires at
+   shutdown. If anything should stop it, give it a key.
+2. **`subs_key` must cover what routers CAPTURE**, not just what
    `subscribe()` reads. The debug check can't see captures.

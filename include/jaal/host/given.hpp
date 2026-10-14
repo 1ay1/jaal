@@ -280,6 +280,7 @@ private:
                                  && std::same_as<U, payload_t<fx::send, msg_type>>) {
                 produced.push_back(std::move(x.msg));
             }
+            // cancel: tasks run inline here, so there's never one to stop.
         }, std::move(c.inner));
     }
 
