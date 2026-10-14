@@ -452,46 +452,47 @@ what they borrow.
 ### 4.7 `scope`: structured concurrency for helpers
 
 Sometimes a blocking job needs helper threads: read stdout and stderr at
-once, run a watchdog next to a request. agentty does this with raw threads
-and `[&]` captures, which is only safe if every helper is joined before the
-function returns.
-
-`jaal::scope` makes that the only possible shape:
+once, run a watchdog next to a request, split a scan across cores.
+`jaal::scope` runs a block, lets it start helpers, and joins every one
+before it returns. A helper follows the same rule as a task (D45): the body
+is captureless, and everything it uses is passed after it, by value, and
+must be `Sendable`. State the owner shares with its helpers goes in a
+`co_owned<T>` with a `Sync` T.
 
 ```cpp
-jaal::scope(st, [&](jaal::nursery& n) {
-    auto out = n.spawn([&] { return drain(proc.stdout_fd()); });
-    auto err = n.spawn([&] { return drain(proc.stderr_fd()); });
-    return Result{out.join(), err.join()};
-});   // every spawned helper has finished by this line, even on exception
+const auto [lines, words] = jaal::scope(cap, [&](jaal::nursery& n) {
+    auto a = n.spawn([](std::string t) { return std::ranges::count(t, '\n'); }, text);
+    auto b = n.spawn([](std::string t) { return count_words(t); }, text);
+    return std::pair{a.join(), b.join()};
+});   // every helper has finished by this line, even on exception
 ```
 
-- `scope` is a function that runs a block and joins every helper before it
-  returns. There's no handle that escapes it.
-- A `handle` joins its helper when it is destroyed, if `join()` wasn't
-  called. A lambda can only capture names declared before its handle, and
-  those die after it, so a helper always finishes before anything it
-  borrowed, block locals included, even when the block throws.
-- `(void)n.spawn(...)` joins at the end of that statement. For helpers that
-  run together, use `n.spawn_n(count, f)`, which joins them all when the
-  group is destroyed.
-- `nursery` is neither copyable nor movable, and only lives inside the block,
-  so it can't be stored or returned.
-- Borrowing with `[&]` is fine here: by the handle rule above, nothing
-  spawned can outlive what it borrowed. This is the one place in jaal where
-  captures are allowed, and it's safe by structure.
-- If a helper throws, the others are asked to stop through the shared stop
-  token, all are joined, and the first exception is re-thrown.
-- The parent's stop token propagates, so cancelling the task cancels its
-  helpers.
+- A helper can't capture, so it can't reach a local of the block or the
+  caller: it can't outlive one, and it can't race on one. Each of these is a
+  compile error with a sentence naming the rule.
+- `nursery`, `handle<T>` and the capabilities aren't `Sendable`, so a helper
+  can't be given one. It can't spawn, join a sibling, or wait on its owner:
+  the only waits are the owner waiting on its own helpers, so the wait graph
+  is a tree and can't deadlock. (These used to be runtime checks.)
+- `scope` joins every helper before it returns, and a `handle` joins its
+  helper when destroyed, so `(void)n.spawn(...)` waits at the end of that
+  statement. `n.spawn_n(count, body, args...)` starts helpers that run side
+  by side; each gets the index and its own copy of the args.
+- `nursery` is neither copyable nor movable and only lives inside the block.
+- The block itself may still capture `[&]`: it runs on the owner's thread,
+  inside `scope`.
+- If a helper throws, the others are asked to stop, all are joined, and the
+  first exception is re-thrown. The parent's stop token propagates.
+- For a data-parallel loop, `jaal::parallel_for(cap, n, width, body)` runs
+  `body(i)` for every index across `width` threads, the caller included.
+  It is the one place a helper uses a borrow: `body` is passed by
+  reference, and every helper is joined before the call returns, so the
+  borrow can't outlive it. Nothing escapes the call. `body` must be safe to
+  call from several threads at once.
 
-This is the Trio/Kotlin "nursery" pattern, which has a strong track record
-for eliminating leaked threads.
-
-What C++ can't stop: a helper that writes to a shared local from two helpers
-at once. Two helpers both doing `++count` on a captured `int` is a race.
-TSan catches it (Level B). The discipline is: helpers return values through
-`join()`, and don't write to shared locals.
+This is the Trio/Kotlin "nursery" pattern with Rust's `Send`/`Sync` split
+made into concepts. What no type can see: a captureless helper can still
+touch a global or a static. The banlist lint flags mutable statics.
 
 ### 4.8 `guarded<T, R>`: when there must be a lock
 
@@ -646,7 +647,7 @@ documented).
 | lock-order deadlock | lock ranks are types; taking a lock needs a capability proving every held lock ranks lower (`below<R>`), and a body only has its own `held<R>` | A |
 | wait / join / shutdown under a lock | they take exactly `unlocked`; `guarded<T>` refuses a `T` whose destructor joins | A |
 | pool shut down from its own job | identity check in `pool::shutdown`, throws `lock_order_error` | A-runtime |
-| waiting on a sibling helper (join cycle) | only the scope's own thread may `spawn`/`join`, so the wait graph is a tree; a helper that tries gets `scope_misuse` | A-runtime |
+| waiting on a sibling helper (join cycle) | `nursery` and `handle` aren't `Sendable`, so a helper can't be given one: only the scope's own thread can `spawn`/`join`, and the wait graph is a tree | A |
 | helper blocks sending to the loop that is joining it | the mailbox knows who waits on the sender (`kernel/waits.hpp`) and refuses instead of blocking; counted in `loop_full` | A-runtime |
 | loop blocks sending to its own full mailbox | refused and counted in `loop_full` | A-runtime |
 | a stopped subscription's message reaches `update` | every message carries its ORIGIN; the loop drops a stopped origin's messages at drain AND re-checks at fold time, after re-subscribing (so a stop earlier in the same batch counts) | A-runtime |

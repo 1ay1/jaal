@@ -119,10 +119,9 @@ int scope_helper_of_the_loop_never_blocks(const jaal::unlocked& cap) {
     k::inbox<M> in({}, opts(1, k::overflow::block));   // made here: this thread is the loop
     auto s = in.sink();
     if (!s.send(M{0})) return 701;                     // now full
-    bool sent = true;
-    jaal::scope(cap, [&](jaal::nursery& n) {
-        auto h = n.spawn([&s] { return s.send(M{1}); });   // would wait for a drain
-        sent = h.join();                                     // the loop waits on it
+    const bool sent = jaal::scope(cap, [&](jaal::nursery& n) {
+        auto h = n.spawn([](jaal::Sink<M> out) { return out.send(M{1}); }, s);   // would wait for a drain
+        return h.join();                                     // the loop waits on it
     });
     if (sent) return 702;                              // refused, not queued
     if (in.stats().loop_full != 1) return 703;

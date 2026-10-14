@@ -700,8 +700,18 @@ Use it instead of `thread_local`.
 
 ### `scope` / `nursery`
 
-Structured concurrency: work that cannot outlive its scope. A handle is
-pinned — no moving it out to extend its life.
+Structured concurrency: helpers that can't outlive their scope. `n.spawn(body,
+args...)` and `n.spawn_n(count, body, args...)` take a captureless body and
+Sendable args, like a task; shared state goes in a `co_owned<T>`. `scope()`
+joins every helper, and a `handle` joins its helper when destroyed. A
+handle is pinned: no moving it out to extend its life.
+
+> **Refuses:** a capturing helper, a pointer or view argument, handing a
+> helper the nursery or a handle (D45).
+
+`jaal::parallel_for(cap, n, width, body)` runs `body(i)` for i in [0, n)
+across `width` threads (the caller is one) and returns when all are done;
+`body` is borrowed only for the call, which joins before it returns.
 
 ### `handle`
 

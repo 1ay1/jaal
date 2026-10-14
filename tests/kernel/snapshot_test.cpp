@@ -1,6 +1,7 @@
 // jaal::snapshot<T>: lock-free reads, CAS updates, values stay alive across
 // stores, and concurrent update()s never lose an increment.
 #include <jaal/kernel/snapshot.hpp>
+#include <jaal/core/co_owned.hpp>
 #include <jaal/kernel/scope.hpp>
 
 #include <atomic>
@@ -43,19 +44,22 @@ int main() {
     }
     // 3. update() under contention loses nothing
     {
-        jaal::snapshot<std::map<std::string, int>> s;
+        // The snapshot is shared by every writer: Sync, behind a co_owned.
+        struct Box { jaal::snapshot<std::map<std::string, int>> s; };
+        auto box = jaal::co_owned<Box>::make();
         jaal::thread_root([&](const jaal::unlocked& cap) {
             jaal::scope(cap, [&](jaal::nursery& n) {
-                n.spawn_n(8, [&](std::size_t) {
+                n.spawn_n(8, [](std::size_t, jaal::co_owned<Box> b) {
                     for (int i = 0; i < 2000; ++i)
-                        s.update([](const std::map<std::string, int>& m, std::string k) {
+                        b->s.update([](const std::map<std::string, int>& m, std::string k) {
                             auto out = m;
                             ++out[k];
                             return out;
                         }, std::string("k"));
-                }).join();
+                }, box).join();
             });
         });
+        auto& s = box->s;
         ok(s.load()->at("k") == 8 * 2000, "3: concurrent update is exact");
     }
     if (failures) return 1;

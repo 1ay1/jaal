@@ -150,18 +150,17 @@ int main() {
         // 7. scope(): helpers may ask for their own unlocked.
         {
             leaf_a.with(cap, [](int& v) { v = 0; });
-            std::atomic<int> sum{0};
-            jaal::scope(cap, [&](jaal::nursery& n) {
-                auto h1 = n.spawn([&](const jaal::unlocked& hc) {
-                    sum += leaf_a.with(hc, [](int& v) { return ++v; });
+            auto sum = jaal::scope(cap, [](jaal::nursery& n) {
+                auto h1 = n.spawn([](const jaal::unlocked& hc) {
+                    return leaf_a.with(hc, [](int& v) { return ++v; });
                 });
-                auto h2 = n.spawn([&](const jaal::unlocked& hc, std::stop_token) {
-                    sum += leaf_a.with(hc, [](int& v) { return ++v; });
+                auto h2 = n.spawn([](const jaal::unlocked& hc, std::stop_token) {
+                    return leaf_a.with(hc, [](int& v) { return ++v; });
                 });
-                auto h3 = n.spawn([&] { sum += 100; });
-                h1.join(); h2.join(); h3.join();
+                auto h3 = n.spawn([] { return 100; });
+                return h1.join() + h2.join() + h3.join();
             });
-            ok(sum.load() == 1 + 2 + 100, "7: scope helpers");
+            ok(sum == 1 + 2 + 100, "7: scope helpers");
         }
 
         // 8. wait_with_for times out and still runs the body.

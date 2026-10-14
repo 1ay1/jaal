@@ -284,6 +284,16 @@ jaal_compile_fail(NAME guarded_no_nested_capture SOURCE compile_fail/scope.cpp C
                   MATCH "jaal: guarded::with/read takes a CAPTURELESS body")
 jaal_compile_fail(NAME guarded_no_nested_arg SOURCE compile_fail/scope.cpp CASE 5
                   MATCH "jaal: an argument to guarded::with/read is not Sendable")
+jaal_compile_fail(NAME scope_helper_no_capture SOURCE compile_fail/scope.cpp CASE 6
+                  MATCH "jaal: a scope helper must not capture anything")
+jaal_compile_fail(NAME scope_helper_no_pointer_arg SOURCE compile_fail/scope.cpp CASE 7
+                  MATCH "jaal: a scope helper argument is not Sendable")
+jaal_compile_fail(NAME scope_helper_no_nursery SOURCE compile_fail/scope.cpp CASE 8
+                  MATCH "jaal: a scope helper argument is not Sendable")
+jaal_compile_fail(NAME scope_helper_no_view SOURCE compile_fail/scope.cpp CASE 9
+                  MATCH "jaal: a scope helper argument is not Sendable")
+jaal_compile_fail(NAME scope_loan_private SOURCE compile_fail/scope.cpp CASE 10
+                  MATCH "private")
 
 # capabilities: every lock-order shape and every smuggle fails to build
 # (compile_fail/capability.cpp). The conversion failures name below<R>, the

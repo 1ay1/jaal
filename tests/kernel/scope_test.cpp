@@ -1,11 +1,13 @@
 // tests/kernel/scope_test.cpp — structured concurrency and guarded<T>.
 
+#include <jaal/core/co_owned.hpp>
 #include <jaal/kernel/guarded.hpp>
 #include <jaal/kernel/scope.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -22,45 +24,60 @@ static_assert(!std::is_copy_constructible_v<jaal::handle<int>>);
 static_assert(!std::is_move_constructible_v<jaal::handle<int>>);
 // no public way to make a nursery outside scope()
 static_assert(!std::is_constructible_v<jaal::nursery, std::stop_token>);
+// none of these can be handed to a helper, so a helper can't spawn or join
+static_assert(!jaal::Sendable<jaal::nursery>);
+static_assert(!jaal::Sendable<jaal::nursery*>);
+static_assert(!jaal::Sendable<jaal::handle<int>>);
+static_assert(!jaal::Sendable<jaal::helper_group>);
+static_assert(!jaal::Sendable<const jaal::unlocked*>);
+
+// What helpers share with the owner, and the only way they can: Sync state
+// behind a co_owned (reference counted, so nobody frees it under a helper).
+struct Flags {
+    std::atomic<bool> finished{false};
+    std::atomic<bool> saw_stop{false};
+    std::atomic<int>  sum{0};
+    const std::stop_source done;
+};
+using Shared = jaal::co_owned<Flags>;
 
 static int scope_tests(const jaal::unlocked& cap) {
-    // 1. values come back through join(); [&] borrowing of locals is fine
+    // 1. values go in by value and come back through join()
     {
         const std::string text = "hello world";
         auto [a, b] = jaal::scope(cap, [&](jaal::nursery& n) {
-            auto x = n.spawn([&] { return text.size(); });
-            auto y = n.spawn([&] { return text.find('w'); });
+            auto x = n.spawn([](std::string t) { return t.size(); }, text);
+            auto y = n.spawn([](std::string t) { return t.find('w'); }, text);
             return std::pair{x.join(), y.join()};
         });
         if (a != 11 || b != 6) return 101;
     }
 
     // 2. a helper the block never joins is STILL joined before scope()
-    //    returns: the block can't leak it by forgetting (the handle's
-    //    destructor joins it)
+    //    returns (its handle's destructor joins it)
     {
-        std::atomic<bool> finished{false};
+        auto f = Shared::make();
         jaal::scope(cap, [&](jaal::nursery& n) {
-            auto h = n.spawn([&] {
+            auto h = n.spawn([](Shared s) {
                 std::this_thread::sleep_for(20ms);
-                finished = true;
-            });
+                s->finished = true;
+            }, f);
             // no join here
         });
-        if (!finished) return 102;
+        if (!f->finished) return 102;
     }
 
     // 3. a throwing helper: siblings are asked to stop, everything is
     //    joined, and the error surfaces from scope()
     {
-        std::atomic<bool> sibling_saw_stop{false};
+        auto f = Shared::make();
         bool caught = false;
         try {
             jaal::scope(cap, [&](jaal::nursery& n) {
-                auto sib = n.spawn([&](std::stop_token st) {
+                auto sib = n.spawn([](std::stop_token st, Shared s) {
                     while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
-                    sibling_saw_stop = true;
-                });
+                    s->saw_stop = true;
+                }, f);
                 auto bad = n.spawn([] { throw std::runtime_error("helper failed"); });
                 (void)bad.join();
             });
@@ -68,29 +85,28 @@ static int scope_tests(const jaal::unlocked& cap) {
             caught = std::string(e.what()) == "helper failed";
         }
         if (!caught) return 103;
-        if (!sibling_saw_stop) return 104;          // it was stopped AND joined
+        if (!f->saw_stop) return 104;               // it was stopped AND joined
     }
 
-    // 4. the BLOCK throws while a helper is still running and borrowing a
-    //    BLOCK LOCAL: the helper is stopped and joined before that local
-    //    dies. This is the case ASan caught when only scope() joined, after
-    //    the block's frame was already gone.
+    // 4. the BLOCK throws while a helper still runs: the helper is stopped
+    //    and joined before scope() rethrows. It owns what it touches (its
+    //    co_owned keeps `done` alive), so nothing it uses can die under it.
     {
+        auto f = Shared::make();
         bool caught = false;
         try {
             jaal::scope(cap, [&](jaal::nursery& n) {
-                std::stop_source done;                     // dies with the block
-                auto h = n.spawn([&done](std::stop_token st) {
-                    while (!st.stop_requested() && !done.stop_requested())
+                auto h = n.spawn([](std::stop_token st, Shared s) {
+                    while (!st.stop_requested() && !s->done.stop_requested())
                         std::this_thread::sleep_for(1ms);
-                    (void)done.stop_requested();           // still alive here
-                });
+                    s->saw_stop = true;
+                }, f);
                 throw std::logic_error("block failed");
             });
         } catch (const std::logic_error&) {
             caught = true;
         }
-        if (!caught) return 105;
+        if (!caught || !f->saw_stop) return 105;
     }
 
     // 5. join() rethrows the helper's own error, and scope() doesn't throw
@@ -107,63 +123,47 @@ static int scope_tests(const jaal::unlocked& cap) {
     // 6. parent cancellation flows down
     {
         std::stop_source parent;
-        std::atomic<bool> stopped{false};
+        auto f = Shared::make();
         std::jthread canceller([&] {
             std::this_thread::sleep_for(20ms);
             parent.request_stop();
         });
         jaal::scope(cap, parent.get_token(), [&](jaal::nursery& n) {
-            auto h = n.spawn([&](std::stop_token st) {
+            auto h = n.spawn([](std::stop_token st, Shared s) {
                 while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
-                stopped = true;
-            });
+                s->saw_stop = true;
+            }, f);
         });
-        if (!stopped) return 107;
+        if (!f->saw_stop) return 107;
     }
 
-    // 7. void helpers and many of them
+    // 7. many helpers side by side, each with its index and its own args
     {
-        std::atomic<int> sum{0};
+        auto f = Shared::make();
         jaal::scope(cap, [&](jaal::nursery& n) {
-            n.spawn_n(16, [&sum](std::size_t i) { sum += static_cast<int>(i) + 1; }).join();
+            n.spawn_n(16, [](std::size_t i, Shared s) {
+                s->sum += static_cast<int>(i) + 1;
+            }, f).join();
         });
-        if (sum != 136) return 108;
+        if (f->sum != 136) return 108;
     }
 
-    // 8. joining from a helper is REFUSED, not hung (it could be a
-    //    mutual join). The helper can't name a sibling's handle: it was
-    //    spawned before that handle existed. It can name the nursery, which
-    //    refuses spawn from a helper (9); and a later sibling that names an
-    //    EARLIER handle is refused here.
+    // 8. a helper may take its own `unlocked` and a stop token
     {
-        bool refused = false;
-        try {
-            jaal::scope(cap, [&](jaal::nursery& n) {
-                auto b = n.spawn([](std::stop_token st) {
-                    while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
-                    return 2;
-                });
-                auto a = n.spawn([&b] { return b.join(); });   // would wait on a sibling
-                (void)a.join();
-            });
-        } catch (const jaal::scope_misuse&) {
-            refused = true;
-        }
-        if (!refused) return 109;
+        auto r = jaal::scope(cap, [](jaal::nursery& n) {
+            return n.spawn([](const jaal::unlocked&, std::stop_token, int v) { return v * 2; },
+                           21).join();
+        });
+        if (r != 42) return 109;
     }
 
-    // 9. a helper can't spawn into the nursery (one writer for its list)
+    // 9. a function pointer works as a body
     {
-        bool refused = false;
-        try {
-            jaal::scope(cap, [&](jaal::nursery& n) {
-                auto h = n.spawn([&n] { auto x = n.spawn([] {}); });
-                h.join();
-            });
-        } catch (const jaal::scope_misuse&) {
-            refused = true;
-        }
-        if (!refused) return 110;
+        auto r = jaal::scope(cap, [](jaal::nursery& n) {
+            int (*twice)(int) = [](int v) { return v * 2; };
+            return n.spawn(twice, 5).join();
+        });
+        if (r != 10) return 110;
     }
 
     // 10. join() twice is refused (the result was moved out the first time)
@@ -175,6 +175,58 @@ static int scope_tests(const jaal::unlocked& cap) {
             try { (void)h.join(); } catch (const std::logic_error&) { refused = true; }
         });
         if (!refused) return 111;
+    }
+
+    // 11. a helper that throws in spawn_n stops its siblings, and the group
+    //     rethrows it
+    {
+        auto f = Shared::make();
+        bool caught = false;
+        try {
+            jaal::scope(cap, [&](jaal::nursery& n) {
+                n.spawn_n(4, [](std::stop_token st, std::size_t i, Shared s) {
+                    if (i == 0) throw std::runtime_error("share 0 failed");
+                    while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
+                    s->sum += 1;
+                }, f).join();
+            });
+        } catch (const std::runtime_error& e) {
+            caught = std::string(e.what()) == "share 0 failed";
+        }
+        if (!caught || f->sum != 3) return 112;
+    }
+
+    // 12. parallel_for: every index exactly once, the body borrowed from
+    //     the caller (the one borrow scope allows, joined inside the call)
+    {
+        std::vector<std::atomic<int>> hits(1000);
+        const auto bump = [&hits](std::size_t i) { hits[i].fetch_add(1); };
+        jaal::parallel_for(cap, hits.size(), 8, bump);
+        for (auto& h : hits)
+            if (h.load() != 1) return 113;
+    }
+
+    // 13. parallel_for rethrows a share's error after every share stopped
+    {
+        std::atomic<int> after{0};
+        bool caught = false;
+        try {
+            jaal::parallel_for(cap, 10'000, 4, [&after](std::size_t i) {
+                if (i == 7) throw std::runtime_error("index 7");
+                after.fetch_add(1);
+            });
+        } catch (const std::runtime_error& e) {
+            caught = std::string(e.what()) == "index 7";
+        }
+        if (!caught || after.load() >= 10'000) return 114;
+    }
+
+    // 14. width 1 and n 0 run inline / not at all
+    {
+        int sum = 0;
+        jaal::parallel_for(cap, 4, 1, [&sum](std::size_t i) { sum += static_cast<int>(i); });
+        jaal::parallel_for(cap, 0, 8, [](std::size_t) { std::abort(); });
+        if (sum != 6) return 115;
     }
     return 0;
 }

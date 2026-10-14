@@ -560,7 +560,9 @@ runtime on every call, in every build. No debug-only checks.
    thread that opened the scope may `spawn` or `join`, so the only waits
    are owner → helper: a tree, no cycle. The same rule gives the nursery's
    helper list a single writer, which removes a data race. A helper that
-   tries gets `scope_misuse`, surfaced from `scope()`.
+   tries gets `scope_misuse`, surfaced from `scope()`. (Since D45 a helper
+   can't capture or be given a nursery or handle, so this is a compile
+   error and `scope_misuse` is gone.)
 
 4. *A scope helper blocking on the full mailbox of the loop that joins it.*
    Only the loop drains; the loop waits for the helper. The mailbox already
@@ -1090,3 +1092,26 @@ type needed a debounce token checked by hand. A keyed task reuses the
 stream machinery (an origin the loop retires), so a replaced task's late
 result is dropped on the loop thread whatever the timing; `explore` checks
 it across seeds. Keys are per child, so two tabs' `"search"` don't collide.
+
+## D45. Scope helpers follow the task rule: captureless, Sendable args
+
+**Decision.** A `scope` helper is a captureless body plus arguments passed
+after it, each `Sendable`. State shared with the owner goes in a
+`co_owned<T>` with a `Sync` T. `nursery`, `handle` and `helper_group` are
+not Sendable, so a helper can't be given one. A `handle` joins its helper
+when destroyed; `spawn_n` runs helpers side by side.
+
+**Alternatives.** Keep `[&]` helpers and join in `scope()` (the old rule);
+join each handle on destruction and rely on capture order (tried first).
+
+**Why.** ASan found a helper reading a dead stack frame: it borrowed a
+local of the block, and `scope()` only joined after the block's frame was
+gone. Joining in the handle's destructor fixed that case, but not a
+pointer to a later local stored into a captured slot: no ordering rule can
+follow an address once it's been copied. Taking captures away closes it,
+and gives scope the same guarantees tasks already had: no borrow can
+dangle, no shared write can race (Sync), and no helper can spawn or join,
+so the runtime `scope_misuse` checks became compile errors.
+
+**Cost.** Breaking: a helper that borrowed now takes its inputs as
+arguments, and a shared counter or flag moves into a `co_owned` struct.
