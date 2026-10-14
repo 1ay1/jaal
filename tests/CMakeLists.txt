@@ -320,6 +320,8 @@ jaal_compile_fail(NAME cap_bad_rank          SOURCE compile_fail/capability.cpp 
 # kernel / hosts
 jaal_compile_fail(NAME on_event_not_sent SOURCE compile_fail/kernel.cpp CASE 1
                   MATCH "jaal: P::on is declared, but no overload takes an event this host sends")
+jaal_compile_fail(NAME event_kind_unhandled SOURCE compile_fail/kernel.cpp CASE 20
+                  MATCH "jaal: P::Event lists a kind of input with no on\\(\\) for it")
 jaal_compile_fail(NAME timeline_needs_frozen_model SOURCE compile_fail/kernel.cpp CASE 2
                   MATCH "is not Frozen: it contains '[^']*shared_ptr[^']*', a pointer-like owner")
 jaal_compile_fail(NAME child_wrap_not_in_parent SOURCE compile_fail/kernel.cpp CASE 3

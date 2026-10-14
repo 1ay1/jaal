@@ -31,6 +31,18 @@ struct App {
 // the program handles scroll events; the host only sends keys and clicks,
 // so every event would be dropped
 jaal::headless<App, std::variant<Key, Click>> h;
+#elif JAAL_CASE == 20
+// Event lists Click, but there is no on() for it: clicks would be dropped
+struct Partial {
+    struct Model {};
+    struct S {};
+    using Msg = std::variant<S>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Event = std::variant<Key, Click>;
+    static Cmd update(Model&, S) { return {}; }
+    static Msg on(const Model&, const Key&) { return S{}; }
+};
+jaal::headless<Partial> h;
 #elif JAAL_CASE == 2
 // a model that shares a mutable Doc: a copy isn't a snapshot, so a
 // timeline over it would show the wrong past

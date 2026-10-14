@@ -386,6 +386,24 @@ concept has_subscribe = requires(const typename P::Model& m) {
 // for us), or one of Msg's cases.
 JAAL_DECLARES_MEMBER(declares_on, on);
 
+} // namespace detail::prog
+
+namespace kernel {
+/// Marker for a host with no input events (a headless server, a test).
+struct no_events {};
+}  // namespace kernel
+
+/// The input a program takes: `using Event = std::variant<Key, Click>;` in
+/// the program, or no_events when it doesn't say. Test hosts default to it,
+/// so `headless<App>` and `sim<App>` can be fed that program's input
+/// without naming the type again.
+template <class P> struct event_of { using type = kernel::no_events; };
+template <class P> requires requires { typename P::Event; }
+struct event_of<P> { using type = typename P::Event; };
+template <class P> using event_of_t = typename event_of<P>::type;
+
+namespace detail::prog {
+
 template <class P, class E>
 concept reacts_to = requires(const typename P::Model& m, const E& e) {
     { P::on(m, e) } -> std::convertible_to<std::optional<typename P::Msg>>;
@@ -516,8 +534,21 @@ namespace detail::prog {
 // silently didn't run" becomes a compile error at the line where the
 // program is handed to the kernel, not a mystery weeks later.
 
+// Every kind of input a program declares must have an on() for it, or it
+// would be dropped silently.
+template <class P, class E> inline constexpr bool handles_every = reacts_to<P, E>;
+template <class P, class... Es>
+inline constexpr bool handles_every<P, std::variant<Es...>> =
+    reacts_to<P, std::variant<Es...>> || (reacts_to<P, Es> && ...);
+
 template <class P>
 consteval void check_hooks() {
+    if constexpr (requires { typename P::Event; }) {
+        static_assert(handles_every<P, typename P::Event>,
+            "jaal: P::Event lists a kind of input with no on() for it. Add "
+            "static std::optional<Msg> on(const Model&, const E&) for each "
+            "alternative of Event, or drop it from Event.");
+    }
     if constexpr (declares_init<P>) {
         static_assert(has_init<P>,
             "jaal: P::init is declared but its signature doesn't match "

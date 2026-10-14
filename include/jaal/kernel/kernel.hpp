@@ -226,8 +226,7 @@ class teardown_key {
 
 template <class K, class H, class S> class teardown;   // kernel/teardown.hpp
 
-/// Marker for a host with no input events (a headless server, a test).
-struct no_events {};
+// no_events (no input) is declared in core/program.hpp, next to event_of.
 
 
 // core/program.hpp states what a program's declared Clock must be

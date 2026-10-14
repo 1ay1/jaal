@@ -87,7 +87,7 @@ private:
     std::vector<std::any> sinks_;
 };
 
-template <Program P, class Event = kernel::no_events,
+template <Program P, class Event = event_of_t<P>,
           platform::Clock C = platform::sim_clock>
 class headless {
 public:

@@ -124,6 +124,17 @@ per event kind, picked by overload resolution.
 - Unhandled `interrupt` / `terminate` / `hangup` still stop the program
   (exit 130 and friends), so forgetting `on(sig)` never makes it unkillable.
 
+Optionally, say what input the program takes:
+
+```cpp
+using Event = std::variant<Key, Click>;
+```
+
+Then every listed kind must have an `on()` (a missing one is a compile
+error, not a silently dropped click), and the test hosts pick it up:
+`jaal::headless<App>` and `jaal::sim<App>` take `Key` and `Click` without
+naming them again.
+
 Input doesn't go through `subscribe`. There is nothing to keep in step and
 nothing for `subs_key` to cover. Routing one event costs ~14 ns.
 
@@ -800,7 +811,7 @@ after every message**. `sim_options` can inject crashed and lost tasks.
 Input goes in the same way, through your `on()`:
 
 ```cpp
-jaal::sim<App, Key> s{seed};
+jaal::sim<App> s{seed};         // App::Event says what input it takes
 s.input(5ms, Key{'q'});         // at sim time 5ms, on(model, Key{'q'})
 ```
 
@@ -895,6 +906,7 @@ struct App {
     static Sub subscribe(const Model&);         // optional: timers, streams
     static std::optional<Msg> on(const Model&, const Key&);  // optional: input
     static std::optional<Msg> on(const Model&, jaal::sig);   // signals too
+    using Event = std::variant<Key>;            // optional: checked, used by tests
     static auto subs_key(const Model&);         // optional, big win
 };
 

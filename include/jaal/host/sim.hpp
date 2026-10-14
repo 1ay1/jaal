@@ -263,8 +263,9 @@ struct host : recorder {
 //     jaal::sim<App, maya::terminal_events> s{seed};
 //     s.input(5ms, KeyEvent{'q'});
 //
-// A program with no input leaves it at the default.
-template <Program P, class Event = kernel::no_events>
+// A program that declares `using Event = ...` needs nothing more:
+// sim<App> takes that. Otherwise name it, or leave it for no input.
+template <Program P, class Event = event_of_t<P>>
     requires std::copy_constructible<typename P::Msg>
 class sim {
 public:
@@ -423,7 +424,7 @@ struct explore_report {
 ///
 /// `Event` matches sim's: the input type the scenario sends, or leave it
 /// for a program with no input.
-template <Program P, class Event = kernel::no_events, class Scenario>
+template <Program P, class Event = event_of_t<P>, class Scenario>
     requires std::invocable<Scenario&, sim<P, Event>&>
 explore_report<P> explore(std::uint64_t first, std::size_t count, sim_options opt,
                           Scenario scenario) {

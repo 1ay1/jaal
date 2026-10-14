@@ -172,13 +172,14 @@ struct Live {
         return {};
     }
     static Msg on(const Model&, const Key& k) { return Typed{k.c}; }
+    using Event = Key;                    // test hosts pick this up
 };
 
 void sim_input() {
     std::printf("--- sim: input through on(), 200 seeds ---\n");
     jaal::sim_options o;
     o.task_latency_max = std::chrono::milliseconds(15);
-    auto rep = jaal::explore<Live, Key>(1, 200, o, [](jaal::sim<Live, Key>& s) {
+    auto rep = jaal::explore<Live>(1, 200, o, [](jaal::sim<Live>& s) {
         int t = 0;
         for (char c : std::string("jaal")) s.input(std::chrono::milliseconds(t += 4), Key{c});
         s.check("never a stale result", [](const Live::Model& m) { return !m.stale; });
@@ -186,7 +187,7 @@ void sim_input() {
     check(rep.ok(), "input via sim::input; no stale result under any seed");
     if (!rep.ok()) std::puts(rep.failure->describe().c_str());
 
-    jaal::sim<Live, Key> s(7, o);
+    jaal::sim<Live> s(7, o);
     int t = 0;
     for (char c : std::string("jaal")) s.input(std::chrono::milliseconds(t += 4), Key{c});
     auto r = s.run();
