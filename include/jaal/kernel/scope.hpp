@@ -15,9 +15,14 @@
 //
 // Rules:
 //   * scope() joins EVERY helper before it returns: normal return, early
-//     return, or exception. So [&] captures of locals are safe: nothing
-//     spawned can outlive the frame that owns what it borrowed. This is
-//     the one place in jaal where helpers may capture by reference.
+//     return, or exception. And a handle<T> joins its helper when it is
+//     destroyed. A lambda can only capture names declared BEFORE its
+//     handle, which die AFTER it, so a helper always finishes before
+//     anything it borrowed (block locals included, even when the block
+//     throws). That is what makes [&] safe here; joining only in scope()
+//     was not enough, because the block's own frame is gone by then.
+//   * (void)n.spawn(...) therefore joins at the end of that statement. For
+//     helpers that run side by side, use spawn_n, whose group joins them.
 //   * nursery and handle<T> can't be copied or moved, and there's no
 //     detach. A helper can't be handed off to outlive the scope.
 //   * cancellation flows down: the parent's stop_token stops the nursery,
@@ -61,6 +66,7 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "../core/capability.hpp"
 #include "waits.hpp"
@@ -94,17 +100,60 @@ struct slot<void> {
     std::exception_ptr error;
 };
 
+// One helper as the nursery owns it. Lives in a std::list, so its address
+// is stable for the whole scope.
+struct entry {
+    std::jthread                               thread;
+    std::unique_ptr<void, void (*)(void*)>     slot{nullptr, [](void*) {}};
+    std::atomic<bool>                          observed{false};
+    std::exception_ptr (*take_error)(void*)    = nullptr;
+};
+
+// Wait for a helper from a destructor. If the frame is unwinding, ask the
+// nursery to stop first: a helper waiting for stop would otherwise hang it.
+inline void join_on_destroy(entry& e, std::stop_source& stop, int unwinding_at_start) noexcept {
+    if (!e.thread.joinable()) return;
+    if (std::uncaught_exceptions() > unwinding_at_start) stop.request_stop();
+    e.thread.join();
+}
+
+// What a helper body returns, picked in the same order invoke_body uses.
+template <class F>
+auto body_result() {
+    if constexpr (std::invocable<F&, const unlocked&, std::stop_token>)
+        return std::type_identity<std::invoke_result_t<F&, const unlocked&, std::stop_token>>{};
+    else if constexpr (std::invocable<F&, const unlocked&>)
+        return std::type_identity<std::invoke_result_t<F&, const unlocked&>>{};
+    else if constexpr (std::invocable<F&, std::stop_token>)
+        return std::type_identity<std::invoke_result_t<F&, std::stop_token>>{};
+    else
+        return std::type_identity<std::invoke_result_t<F&>>{};
+}
+template <class F>
+using body_result_t = std::remove_cvref_t<typename decltype(body_result<F>())::type>;
+
 }  // namespace detail::scope
 
 /// A running helper. join() waits for it and returns its value (or rethrows
-/// its exception). Can't be copied or moved; lives inside the scope.
+/// its exception). Can't be copied or moved.
+///
+/// The destructor joins the helper if join() wasn't called. That is what
+/// makes borrowing sound: a helper's lambda can only capture names declared
+/// before its handle, and those are destroyed after the handle, so the
+/// helper has finished before anything it borrowed goes away. A handle
+/// discarded with (void) is joined at the end of that statement; for many
+/// helpers that run together, use nursery::spawn_n.
 template <class T>
-class handle {
+class [[nodiscard]] handle {
 public:
     handle(const handle&)            = delete;
     handle& operator=(const handle&) = delete;
     handle(handle&&)                 = delete;
     handle& operator=(handle&&)      = delete;
+
+    ~handle() {
+        if (!taken_) detail::scope::join_on_destroy(*e_, *stop_, unwinding_);
+    }
 
     /// Wait for the helper and take its result. Call at most once, from
     /// the scope's own thread.
@@ -112,26 +161,67 @@ public:
         if (std::this_thread::get_id() != owner_) throw scope_misuse("handle::join()");
         if (taken_) throw std::logic_error("jaal: handle::join() called twice");
         taken_ = true;
-        observed_->store(true, std::memory_order_relaxed);
-        if (thread_->joinable()) thread_->join();
-        if (slot_->error) {
-            auto e = std::exchange(slot_->error, nullptr);
+        e_->observed.store(true, std::memory_order_relaxed);
+        if (e_->thread.joinable()) e_->thread.join();
+        auto* s = static_cast<detail::scope::slot<T>*>(e_->slot.get());
+        if (s->error) {
+            auto e = std::exchange(s->error, nullptr);
             std::rethrow_exception(e);
         }
-        if constexpr (!std::is_void_v<T>) return std::move(*slot_->value);
+        if constexpr (!std::is_void_v<T>) return std::move(*s->value);
     }
 
 private:
     friend class nursery;
-    handle(std::jthread* t, detail::scope::slot<T>* s, std::atomic<bool>* observed,
-           std::thread::id owner)
-        : thread_(t), slot_(s), observed_(observed), owner_(owner) {}
+    handle(detail::scope::entry* e, std::stop_source* stop, std::thread::id owner)
+        : e_(e), stop_(stop), owner_(owner) {}
 
-    std::jthread*            thread_;
-    detail::scope::slot<T>*  slot_;
-    std::atomic<bool>*       observed_;
-    std::thread::id          owner_;
-    bool                     taken_ = false;
+    detail::scope::entry*  e_;
+    std::stop_source*      stop_;
+    std::thread::id        owner_;
+    int                    unwinding_ = std::uncaught_exceptions();
+    bool                   taken_ = false;
+};
+
+/// Helpers started together by nursery::spawn_n. Same rule as handle: the
+/// destructor joins them all, so they can't outlive what they borrowed.
+class [[nodiscard]] helper_group {
+public:
+    helper_group(const helper_group&)            = delete;
+    helper_group& operator=(const helper_group&) = delete;
+    helper_group(helper_group&&)                 = delete;
+    helper_group& operator=(helper_group&&)      = delete;
+
+    ~helper_group() {
+        if (!taken_)
+            for (auto* e : entries_) detail::scope::join_on_destroy(*e, *stop_, unwinding_);
+    }
+
+    /// Wait for every helper; rethrow the first error. Once, from the
+    /// scope's own thread.
+    void join() {
+        if (std::this_thread::get_id() != owner_) throw scope_misuse("helper_group::join()");
+        if (taken_) throw std::logic_error("jaal: helper_group::join() called twice");
+        taken_ = true;
+        for (auto* e : entries_) {
+            e->observed.store(true, std::memory_order_relaxed);
+            if (e->thread.joinable()) e->thread.join();
+        }
+        for (auto* e : entries_)
+            if (auto err = e->take_error(e->slot.get())) std::rethrow_exception(err);
+    }
+
+private:
+    friend class nursery;
+    helper_group(std::vector<detail::scope::entry*> es, std::stop_source* stop,
+                 std::thread::id owner)
+        : entries_(std::move(es)), stop_(stop), owner_(owner) {}
+
+    std::vector<detail::scope::entry*>  entries_;
+    std::stop_source*                   stop_;
+    std::thread::id                     owner_;
+    int                                 unwinding_ = std::uncaught_exceptions();
+    bool                                taken_ = false;
 };
 
 /// Spawns helpers that are all joined before the owning scope() returns.
@@ -151,12 +241,53 @@ public:
         requires std::invocable<F&, std::stop_token> || std::invocable<F&>
               || std::invocable<F&, const unlocked&, std::stop_token>
               || std::invocable<F&, const unlocked&>
-    [[nodiscard]] auto spawn(F f) {
+    [[nodiscard]] handle<detail::scope::body_result_t<F>>
+    spawn(F f) {
         if (std::this_thread::get_id() != owner_) throw scope_misuse("nursery::spawn()");
-        using R = decltype(invoke_body(f, std::stop_token{}));
+        using R = detail::scope::body_result_t<F>;
+        auto& e = start<R>(std::move(f));
+        return handle<R>(&e, &stop_, owner_);
+    }
+
+    /// Start `count` helpers running f(i) (or f(i, std::stop_token)) for i in
+    /// [0, count), together. The group joins them all when it is destroyed.
+    template <class F>
+        requires std::invocable<F&, std::size_t, std::stop_token>
+              || std::invocable<F&, std::size_t>
+    [[nodiscard]] helper_group spawn_n(std::size_t count, F f) {
+        if (std::this_thread::get_id() != owner_) throw scope_misuse("nursery::spawn_n()");
+        std::vector<detail::scope::entry*> es;
+        es.reserve(count);
+        try {
+            for (std::size_t i = 0; i < count; ++i) {
+                auto body = [f, i](std::stop_token st) mutable {
+                    if constexpr (std::invocable<F&, std::size_t, std::stop_token>)
+                        f(i, std::move(st));
+                    else
+                        f(i);
+                };
+                es.push_back(&start<void>(std::move(body)));
+            }
+        } catch (...) {
+            // Some started: join them here, the group never existed.
+            stop_.request_stop();
+            for (auto* e : es) if (e->thread.joinable()) e->thread.join();
+            throw;
+        }
+        return helper_group(std::move(es), &stop_, owner_);
+    }
+
+    /// The nursery's stop token (parent stop, a sibling failure, or the
+    /// block throwing all trigger it).
+    [[nodiscard]] std::stop_token stop_token() const noexcept { return stop_.get_token(); }
+
+    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+
+private:
+    template <class R, class F>
+    detail::scope::entry& start(F f) {
         auto& e = add<R>();
         auto* s = static_cast<detail::scope::slot<R>*>(e.slot.get());
-        auto* obs = &e.observed;
         e.thread = std::jthread(
             [this, s, f = std::move(f),
              waiting = kernel::waits_detail::for_helper()](std::stop_token child) mutable {
@@ -175,16 +306,9 @@ public:
                     stop_.request_stop();          // siblings: please stop
                 }
             });
-        return handle<R>(&e.thread, s, obs, owner_);
+        return e;
     }
 
-    /// The nursery's stop token (parent stop, a sibling failure, or the
-    /// block throwing all trigger it).
-    [[nodiscard]] std::stop_token stop_token() const noexcept { return stop_.get_token(); }
-
-    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
-
-private:
     template <class F>
     static decltype(auto) invoke_body(F& f, std::stop_token st) {
         if constexpr (std::invocable<F&, const unlocked&, std::stop_token>) {
@@ -201,12 +325,7 @@ private:
     // nursery is. The nursery token is the one that matters in practice.
     std::stop_token merged(const std::stop_token&) const { return stop_.get_token(); }
 
-    struct entry {
-        std::jthread                               thread;
-        std::unique_ptr<void, void (*)(void*)>     slot{nullptr, [](void*) {}};
-        std::atomic<bool>                          observed{false};
-        std::exception_ptr (*take_error)(void*)    = nullptr;
-    };
+    using entry = detail::scope::entry;
 
     template <class R>
     entry& add() {

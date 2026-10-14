@@ -468,11 +468,18 @@ jaal::scope(st, [&](jaal::nursery& n) {
 
 - `scope` is a function that runs a block and joins every helper before it
   returns. There's no handle that escapes it.
+- A `handle` joins its helper when it is destroyed, if `join()` wasn't
+  called. A lambda can only capture names declared before its handle, and
+  those die after it, so a helper always finishes before anything it
+  borrowed, block locals included, even when the block throws.
+- `(void)n.spawn(...)` joins at the end of that statement. For helpers that
+  run together, use `n.spawn_n(count, f)`, which joins them all when the
+  group is destroyed.
 - `nursery` is neither copyable nor movable, and only lives inside the block,
   so it can't be stored or returned.
-- Borrowing with `[&]` is fine here, because nothing spawned can outlive the
-  block. This is the one place in jaal where captures are allowed, and it's
-  safe by structure.
+- Borrowing with `[&]` is fine here: by the handle rule above, nothing
+  spawned can outlive what it borrowed. This is the one place in jaal where
+  captures are allowed, and it's safe by structure.
 - If a helper throws, the others are asked to stop through the shared stop
   token, all are joined, and the first exception is re-thrown.
 - The parent's stop token propagates, so cancelling the task cancels its

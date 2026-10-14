@@ -46,17 +46,14 @@ int main() {
         jaal::snapshot<std::map<std::string, int>> s;
         jaal::thread_root([&](const jaal::unlocked& cap) {
             jaal::scope(cap, [&](jaal::nursery& n) {
-                std::vector<jaal::handle<void>*> hs;
-                for (int t = 0; t < 8; ++t) {
-                    (void)n.spawn([&] {
-                        for (int i = 0; i < 2000; ++i)
-                            s.update([](const std::map<std::string, int>& m, std::string k) {
-                                auto out = m;
-                                ++out[k];
-                                return out;
-                            }, std::string("k"));
-                    });
-                }
+                n.spawn_n(8, [&](std::size_t) {
+                    for (int i = 0; i < 2000; ++i)
+                        s.update([](const std::map<std::string, int>& m, std::string k) {
+                            auto out = m;
+                            ++out[k];
+                            return out;
+                        }, std::string("k"));
+                }).join();
             });
         });
         ok(s.load()->at("k") == 8 * 2000, "3: concurrent update is exact");

@@ -36,11 +36,12 @@ static int scope_tests(const jaal::unlocked& cap) {
     }
 
     // 2. a helper the block never joins is STILL joined before scope()
-    //    returns: the block can't leak it by forgetting
+    //    returns: the block can't leak it by forgetting (the handle's
+    //    destructor joins it)
     {
         std::atomic<bool> finished{false};
         jaal::scope(cap, [&](jaal::nursery& n) {
-            (void)n.spawn([&] {
+            auto h = n.spawn([&] {
                 std::this_thread::sleep_for(20ms);
                 finished = true;
             });
@@ -56,11 +57,12 @@ static int scope_tests(const jaal::unlocked& cap) {
         bool caught = false;
         try {
             jaal::scope(cap, [&](jaal::nursery& n) {
-                (void)n.spawn([&](std::stop_token st) {
+                auto sib = n.spawn([&](std::stop_token st) {
                     while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
                     sibling_saw_stop = true;
                 });
-                (void)n.spawn([] { throw std::runtime_error("helper failed"); });
+                auto bad = n.spawn([] { throw std::runtime_error("helper failed"); });
+                (void)bad.join();
             });
         } catch (const std::runtime_error& e) {
             caught = std::string(e.what()) == "helper failed";
@@ -69,25 +71,26 @@ static int scope_tests(const jaal::unlocked& cap) {
         if (!sibling_saw_stop) return 104;          // it was stopped AND joined
     }
 
-    // 4. the BLOCK throws while a helper is still running: the helper is
-    //    stopped and joined before the exception leaves scope(). This is
-    //    the case where a raw std::thread + [&] would touch a dead frame.
+    // 4. the BLOCK throws while a helper is still running and borrowing a
+    //    BLOCK LOCAL: the helper is stopped and joined before that local
+    //    dies. This is the case ASan caught when only scope() joined, after
+    //    the block's frame was already gone.
     {
-        std::atomic<int> after_exit_writes{0};
-        std::atomic<bool> scope_left{false};
+        bool caught = false;
         try {
             jaal::scope(cap, [&](jaal::nursery& n) {
-                (void)n.spawn([&](std::stop_token st) {
-                    while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
-                    if (scope_left) ++after_exit_writes;   // would be use-after-scope
+                std::stop_source done;                     // dies with the block
+                auto h = n.spawn([&done](std::stop_token st) {
+                    while (!st.stop_requested() && !done.stop_requested())
+                        std::this_thread::sleep_for(1ms);
+                    (void)done.stop_requested();           // still alive here
                 });
                 throw std::logic_error("block failed");
             });
         } catch (const std::logic_error&) {
-            scope_left = true;
+            caught = true;
         }
-        std::this_thread::sleep_for(20ms);
-        if (after_exit_writes != 0) return 105;
+        if (!caught) return 105;
     }
 
     // 5. join() rethrows the helper's own error, and scope() doesn't throw
@@ -110,7 +113,7 @@ static int scope_tests(const jaal::unlocked& cap) {
             parent.request_stop();
         });
         jaal::scope(cap, parent.get_token(), [&](jaal::nursery& n) {
-            (void)n.spawn([&](std::stop_token st) {
+            auto h = n.spawn([&](std::stop_token st) {
                 while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
                 stopped = true;
             });
@@ -122,14 +125,16 @@ static int scope_tests(const jaal::unlocked& cap) {
     {
         std::atomic<int> sum{0};
         jaal::scope(cap, [&](jaal::nursery& n) {
-            for (int i = 1; i <= 16; ++i) (void)n.spawn([&sum, i] { sum += i; });
+            n.spawn_n(16, [&sum](std::size_t i) { sum += static_cast<int>(i) + 1; }).join();
         });
         if (sum != 136) return 108;
     }
 
-    // 8. the mutual-join deadlock is REFUSED, not hung. Helper A tries to
-    //    join helper B (which could be joining A): only the scope's thread
-    //    may join, so A gets scope_misuse, which surfaces from scope().
+    // 8. joining from a helper is REFUSED, not hung (it could be a
+    //    mutual join). The helper can't name a sibling's handle: it was
+    //    spawned before that handle existed. It can name the nursery, which
+    //    refuses spawn from a helper (9); and a later sibling that names an
+    //    EARLIER handle is refused here.
     {
         bool refused = false;
         try {
@@ -138,7 +143,8 @@ static int scope_tests(const jaal::unlocked& cap) {
                     while (!st.stop_requested()) std::this_thread::sleep_for(1ms);
                     return 2;
                 });
-                (void)n.spawn([&b] { return b.join(); });   // would wait on a sibling
+                auto a = n.spawn([&b] { return b.join(); });   // would wait on a sibling
+                (void)a.join();
             });
         } catch (const jaal::scope_misuse&) {
             refused = true;
@@ -151,7 +157,8 @@ static int scope_tests(const jaal::unlocked& cap) {
         bool refused = false;
         try {
             jaal::scope(cap, [&](jaal::nursery& n) {
-                (void)n.spawn([&n] { (void)n.spawn([] {}); });
+                auto h = n.spawn([&n] { auto x = n.spawn([] {}); });
+                h.join();
             });
         } catch (const jaal::scope_misuse&) {
             refused = true;
