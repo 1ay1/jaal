@@ -185,12 +185,26 @@ through a socket that blocks halfway.
 
 ## 4. Drawing
 
+The program describes what to draw with `view`, and the host decides what
+a drawing *is*. jaal itself never draws: it only carries the hook.
+
 ```cpp
+struct App {
+    // ...
+    static screen view(const Model& m);   // `screen` is YOUR type: cells, widgets, html
+};
+
+// in the host
 template <class K> void present(K& kernel) {
     const auto& m = kernel.model();
     if constexpr (jaal::Viewable<App, screen>) draw(App::view(m));
 }
 ```
+
+A host that needs a view can require `jaal::Viewable<P, screen>`, so a
+program without one (or with the wrong output type) fails to compile
+against it. A `view` that can't be called with the model is rejected at
+kernel start, even on hosts that never draw.
 
 `present` is called after any step that changed the model. jaal has no
 opinion about what a frame is: damage tracking and vsync are yours.
@@ -344,14 +358,14 @@ Don't start by testing it end to end. In order of cost:
 
 | what | how |
 |---|---|
-| the program's logic | `given<App>` — `update` as data, no kernel, no clock |
-| effects it asked for | `headless<App>` — a real kernel, a fake clock, effects recorded |
+| the program's logic | `given<App>` — `update` as data, tasks inline, no kernel, no clock |
+| effects it asked for | `headless<App>` — a real kernel, a fake clock, host effects recorded |
 | ordering and races | `sim<App>` + `explore()` — one seed controls everything |
 | your reactor use | the conformance suite in `tests/platform/conformance.cpp` |
 
 A host's own parsing (bytes to events) is ordinary code and deserves
 ordinary unit tests. What's worth testing through jaal is the part that
-touches subscriptions: that closing a pane stops its stream, that a resize
+touches the program: that closing a pane stops its stream, that a resize
 mid-keystroke doesn't lose the keystroke.
 
 ## Checklist

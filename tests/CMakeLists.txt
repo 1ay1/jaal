@@ -41,6 +41,8 @@ jaal_test(core_loop_bound_test core/loop_bound_test.cpp)
 # docs/reference.md's samples, compiled. A sample that doesn't build costs a
 # reader more than no sample; this breaks in the same commit as the API.
 jaal_test(docs_reference_examples docs/reference_examples.cpp)
+# docs/manual.md's walkthrough app, compiled and run section by section.
+jaal_test(docs_manual_examples docs/manual_examples.cpp)
 jaal_test(core_cmd_test core/cmd_test.cpp)
 jaal_test(core_sub_test core/sub_test.cpp)
 jaal_test(core_routing_test core/routing_test.cpp)

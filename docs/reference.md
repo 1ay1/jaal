@@ -2,8 +2,9 @@
 
 Every public type, what it's for, and what it refuses.
 
-The other docs answer different questions: [design.md](design.md) is how jaal
-is built, [decisions.md](decisions.md) is why it's built that way,
+The other docs answer different questions: [manual.md](manual.md) teaches
+jaal by building an app, [design.md](design.md) is how jaal is built,
+[decisions.md](decisions.md) is why it's built that way,
 [concurrency.md](concurrency.md) is the safety model. **This one is what you
 look things up in.**
 
@@ -16,9 +17,9 @@ compiler error.
 
 ## Contents
 
-- [The program](#the-program) — `Program`, `Model`, `Msg`, `update`, `subscribe`
-- [Effects: `Cmd`](#effects-cmd) — `none` `send` `after` `quit` `now` `random` `task` `task_isolated` `batch` `map`
-- [Subscriptions: `Sub`](#subscriptions-sub) — `none` `every` `stream` `on` `batch`
+- [The program](#the-program) — `Program`, `Model`, `Msg`, `update`, `subscribe`, `on`, `Event`
+- [Effects: `Cmd`](#effects-cmd) — `none` `send` `after` `quit` `now` `random` `perform` `attempt` `task` `cancel` `batch` `map`, keys
+- [Subscriptions: `Sub`](#subscriptions-sub) — `none` `every` `stream` `batch`
 - [Talking back: `Sink`](#talking-back-sink)
 - [Composition](#composition) — `child`, `children`, `debounce`
 - [Safety types](#safety-types) — `Sendable`, `Frozen`, `shared`, `Sync`, `co_owned`, `guarded`, `loop_bound`, `scope`, `handle`, `stop_group`, `worker_group`, `native_process`
@@ -758,29 +759,29 @@ jaal::run<App>(host);
 
 > ⚠️ **Template the context hooks.** If someone derives from your host to add
 > effects, the context becomes `host_context<Derived>`. A hook fixed to
-> `host_context<Base>` fails the `requires` test and is **silently skipped** —
-> for `attach`, that means input is never registered and the app takes no
-> keys. Take the context as a template parameter.
+> `host_context<Base>` doesn't match, and jaal rejects it at compile time
+> with the shape it expected. Take the context as a template parameter.
 
 ### `headless`
 
 Run a program with no host at all. Effects are recorded; you drive with
-messages.
+messages, input events and a clock you move.
 
 ```cpp
 jaal::headless<App> h;
 h.send(Msg{Inc{}});
+h.event(Key{'q'});             // through on(); App::Event says what it takes
+h.advance(200ms);              // timers fire at their own times
+h.run_until_idle();            // wait for background tasks to land
 CHECK(h.model().n == 1);
 ```
 
-> **Note:** the recorder has no task executor, so pool tasks don't complete
-> the way they do in a real run. If your assertion depends on a task landing,
-> use `sim` or a real host.
-
 ### `given`
 
-Runs tasks inline, deterministically. For a test that wants the task's result
-without a thread.
+Runs a reducer and its tasks inline, with no threads: `when(msg)` folds a
+message, `settle()` runs the tasks and `perform` bodies it asked for and
+folds what they send, `expect(...)` checks the model, `expect_effect<D>(n)`
+checks what the last `update` asked for.
 
 ### `sim`
 

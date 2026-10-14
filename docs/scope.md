@@ -30,7 +30,7 @@ Where it differs from Elm, and why:
 | `update` is pure by the language | pure by convention; replay and sim show violations | C++ can't prove purity |
 | models are immutable values | models are values you move through `update`; `Frozen` is required where it matters (`timeline`, `shared<T>`) | C++ has no deep immutability by default |
 | `view` is part of the program | optional; a host that draws asks for it | jaal also runs servers and tools with no screen |
-| `Task` / `Cmd` from a fixed library | `task` runs your C++ on another thread; `stream` is a keyed subscription running your code | the effects are open-ended, but what crosses threads is checked (`Sendable`) |
+| `Task` / `Cmd` from a fixed library | `perform`/`attempt`/`task` run your C++ on another thread; `stream` is a keyed subscription running your code | the effects are open-ended, but what crosses threads is checked (`Sendable`) |
 | no exceptions | a throwing `update` is a fault; `skip` keeps the old model, `stop` quits | C++ code can throw |
 | effects run by the runtime only | a host adds its own effect types (rows) | terminals, sockets, GUIs each need their own |
 
@@ -65,9 +65,13 @@ subscription lifecycle. Everything else is a library on top of `task` and
 |---|---|---|
 | `quit(code)` | effect | stop after the current batch |
 | `send(msg)` | effect | a message straight back into the loop, folded this step |
-| `after(d, msg)` | effect | one-shot timer |
-| `task(body, args...)` | effect | run once on the worker pool, result as a Msg |
+| `after(d, msg)` | effect | one-shot timer; with a key, a newer one replaces it (debounce) |
+| `perform<Ok>(body, args...)` | effect | run off the loop; its return value arrives as `Ok{value}` |
+| `attempt<Ok, Fail>(body, args...)` | effect | the same, and a throw arrives as `Fail{what()}` |
+| `task(body, args...)` | effect | run on the worker pool; the body sends any number of messages |
 | `task(isolated, body, args...)` | effect | same, on its own thread (for work that may hang) |
+| keys | all work | `perform`, `attempt`, `task` and `after` take an optional key: the newest with a key replaces the old one, whose late messages are dropped |
+| `cancel(key)` | effect | stop a keyed task or timer |
 | `now(f)` | effect | the kernel's clock as a Msg (simulated in tests) |
 | `random(f)` | effect | draws from the kernel's seeded generator as a Msg (reproducible) |
 | `child<C, Parent, Wrap>` | composition | one child program in a fixed slot |
@@ -90,8 +94,9 @@ subscription lifecycle. Everything else is a library on top of `task` and
 ### Runtime behaviour you can rely on
 
 - One message at a time, on one thread. `update` never needs a lock.
-- Events are routed one at a time with a re-subscribe between them, so a
-  key that changes the mode is seen by the next key's subscription.
+- Input is handled one event at a time by `on(model, event)`, which reads
+  the model the previous event left. So a key that changes the mode is seen
+  by the next key.
 - `subscribe` only runs when the model changed.
 - A `quit` stops the rest of the current batch; later effects don't run.
 - A long stall fires a repeating timer once, not in a burst.
@@ -166,11 +171,14 @@ The conformance suite runs the same checks against every reactor backend.
   `now` inline and folds what they send. `after`/`quit` are recorded, not
   run. Failures are collected with a field diff of what the last message
   changed, so one `report()` lists everything.
-- `headless<P>`: no screen, fake clock, records every effect instead of
-  running it. Timers fire when a test says `advance()`.
+- `headless<P>`: the real kernel with no screen and a fake clock. Host
+  effects are recorded instead of run; tasks run on the pool, and
+  `run_until_idle()` waits for them. Timers fire when a test says
+  `advance()`; `event()` drives input through `on()`.
 - `sim<P>`: deterministic simulation. One seed controls task latency,
   the order of anything due at the same instant, and injected task crashes
-  and hangs. Invariants are checked after every message. `explore()` runs
+  and hangs. `input(t, event)` drives the program's `on()` at a sim time.
+  Invariants are checked after every message. `explore()` runs
   a scenario over many seeds and returns the first one that breaks, with
   the message log that replays it through `jaal::replay`. Same seed, same
   run, on every platform (the RNG is jaal's own, not `<random>`'s).
@@ -249,6 +257,4 @@ These are **deliberate** — each one is someone else's job or a later layer.
   arm64 macOS under debug, asan, tsan and release.
 - **Simulated I/O** (sockets, files) for the sim, once there are I/O
   effects in a library to simulate.
-- **Fuzzing** of the reconciler, timer heap and routing.
-- **A user guide** (the README has a tour; there's no step-by-step guide).
-- **maya as a jaal host**, then agentty on top.
+- **Fuzzing** of the reconciler, timer heap and input routing.

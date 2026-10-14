@@ -11,7 +11,8 @@ platforms (Windows under wine).
 
 **Docs** live in [docs/](docs/):
 
-- [reference.md](docs/reference.md): **every public type, and what it refuses** — the page to look things up in
+- [manual.md](docs/manual.md): **start here** — builds one app step by step, from the first program to testing it under every thread order
+- [reference.md](docs/reference.md): every public type, and what it refuses — the page to look things up in
 - [scope.md](docs/scope.md): what jaal offers, what it doesn't, what's planned
 - [hosts.md](docs/hosts.md): how to write a host (a terminal, a GUI, a server)
 - [decisions.md](docs/decisions.md): the design decisions and why

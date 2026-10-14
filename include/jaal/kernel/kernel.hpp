@@ -1172,7 +1172,7 @@ private:
         const origin_id origin = inbox_.open_origin();
         live_origins_.insert(origin);
         auto [tagger, sink] = inbox_.sink_from(origin);
-        keyed_run run{origin, std::stop_source{}, std::move(tagger)};
+        keyed_run run{origin, std::stop_source{}, std::move(tagger), std::nullopt};
         auto own = run.stop.get_token();
         tasks_.insert_or_assign(std::move(x.key), std::move(run));
 
