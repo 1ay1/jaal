@@ -22,16 +22,13 @@ using jaal::sig;
 using jaal::signal_set;
 using clk = std::chrono::steady_clock;
 
-template <class Msg>
-using SigSub = jaal::Sub<Msg, jaal::fx::on_signal>;
-
 // ── 1. timers, a task, and quit with a code, for real ───────────────────
 struct Ticker {
     struct Model { int ticks = 0; int task = 0; };
     struct Tick {}; struct Done { int v; };
     using Msg = std::variant<Tick, Done>;
     using Cmd = jaal::Cmd<Msg>;
-    using Sub = SigSub<Msg>;
+    using Sub = jaal::Sub<Msg>;
     static Cmd init(Model&) {
         return Cmd::task([](jaal::Sink<Msg> out, std::stop_token, int x) {
             out.send(Done{x * 2});
@@ -96,13 +93,12 @@ static int idle_sleeps() {
 }
 
 #if !defined(_WIN32)
-// ── 3. a subscribed signal becomes a Msg ────────────────────────────────
+// ── 3. a handled signal becomes a Msg ────────────────────────────────────
 struct Handles {
     struct Model { bool got_int = false; };
     struct Sig { sig s; }; struct Ready {};
     using Msg = std::variant<Sig, Ready>;
     using Cmd = jaal::Cmd<Msg>;
-    using Sub = SigSub<Msg>;
     static Cmd init(Model&) { return Cmd::after(20ms, Ready{}); }
     static Cmd update(Model&, Ready) {
         ::raise(SIGINT);                             // arrives through the reactor
@@ -112,9 +108,7 @@ struct Handles {
         if (s.s == sig::interrupt) return Cmd::quit(11);      // handled: our code
         return {};
     }
-    static Sub subscribe(const Model&) {
-        return Sub::on_signal({sig::interrupt}, [](sig s) { return Msg{Sig{s}}; });
-    }
+    static Msg on(const Model&, sig s) { return Sig{s}; }
 };
 
 static int subscribed_signal() {

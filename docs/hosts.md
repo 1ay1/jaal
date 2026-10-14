@@ -23,13 +23,13 @@ from the library:
 
 ## The shape of it
 
-Everything is optional except `event_type`. A host is a plain struct: no base
-class, no virtuals, no registration. jaal detects each member with a
-`requires`, so you add only what you need and the rest costs nothing.
+Everything is optional. A host is a plain struct: no base class, no
+virtuals, no registration. jaal detects each member with a `requires`, so
+you add only what you need and the rest costs nothing.
 
 ```cpp
 struct my_host {
-    using event_type = std::variant<Key, Resize>;   // what routers see
+    using event_type = std::variant<Key, Resize>;   // what it emits
 
     void attach(jaal::host_context<my_host>& cx);    // register OS handles
     void on_ready(jaal::host_context<my_host>& cx, const jaal::readiness& r);
@@ -45,7 +45,8 @@ int main() { my_host h; return jaal::run<App>(h); }
 1. start the kernel (runs `init` and its `Cmd`)
 2. `attach`: you register your handles with the reactor
 3. wait for a deadline, a wake, a signal, or one of your handles
-4. `on_ready`: read the handle, `emit` events; they route through `subscribe`
+4. `on_ready`: read the handle, `emit` events; each goes to the program's
+   `on(model, event)` and is folded before the next
 5. `present`: draw, if the model changed
 6. repeat until quit, then `release` and `finish`
 
@@ -56,8 +57,8 @@ drive `kernel::step()` yourself instead of calling `run`. See
 
 ## 1. Events
 
-`event_type` is what your host produces and what the program's routers
-consume. Use a `std::variant` when you have several kinds:
+`event_type` is what your host emits. Events are plain structs; use a
+`std::variant` when you have several kinds:
 
 ```cpp
 struct Key    { char32_t ch; bool ctrl; };
@@ -65,64 +66,29 @@ struct Resize { int cols, rows; };
 using event_type = std::variant<Key, Resize>;
 ```
 
-A program doesn't subscribe to these directly — it subscribes to a **router**
-you define, which turns an event into an optional message. That's the piece
-that makes a host's input typed:
-
-```cpp
-// In your host's header, next to the events.
-struct on_key {
-    static constexpr std::string_view name = "on_key";
-    using event_type = Key;                        // which event it reads
-
-    template <class Msg> struct type {
-        std::function<std::optional<Msg>(Key)> f;
-    };
-    template <class F, class M>
-    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
-        using B = std::invoke_result_t<F, M>;
-        return {[g = std::move(e.f), f = std::forward<F>(f)](Key k) -> std::optional<B> {
-            if (auto m = g(k)) return f(std::move(*m));
-            return std::nullopt;
-        }};
-    }
-    /// Called on the loop thread with each event; nullopt = not for me.
-    template <class M>
-    static std::optional<M> route(const type<M>& p, const Key& k) { return p.f(k); }
-
-    template <class Self, class Msg> struct ctors {
-        template <class F>
-        [[nodiscard]] static Self on_key(F f) { return Self(type<Msg>{std::move(f)}); }
-    };
-};
-```
-
-Now a program writes `Sub::on_key(...)` and it only compiles on a host that
-produces `Key` events. The program lists the source in its `Sub`:
+That's all a host defines. The program handles them with `on` overloads,
+one per kind it cares about, the same way it handles messages with
+`update`:
 
 ```cpp
 struct App {
     // ... Model, Msg, Cmd, update ...
-    using Sub = jaal::Sub<Msg, on_key>;            // core sources + on_key
-
-    static Sub subscribe(const Model&) {
-        return Sub::on_key([](Key k) -> std::optional<Msg> {
-            if (k.ch == 'q') return Msg{Quit{}};
-            return std::nullopt;                   // ignored, not an error
-        });
+    static std::optional<Msg> on(const Model& m, const Key& k) {
+        if (k.ch == 'q') return Quit{};
+        if (m.searching) return SearchKey{k.ch};   // reads the model NOW
+        return std::nullopt;                       // ignored, not an error
     }
+    static Msg on(const Model&, const Resize& r) { return Resized{r.cols, r.rows}; }
+    static std::optional<Msg> on(const Model&, jaal::sig s);   // signals, if wanted
 };
 ```
 
-`on_signal` is a source like any other, so a program that also wants
-signals lists it too: `jaal::Sub<Msg, on_key, jaal::fx::on_signal>`.
-
-Routers are rebuilt on every `subscribe()`, so they may capture the model
-freely ([D13](decisions.md#d13-re-subscribe-between-events)). They run on the
-loop thread, so they need not be `Sendable`.
-
-If a router's `event_type` isn't one your host produces, the program won't
-compile against your host, and the error names the source. That's the point.
+- `on` gets the model as it is when the event arrives, so it never acts on
+  stale state, and there's nothing to keep in step with `subscribe`.
+- A kind with no overload is dropped. A program whose `on` overloads take
+  *nothing* your host sends doesn't compile against it, so a mismatch in
+  event types can't fail silently.
+- Signals are input too: `jaal::sig` joins your event variant automatically.
 
 ## 2. Attaching handles
 
@@ -390,9 +356,7 @@ mid-keystroke doesn't lose the keystroke.
 
 ## Checklist
 
-- [ ] `event_type` names every kind of input you produce
-- [ ] a router per event kind, each with `name`, `event_type`, `type<Msg>`,
-      `fmap`, `route`, `ctors`
+- [ ] `event_type` names every kind of input you emit (plain structs)
 - [ ] `attach` keeps its registrations
 - [ ] `on_ready` drains the handle and checks `hung_up()`
 - [ ] `release` restores global state, even when the program quit by signal

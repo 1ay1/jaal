@@ -69,6 +69,8 @@ jaal_test(kernel_worker_group_test kernel/worker_group_test.cpp)
 jaal_test(kernel_lock_order_test kernel/lock_order_test.cpp)
 # Keyed tasks (latest wins, cancel), perform and attempt.
 jaal_test(kernel_keyed_task_test kernel/keyed_task_test.cpp)
+# Input through on(const Model&, const Event&), composed too.
+jaal_test(kernel_input_test kernel/input_test.cpp)
 if(UNIX)
     # The audit's fixes: forged capabilities abort, shutdown is a barrier
     # every time, no blocking post under a lock, no wake after teardown.
@@ -316,8 +318,8 @@ jaal_compile_fail(NAME cap_bad_rank          SOURCE compile_fail/capability.cpp 
                   MATCH "jaal::rank: values are 1..65534")
 
 # kernel / hosts
-jaal_compile_fail(NAME router_event_not_produced SOURCE compile_fail/kernel.cpp CASE 1
-                  MATCH "jaal: a subscription routes events this host doesn't produce")
+jaal_compile_fail(NAME on_event_not_sent SOURCE compile_fail/kernel.cpp CASE 1
+                  MATCH "jaal: P::on is declared, but no overload takes an event this host sends")
 jaal_compile_fail(NAME timeline_needs_frozen_model SOURCE compile_fail/kernel.cpp CASE 2
                   MATCH "is not Frozen: it contains '[^']*shared_ptr[^']*', a pointer-like owner")
 jaal_compile_fail(NAME child_wrap_not_in_parent SOURCE compile_fail/kernel.cpp CASE 3

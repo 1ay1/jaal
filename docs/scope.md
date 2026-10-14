@@ -76,16 +76,15 @@ subscription lifecycle. Everything else is a library on top of `task` and
 | `debounce<T>` / `throttle` | model values | "settle before acting" and "at most once per interval" |
 | `every(d, msg)` | source | repeating timer; keeps its phase across model changes |
 | `stream(key, body, args...)` | source | long-running work; runs while subscribed, cancelled when not |
-| `on_signal(set, f)` | router | Ctrl+C, terminate, hangup, resize, child as messages. Unsubscribed interrupt/terminate/hangup stops with 128+signo; once the loop ends the handlers come off, so a second ^C during a slow shutdown kills the process |
+| `on(const Model&, const E&)` | input | host input and signals (Ctrl+C, terminate, hangup, resize, child) as messages, reading the live model. Unhandled interrupt/terminate/hangup stops with 128+signo; once the loop ends the handlers come off, so a second ^C during a slow shutdown kills the process |
 
 ### Extension points (for hosts and libraries)
 
 | | |
 |---|---|
 | `pure_fx<T, "name">` | a new effect in one line |
-| `router<Event, "name">` | a new event subscription in one line; `Sub::on(tag, f)` |
 | custom sources | anything with a key, started and stopped by the host |
-| hosts | supply events (a variant of kinds), run extra effects, draw |
+| hosts | supply events (plain structs, a variant of kinds), run extra effects, draw |
 | `HostFor<H, P>` | compile error when a host can't run an effect the program uses |
 
 ### Runtime behaviour you can rely on

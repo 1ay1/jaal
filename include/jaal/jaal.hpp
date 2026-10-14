@@ -5,7 +5,8 @@
 //
 // is everything an application needs: Program, Cmd/Sub, the core effects
 // and sources (quit, send, after, task, now, random, every, stream),
-// routers, composition (child, children), the kernel, run<P>(), the test
+// input (on(model, event)), composition (child, children), the kernel,
+// run<P>(), the test
 // hosts, faults, tracing, replay and resume. Platform backends come in
 // through run.hpp; nothing here names an OS.
 //
@@ -25,7 +26,6 @@
 #include "core/fx.hpp"
 #include "core/program.hpp"
 #include "core/rng.hpp"
-#include "core/router.hpp"
 #include "core/row.hpp"
 #include "core/sendable.hpp"
 #include "core/shared.hpp"

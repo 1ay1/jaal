@@ -31,7 +31,6 @@
 #include "core/program.hpp"
 #include "core/report.hpp"
 #include "core/rng.hpp"
-#include "core/router.hpp"
 #include "core/row.hpp"
 #include "core/sendable.hpp"
 #include "core/shared.hpp"

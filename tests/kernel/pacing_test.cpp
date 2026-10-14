@@ -42,7 +42,6 @@ struct Counter {
 
 /// Records what was drawn, and when.
 struct Recorder {
-    using event_type = jaal::signal_event;
     std::vector<int> drawn;  // the model each present() saw
     std::vector<std::chrono::steady_clock::time_point> at;
 
@@ -120,7 +119,6 @@ struct Burst {
 
 /// Records the model at each present(), and the time.
 struct BurstRecorder {
-    using event_type = jaal::signal_event;
     std::vector<int> drawn;
     std::vector<std::chrono::steady_clock::time_point> at;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

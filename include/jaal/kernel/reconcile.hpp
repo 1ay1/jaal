@@ -16,8 +16,8 @@
 //     same base key in this result gets ordinal n. So two every(1s) timers
 //     are two keys, and adding a third doesn't disturb the first two.
 //
-// Routers aren't reconciled: they're stateless and rebuilt from each Sub.
-// reconcile() hands them back in order for dispatch.
+// Sources only: a Sub carries timers, streams and host sources. Input is
+// the program's on(model, event), which has nothing to reconcile.
 
 #include <algorithm>
 #include <cstddef>
@@ -95,7 +95,7 @@ public:
     };
 
     /// Diff `next` against what's running, update the running set to match,
-    /// and return what changed. Routers are appended to `routers` in order.
+    /// and return what changed.
     ///
     /// Performance. Subscription sets are usually small, so the storage is
     /// FLAT vectors, reused across calls: no hashing, no nodes, and a linear
@@ -111,8 +111,7 @@ public:
     /// flat vectors get a hash index beside them, built once per call and
     /// reused; lookups become O(1) and the whole diff O(n). Below it,
     /// nothing changes and nothing is allocated.
-    template <class RouterSink>
-    const plan& reconcile(const basic_sub<Msg, row_type>& next, RouterSink&& routers) {
+    const plan& reconcile(const basic_sub<Msg, row_type>& next) {
         want_.clear();
         ordinals_.clear();
         plan_.clear();
@@ -120,7 +119,7 @@ public:
         ord_indexed_ = false;
 
         next.for_each([&]<class X>(const X& x) {
-            (take_leaf<Ds>(x, routers), ...);
+            (take_leaf<Ds>(x), ...);
         });
 
         // The running set is indexed once, for the two loops below, when
@@ -281,8 +280,8 @@ private:
 
     // One leaf of the flattened Sub, offered to descriptor D. Does nothing
     // unless x is D's payload.
-    template <class D, class X, class RouterSink>
-    void take_leaf(const X& x, RouterSink& routers) {
+    template <class D, class X>
+    void take_leaf(const X& x) {
         if constexpr (std::same_as<X, payload_t<D, Msg>>) {
             if constexpr (SourceDescriptor<D>) {
                 auto k = D::key(x);
@@ -294,8 +293,6 @@ private:
                 key tk{tagged_key<D>{std::move(k)}};
                 if (want_has(tk)) plan_.duplicates.push_back({tk});
                 else              want_add(std::move(tk), payload{x});
-            } else {
-                routers(x);
             }
         }
     }

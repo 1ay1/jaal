@@ -39,7 +39,7 @@ struct Ticker {
     using Msg = std::variant<Tick, Progress, Done, Checked, Interrupted>;
 
     using Cmd = jaal::Cmd<Msg, say>;                   // core effects + say
-    using Sub = jaal::Sub<Msg, jaal::fx::on_signal>;   // core sources + signals
+    using Sub = jaal::Sub<Msg>;                        // timers and streams
 
     static Cmd update(Model& m, Tick) {
         ++m.ticks;
@@ -66,15 +66,20 @@ struct Ticker {
     }
     static Cmd update(Model&, Interrupted) { return Cmd::batch(Say{"bye"}, Cmd::quit(0)); }
 
+    // Input, including signals, is an on() overload: the event and the
+    // model as it is right now. Nothing to subscribe, nothing to go stale.
+    static std::optional<Msg> on(const Model&, jaal::sig s) {
+        if (s == jaal::sig::interrupt) return Interrupted{};
+        return std::nullopt;
+    }
+
     static Sub subscribe(const Model& m) {
-        auto always = Sub::batch(
-            Sub::every(250ms, Tick{}),
-            Sub::on_signal({jaal::sig::interrupt}, [](jaal::sig) { return Msg{Interrupted{}}; }));
-        if (!m.fetching) return always;
+        auto tick = Sub::every(250ms, Tick{});
+        if (!m.fetching) return tick;
         // A stream lives exactly as long as this subscription does. When
         // `fetching` goes false, its stop_token fires and anything it still
         // sends is dropped.
-        return Sub::batch(std::move(always),
+        return Sub::batch(std::move(tick),
             Sub::stream("fetch", [](jaal::Sink<Msg> out, std::stop_token st, int steps) {
                 for (int i = 1; i <= steps && !st.stop_requested(); ++i) {
                     std::this_thread::sleep_for(100ms);      // pretend network
@@ -88,7 +93,6 @@ struct Ticker {
 // The host: runs `say` by printing. That's all a host has to be for a
 // program with one effect of its own.
 struct console {
-    using event_type = jaal::kernel::no_events;
     void handle(Say s) { std::printf("%s\n", s.text.c_str()); }
 };
 

@@ -235,12 +235,7 @@ private:
 };
 
 // The host: records effects like headless, and supplies the sim executor.
-//
-// `Event` is declared, never produced: the sim drives a program through
-// MESSAGES, not input. It has to be nameable anyway, because the kernel
-// type-checks a program's routers against the host's event_type — so a
-// program whose subscribe() routes key events (any TUI) would otherwise
-// fail to instantiate here with "routes events this host doesn't produce".
+// `Event` is what the scenario sends with sim::input().
 template <class Msg, class Event = kernel::no_events>
 struct host : recorder {
     using event_type = Event;
@@ -261,14 +256,14 @@ struct host : recorder {
 
 // ── sim ──────────────────────────────────────────────────────────────
 //
-// `Event` names the event type the program's routers expect. The sim never
-// produces one — it drives the program with messages — but the kernel
-// checks routers against the host's event_type, so a TUI program (whose
-// subscribe() routes keys) has to say what those are:
+// `Event` is the input the scenario will send with input(t, ev). It goes
+// through the program's on(model, event), so the input path is tested
+// under the same seeded interleavings as everything else:
 //
 //     jaal::sim<App, maya::terminal_events> s{seed};
+//     s.input(5ms, KeyEvent{'q'});
 //
-// A program with no routers leaves it at the default.
+// A program with no input leaves it at the default.
 template <Program P, class Event = kernel::no_events>
     requires std::copy_constructible<typename P::Msg>
 class sim {
@@ -296,6 +291,19 @@ public:
     void at(duration t, msg_type m) {
         world_.schedule(platform::sim_clock::time_point{} + t,
                         [this, m = std::move(m)]() mutable { k_.dispatch(std::move(m)); });
+    }
+
+    /// Deliver an input event at sim time `t`. It goes through the
+    /// program's on(model, event) on the model as it is THEN, exactly as a
+    /// real host's event would, so the input path is tested too.
+    void input(duration t, Event ev)
+        requires(!std::same_as<Event, kernel::no_events>)
+    {
+        world_.schedule(platform::sim_clock::time_point{} + t,
+                        [this, ev = std::move(ev)]() mutable {
+                            k_.clock().set(world_.now);
+                            (void)k_.route(ev, host_);
+                        });
     }
 
     /// Deliver `m` at a random time in [from, to]. Drawn now, from the seed.
@@ -413,8 +421,8 @@ struct explore_report {
 /// Run `scenario` (which sets up inputs and checks on a fresh sim) once per
 /// seed in [first, first + count). Stops at the first broken invariant.
 ///
-/// `Event` matches sim's: name the program's router event type, or leave it
-/// for a program with no routers.
+/// `Event` matches sim's: the input type the scenario sends, or leave it
+/// for a program with no input.
 template <Program P, class Event = kernel::no_events, class Scenario>
     requires std::invocable<Scenario&, sim<P, Event>&>
 explore_report<P> explore(std::uint64_t first, std::size_t count, sim_options opt,

@@ -11,14 +11,14 @@
 //   2. let the host register its handles (a tty fd, a listening socket, an
 //      X11 connection) with the reactor
 //   3. wait until the next deadline, a wake, a signal, or a host handle
-//   4. signals and host events go through the program's subscriptions; step
+//   4. signals and host events go to the program's on(model, event); step
 //   5. let the host draw (if it draws); repeat until quit; finish()
 //
 // ── the host interface ───────────────────────────────────────────────────
-// Everything is optional except event_type. A host provides what it needs:
+// Everything is optional. A host provides what it needs:
 //
 //   struct my_host {
-//       using event_type = std::variant<KeyEvent, MouseEvent>;   // what routers see
+//       using event_type = std::variant<KeyEvent, MouseEvent>;   // what it emits
 //
 //       // 2. register handles; keep the registrations, they unwatch on drop
 //       void attach(jaal::host_context<my_host>& cx);
@@ -48,19 +48,17 @@
 //       void release();
 //   };
 //
-// The host emits events through host_context::emit(ev). They're routed one
-// at a time, re-subscribing between them (the ^T m o rule), exactly as if
-// the kernel had read them itself.
+// The host emits events through host_context::emit(ev). Each goes to the
+// program's on(model, ev) on the model as it is right then, and is folded
+// before the next one (the ^T m o rule).
 //
-// Signals are a built-in event source: a program subscribes with
-// Sub::on_signal. A program that DOESN'T subscribe to interrupt/terminate/
-// hangup stops with 128 + signo (130 for Ctrl+C), so it's never left
-// un-killable because it forgot to ask. And once the loop has ended, the
-// handlers come OFF before shutdown runs (D34): shutdown can take seconds,
-// and a second ^C during it must kill the process, not queue a signal
-// nobody is reading any more. If the host's event_type is a
-// variant that includes signal_event, signals are routed through it;
-// otherwise signals get their own lane.
+// Signals are input too: a program handles them with
+// `static std::optional<Msg> on(const Model&, jaal::sig)`. A program that
+// doesn't turn interrupt/terminate/hangup into a message stops with
+// 128 + signo (130 for Ctrl+C), so it's never left un-killable because it
+// forgot to ask. And once the loop has ended, the handlers come OFF before
+// shutdown runs (D34): shutdown can take seconds, and a second ^C during it
+// must kill the process, not queue a signal nobody is reading any more.
 
 #include <chrono>
 #include <concepts>
@@ -91,82 +89,30 @@ using platform::signal_set;
 using platform::readiness;
 using platform::interest;
 
-// ── the signal router ────────────────────────────────────────────────────
-/// The event signals arrive as: which signals arrived (one per event).
-struct signal_event {
-    signal_set signals;
-};
-
-namespace fx {
-
-/// Sub::on_signal(set, f): call f for each signal in `set` that arrives.
-/// A router over signal_event, so it's rebuilt with every subscribe() and
-/// runs on the loop thread; f may capture.
-struct on_signal {
-    static constexpr std::string_view name = "on_signal";
-    using event_type = signal_event;
-
-    template <class Msg> struct type {
-        signal_set                              wanted;
-        std::function<std::optional<Msg>(sig)>  f;
-    };
-    template <class F, class M>
-    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
-        using B = std::invoke_result_t<F, M>;
-        return {e.wanted, [g = std::move(e.f), f = std::forward<F>(f)](sig s) -> std::optional<B> {
-            if (auto m = g(s)) return f(std::move(*m));
-            return std::nullopt;
-        }};
-    }
-    template <class M>
-    static std::optional<M> route(const type<M>& p, const signal_event& ev) {
-        for (auto s : ev.signals)
-            if (p.wanted.contains(s))
-                if (auto m = p.f(s)) return m;
-        return std::nullopt;
-    }
-
-    template <class Self, class Msg> struct ctors {
-        template <class F>
-            requires std::is_invocable_v<F&, sig>
-        [[nodiscard]] static Self on_signal(signal_set wanted, F f) {
-            using R = std::invoke_result_t<F&, sig>;
-            if constexpr (std::is_convertible_v<R, std::optional<Msg>>
-                          && !std::is_convertible_v<R, Msg>)
-                return Self(type<Msg>{wanted, std::move(f)});
-            else
-                return Self(type<Msg>{wanted, [f = std::move(f)](sig s) -> std::optional<Msg> {
-                    return Msg(f(s));
-                }});
-        }
-    };
-};
-
-}  // namespace fx
-
-/// The subscription row every run<P> program may use on top of core_src:
-/// signals. `jaal::run_src` = core_src + on_signal.
-using run_src = row_union<core_src, make_row<fx::on_signal>>;
-
 // ── host interface ───────────────────────────────────────────────────────
 
 /// A host with no screen and no input of its own: signals only.
-struct headless_host {
-    using event_type = signal_event;
-};
+struct headless_host {};
 
 namespace detail::run {
 
-// The event type the KERNEL sees: the host's, with signal_event folded in.
-//   host event E (not a variant)      → variant<E, signal_event>
-//   host event variant<A...>          → variant<A..., signal_event> (unless present)
-//   host event signal_event           → signal_event
-template <class E> struct with_signals { using type = std::variant<E, signal_event>; };
-template <> struct with_signals<signal_event> { using type = signal_event; };
+// The host's event type, or none for a host that emits nothing.
+template <class H> struct host_events { using type = kernel::no_events; };
+template <class H> requires requires { typename H::event_type; }
+struct host_events<H> { using type = typename H::event_type; };
+
+// The event type the KERNEL sees: the host's, with sig folded in, so one
+// on() overload set takes both.
+//   no events                         → sig
+//   host event E (not a variant)      → variant<E, sig>
+//   host event variant<A...>          → variant<A..., sig> (unless present)
+template <class E> struct with_signals { using type = std::variant<E, sig>; };
+template <> struct with_signals<kernel::no_events> { using type = sig; };
+template <> struct with_signals<sig> { using type = sig; };
 template <class... A> struct with_signals<std::variant<A...>> {
-    using type = std::conditional_t<(std::same_as<A, signal_event> || ...),
+    using type = std::conditional_t<(std::same_as<A, sig> || ...),
                                     std::variant<A...>,
-                                    std::variant<A..., signal_event>>;
+                                    std::variant<A..., sig>>;
 };
 
 inline constexpr signal_set all_signals{sig::interrupt, sig::terminate, sig::hangup,
@@ -217,7 +163,10 @@ struct forward_host {
 }  // namespace detail::run
 
 template <class H>
-using kernel_event_t = typename detail::run::with_signals<typename H::event_type>::type;
+using host_event_t = typename detail::run::host_events<H>::type;
+
+template <class H>
+using kernel_event_t = typename detail::run::with_signals<host_event_t<H>>::type;
 
 namespace detail::run {
 /// Does the host still owe a frame it tried to draw and couldn't finish?
@@ -297,7 +246,6 @@ class basic_host_context {
 public:
     using reactor = platform::native_reactor;
     using event   = Event;
-
     /// Watch a handle. Keep the registration: dropping it unwatches. The
     /// token passed to on_ready() is `token` (host tokens can't collide
     /// with the driver's).
@@ -330,7 +278,7 @@ private:
 /// Derived inherits Base's event_type — which fixes the derived-host
 /// inheritance trap the review flagged.
 template <class H>
-using host_context = basic_host_context<typename H::event_type>;
+using host_context = basic_host_context<host_event_t<H>>;
 
 /// Run P on the native platform with host H. Returns the exit code.
 // ── host optional hooks: near-miss detection ────────────────────────────
@@ -474,7 +422,10 @@ int run(H& host, run_options opt, durable<P> d) {
     // Host events arriving from on_ready() route immediately, one at a time.
     host_context<H> cx(
         *reactor,
-        [&](const typename H::event_type& ev) { k.route(detail::run::to_kernel_event<KE>(ev), fwd); },
+        [&](const host_event_t<H>& ev) {
+            if constexpr (!std::same_as<host_event_t<H>, kernel::no_events>)
+                k.route(detail::run::to_kernel_event<KE>(ev), fwd);
+        },
         [&](int code) { k.stop(code); });
 
     if constexpr (requires { host.attach(cx); }) host.attach(cx);
@@ -556,7 +507,7 @@ int run(H& host, run_options opt, durable<P> d) {
                     // had no way to learn about a resize at all — it only
                     // sees its own handles, and the signal pipe isn't one.
                     if constexpr (requires { host.on_signal(cx, s); }) host.on_signal(cx, s);
-                    const auto produced = k.route(KE{signal_event{signal_set{s}}}, fwd);
+                    const auto produced = k.route(KE{s}, fwd);
                     if (produced == 0 && opt.default_signal_exit
                         && (s == sig::interrupt || s == sig::terminate || s == sig::hangup))
                         k.stop(detail::run::exit_code_for(s));

@@ -8,30 +8,23 @@
 // running and starts/stops things to match. Like Cmd, the Row says what
 // kinds of subscription are allowed, and a host must support them.
 //
-// Two kinds, kept apart because they have different lifetimes:
+// Everything in a Sub is a SOURCE: it has a lifetime (started, kept across
+// model changes, stopped) and a KEY. The reconciler keeps a running source
+// as long as a source with the same key keeps being returned, so a timer
+// keeps its phase. Descriptor: key(payload) -> key_type (regular, hashable).
 //
-//   ROUTERS  are stateless filters over the host's input events: "on a key,
-//            maybe produce this Msg". They run ON THE LOOP THREAD, inside
-//            dispatch, and are rebuilt every time subscribe() runs. So they
-//            may capture freely: nothing they capture can outlive the call
-//            that uses it. (This is maya's on_key / on_mouse.)
-//            Descriptor: route(payload, event) -> optional<Msg>.
-//
-//   SOURCES  have a lifetime: started, kept across model changes, stopped.
-//            A timer is one; a file watcher or a socket reader would be
-//            another. Each has a KEY. The reconciler keeps a running source
-//            as long as a source with the same key keeps being returned,
-//            so a timer keeps its phase.
-//            Descriptor: key(payload) -> key_type (regular, hashable).
+// Input is not a subscription. A program handles host input with an
+// on(const Model&, const Event&) overload (core/program.hpp), which reads
+// the model when the event arrives. So there is nothing to keep in step.
 //
 // Keys are compared per source kind: the running set is keyed by
 // (descriptor, key), a sum type. Two different kinds of source never
 // collide even if their key values are equal.
 //
 // A source that runs on another thread (a watcher, a reader) follows the
-// TASK rules, not the router rules: captureless, Sendable arguments. That's
-// the source descriptor's job; jaal's own `every` runs on the kernel's
-// timer heap and doesn't need a thread.
+// TASK rules: captureless, Sendable arguments. That's the source
+// descriptor's job; jaal's own `every` runs on the kernel's timer heap and
+// doesn't need a thread.
 
 #include <chrono>
 #include <concepts>
@@ -47,25 +40,14 @@
 
 #include "../meta/list.hpp"
 #include "effect.hpp"
-#include "router.hpp"
 #include "row.hpp"
 
 namespace jaal {
 
 // ── descriptor concepts ─────────────────────────────────────────────────
-// A subscription descriptor is an Effect (name, type<Msg>, fmap) plus
-// either a router or a source interface.
+// A subscription descriptor is an Effect (name, type<Msg>, fmap) with a
+// stable identity the reconciler can key on.
 
-/// Routes events of type D::event_type into an optional Msg.
-template <class D>
-concept RouterDescriptor = Effect<D> && requires {
-    typename D::event_type;
-} && requires(const payload_t<D, detail::probe::probe_msg>& p,
-              const typename D::event_type& ev) {
-    { D::route(p, ev) } -> std::same_as<std::optional<detail::probe::probe_msg>>;
-};
-
-/// Has a stable identity the reconciler can key on.
 template <class D>
 concept SourceDescriptor = Effect<D> && requires {
     typename D::key_type;
@@ -77,7 +59,7 @@ concept SourceDescriptor = Effect<D> && requires {
 };
 
 template <class D>
-concept SubDescriptor = RouterDescriptor<D> || SourceDescriptor<D>;
+concept SubDescriptor = SourceDescriptor<D>;
 
 // ── basic_sub ─────────────────────────────────────────────────────────────────
 template <class Msg, Row R> class basic_sub;
@@ -160,24 +142,6 @@ public:
     basic_sub& operator=(basic_sub&&) noexcept = default;
 
     [[nodiscard]] static basic_sub none() noexcept { return basic_sub{}; }
-
-    /// Sub::on(tag{}, f): subscribe to the router kind named by `tag` (a
-    /// jaal::router<Event, "name"> in this Sub's row). One name for every
-    /// router kind, so two routers never collide on a factory name.
-    template <class Tag, class F>
-        requires meta::member_of<Tag, meta::list<Ds...>>
-              && requires { typename Tag::template ctors<basic_sub, Msg>; }
-    [[nodiscard]] static basic_sub on(Tag t, F&& f) {
-        return Tag::template ctors<basic_sub, Msg>::on(t, std::forward<F>(f));
-    }
-    template <class Tag, class F>
-        requires (!meta::member_of<Tag, meta::list<Ds...>>)
-    static basic_sub on(Tag, F&&) {
-        static_assert(meta::member_of<Tag, meta::list<Ds...>>,
-                      "jaal: Sub::on(tag, f): this router isn't in the Sub's row; "
-                      "add it: jaal::Sub<Msg, ..., this_router>");
-        return basic_sub{};
-    }
 
     [[nodiscard]] static basic_sub batch(std::vector<basic_sub> subs) {
         Batch out;
@@ -308,11 +272,10 @@ struct tagged_key {
 };
 
 namespace detail::sub {
-// A row with NO source kinds (no subscribe, or routers only) still needs a
-// key type for the reconciler's maps. std::variant<> is ill-formed, so it
-// gets this instead: a type with no values. Nothing can construct one, so
-// the "a source of this kind" code paths are unreachable by type, not by
-// luck.
+// A row with NO source kinds still needs a key type for the reconciler's
+// maps. std::variant<> is ill-formed, so it gets this instead: a type with
+// no values. Nothing can construct one, so the "a source of this kind" code
+// paths are unreachable by type, not by luck.
 struct no_source_key {
     no_source_key() = delete;
     bool operator==(const no_source_key&) const = default;

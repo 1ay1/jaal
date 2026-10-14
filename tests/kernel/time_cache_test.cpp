@@ -17,20 +17,16 @@
 #include <cstdio>
 using namespace std::chrono_literals;
 struct Key { char c; };
-using on_key = jaal::router<Key, "on_key">;
 struct App {
     struct Model { int fired = 0; };
     struct Pressed {}; struct Fire {}; struct Keepalive {};
     using Msg = std::variant<Pressed, Fire, Keepalive>;
     using Cmd = jaal::Cmd<Msg>;
-    using Sub = jaal::Sub<Msg, on_key>;
     static Cmd init(Model&) { return Cmd::after(1h, Keepalive{}); }   // a timer: step reads the clock
     static Cmd update(Model&, Pressed) { return Cmd::after(10ms, Fire{}); }
     static Cmd update(Model& m, Fire) { ++m.fired; return {}; }
     static Cmd update(Model&, Keepalive) { return {}; }
-    static Sub subscribe(const Model&) {
-        return Sub::on(on_key{}, [](const Key&) -> std::optional<Msg> { return Pressed{}; });
-    }
+    static Msg on(const Model&, const Key&) { return Pressed{}; }
 };
 int main() {
   jaal::headless<App, Key> h;

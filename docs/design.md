@@ -959,7 +959,7 @@ jaal/
 │   │
 │   ├── kernel/
 │   │   ├── kernel.hpp            kernel<P, Event, Clock>: fold + interpret
-│   │   ├── run.hpp               run<P>(host), host_context, on_signal
+│   │   ├── run.hpp               run<P>(host), host_context, signals as input
 │   │   ├── reconcile.hpp         keyed source diffing
 │   │   ├── timer_heap.hpp        4-ary heap with stable handles
 │   │   ├── mailbox.hpp           MPSC queue + waker protocol

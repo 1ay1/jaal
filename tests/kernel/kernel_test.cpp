@@ -20,28 +20,8 @@ using namespace std::chrono_literals;
 using jaal::Sink;
 namespace fx = jaal::fx;
 
-// A router over a tiny "key" event, like maya's on_key.
+// A tiny "key" event, like maya's KeyEvent.
 struct Key { char c; };
-struct on_key {
-    static constexpr std::string_view name = "on_key";
-    using event_type = Key;
-    template <class Msg> struct type {
-        std::function<std::optional<Msg>(const Key&)> filter;
-    };
-    template <class F, class M>
-    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
-        using B = std::invoke_result_t<F, M>;
-        return {[g = std::move(e.filter), f = std::forward<F>(f)](const Key& k) -> std::optional<B> {
-            if (auto m = g(k)) return f(std::move(*m));
-            return std::nullopt;
-        }};
-    }
-    template <class M>
-    static std::optional<M> route(const type<M>& p, const Key& k) { return p.filter(k); }
-    template <class Self, class Msg> struct ctors {
-        template <class F> static Self on_key(F f) { return Self(type<Msg>{std::move(f)}); }
-    };
-};
 
 // A non-core effect, recorded by the headless host.
 struct Beep { int n; };
@@ -77,26 +57,23 @@ static int rule1() {
     return 0;
 }
 
-// ── rule 2: re-subscribe between events (the "^T m o" bug) ───────────────
+// ── rule 2: each event sees the model the last one left ("^T m o") ──────
 // ^T opens a picker. While the picker is open, keys go to it. A fast
-// terminal delivers "^T m o" in one read. If all three are routed through
-// the subscription from BEFORE ^T, m and o land in the editor.
+// terminal delivers "^T m o" in one read. If m and o were judged against
+// the model from BEFORE ^T, they'd land in the editor. on() reads the
+// model when the event arrives, so they can't.
 struct Picker {
     struct Model { bool picker = false; std::string editor, picked; };
     struct Open {}; struct EditorKey { char c; }; struct PickerKey { char c; };
     using Msg = std::variant<Open, EditorKey, PickerKey>;
     using Cmd = jaal::Cmd<Msg>;
-    using Sub = jaal::Sub<Msg, on_key>;
     static Cmd update(Model& m, Open)        { m.picker = true; return {}; }
     static Cmd update(Model& m, EditorKey e) { m.editor += e.c; return {}; }
     static Cmd update(Model& m, PickerKey p) { m.picked += p.c; return {}; }
-    static Sub subscribe(const Model& m) {
-        if (m.picker)
-            return Sub::on_key([](const Key& k) -> std::optional<Msg> { return PickerKey{k.c}; });
-        return Sub::on_key([](const Key& k) -> std::optional<Msg> {
-            if (k.c == '\x14') return Open{};             // ^T
-            return EditorKey{k.c};
-        });
+    static Msg on(const Model& m, const Key& k) {
+        if (m.picker)     return PickerKey{k.c};
+        if (k.c == '\x14') return Open{};             // ^T
+        return EditorKey{k.c};
     }
 };
 
@@ -257,30 +234,10 @@ static int budget() {
 }
 
 // ── a host with several event kinds (a terminal, a GUI) ──────────────────
-// The host's event type is a variant; each router takes one alternative.
-// on_key only sees keys, on_click only clicks, and routing stays one event
-// at a time with a re-subscribe between (the ^T m o rule still holds).
+// The host's event type is a variant; the program writes one on() per
+// alternative it cares about. Each sees the model the previous event left,
+// so turning clicks off with 'x' takes effect on the very next event.
 struct Click { int x, y; };
-struct on_click {
-    static constexpr std::string_view name = "on_click";
-    using event_type = Click;
-    template <class Msg> struct type {
-        std::function<std::optional<Msg>(const Click&)> filter;
-    };
-    template <class F, class M>
-    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
-        using B = std::invoke_result_t<F, M>;
-        return {[g = std::move(e.filter), f = std::forward<F>(f)](const Click& c) -> std::optional<B> {
-            if (auto m = g(c)) return f(std::move(*m));
-            return std::nullopt;
-        }};
-    }
-    template <class M>
-    static std::optional<M> route(const type<M>& p, const Click& c) { return p.filter(c); }
-    template <class Self, class Msg> struct ctors {
-        template <class F> static Self on_click(F f) { return Self(type<Msg>{std::move(f)}); }
-    };
-};
 using KeyOrClick = std::variant<Key, Click>;
 
 struct TwoKinds {
@@ -288,18 +245,16 @@ struct TwoKinds {
     struct K { char c; }; struct C {};
     using Msg = std::variant<K, C>;
     using Cmd = jaal::Cmd<Msg>;
-    using Sub = jaal::Sub<Msg, on_key, on_click>;
     static Cmd update(Model& m, K k) {
         m.keys += k.c;
         if (k.c == 'x') m.clicks_off = true;               // stop listening to clicks
         return {};
     }
     static Cmd update(Model& m, C) { ++m.clicks; return {}; }
-    static Sub subscribe(const Model& m) {
-        auto keys = Sub::on_key([](const Key& k) -> std::optional<Msg> { return K{k.c}; });
-        if (m.clicks_off) return keys;
-        return Sub::batch(std::move(keys),
-                          Sub::on_click([](const Click&) -> std::optional<Msg> { return C{}; }));
+    static Msg on(const Model&, const Key& k) { return K{k.c}; }
+    static std::optional<Msg> on(const Model& m, const Click&) {
+        if (m.clicks_off) return std::nullopt;
+        return C{};
     }
 };
 
@@ -316,12 +271,6 @@ static int variant_events() {
     if (h.model().clicks != 2) return 902;
     return 0;
 }
-
-static_assert(jaal::detail::host_ev::routable_v<KeyOrClick, Key>);
-static_assert(jaal::detail::host_ev::routable_v<KeyOrClick, Click>);
-static_assert(jaal::detail::host_ev::routable_v<Key, Key>);
-static_assert(!jaal::detail::host_ev::routable_v<Key, Click>);
-static_assert(!jaal::detail::host_ev::routable_v<std::variant<Key>, Click>);
 
 // ── HostFor: a host must run every effect the program returns ───────────
 struct NoBeepHost {

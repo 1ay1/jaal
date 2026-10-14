@@ -48,7 +48,6 @@ struct Stubborn {
     struct Bye {};
     using Msg = std::variant<Bye>;
     using Cmd = jaal::Cmd<Msg>;
-    using Sub = jaal::Sub<Msg, jaal::fx::on_signal>;
 
     static Cmd init(Model&) {
         return Cmd::task([](jaal::Sink<Msg>, std::stop_token) {
@@ -59,8 +58,9 @@ struct Stubborn {
         m.quitting = true;
         return Cmd::quit(0);
     }
-    static Sub subscribe(const Model&) {
-        return Sub::on_signal({jaal::sig::interrupt}, [](jaal::sig) { return Msg{Bye{}}; });
+    static std::optional<Msg> on(const Model&, jaal::sig s) {
+        if (s == jaal::sig::interrupt) return Bye{};
+        return std::nullopt;
     }
 };
 

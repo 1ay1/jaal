@@ -12,7 +12,8 @@
 //       static Cmd init(Model& m);                     // optional
 //       static Cmd update(Model& m, Inc);              // one per Msg case
 //       static Cmd update(Model& m, Reset);
-//       static Sub subscribe(const Model& m);          // optional
+//       static Sub subscribe(const Model& m);          // optional: timers, streams
+//       static std::optional<Msg> on(const Model&, const Key&);  // optional: input
 //   };
 //
 // That's the whole contract, and there is no second way to write it:
@@ -50,6 +51,7 @@
 
 #include <concepts>
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -368,6 +370,33 @@ concept has_subscribe = requires(const typename P::Model& m) {
     { P::subscribe(m) } -> std::same_as<typename P::Sub>;
 };
 
+// ── input: on(const Model&, const Event&) ──────────────────────────────────────
+//
+// A program turns host input into messages the same way it handles
+// messages: one overload per event type, picked by overload resolution.
+//
+//     static std::optional<Msg> on(const Model& m, const Key& k);
+//     static std::optional<Msg> on(const Model&, jaal::sig s);
+//
+// The kernel calls it with the model AS IT IS when the event arrives, so a
+// handler reads state instead of capturing it. Nothing can go stale, and
+// there is nothing for subs_key to cover.
+//
+// It may return a Msg (always fires), a std::optional<Msg> (nullopt: not
+// for us), or one of Msg's cases.
+JAAL_DECLARES_MEMBER(declares_on, on);
+
+template <class P, class E>
+concept reacts_to = requires(const typename P::Model& m, const E& e) {
+    { P::on(m, e) } -> std::convertible_to<std::optional<typename P::Msg>>;
+};
+
+// Does P handle E, or (for a variant event) any of E's alternatives?
+template <class P, class E> inline constexpr bool handles_any = reacts_to<P, E>;
+template <class P, class... Es>
+inline constexpr bool handles_any<P, std::variant<Es...>> =
+    reacts_to<P, std::variant<Es...>> || (reacts_to<P, Es> || ...);
+
 }  // namespace detail::prog
 
 // ── the concept ──────────────────────────────────────────────────────────
@@ -604,6 +633,25 @@ template <Program P>
 [[nodiscard]] sub_of<P> subscribe(const typename P::Model& m) {
     if constexpr (Subscribing<P>) return P::subscribe(m);
     else                          return sub_of<P>{};
+}
+
+/// Turn one input event into a message, reading the current model. A
+/// variant event goes to the overload for the alternative it holds. An
+/// event the program has no `on` for is nullopt: not every program wants
+/// every kind of input.
+template <Program P, class E>
+[[nodiscard]] std::optional<typename P::Msg> on(const typename P::Model& m, const E& ev) {
+    using Msg = typename P::Msg;
+    if constexpr (detail::prog::reacts_to<P, E>) {
+        return std::optional<Msg>(P::on(m, ev));
+    } else if constexpr (detail::prog::is_variant_v<E>) {
+        return std::visit([&]<class A>(const A& a) -> std::optional<Msg> {
+            if constexpr (detail::prog::reacts_to<P, A>) return std::optional<Msg>(P::on(m, a));
+            else                                         return std::nullopt;
+        }, ev);
+    } else {
+        return std::nullopt;
+    }
 }
 
 }  // namespace prog

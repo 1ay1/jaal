@@ -1,5 +1,5 @@
 // tests/kernel/features_test.cpp — streams, now, tracing, replay,
-// router<> with the program shape, and turn's exit representation.
+// input through on(Model, Event), and turn's exit representation.
 
 #include <jaal/jaal.hpp>
 
@@ -158,23 +158,19 @@ int replay() {
     return 0;
 }
 
-// ── router<> in a program's Sub ─────────────────────────────────────────
+// ── input: on(Model, Event) in a program ────────────────────────────────
 struct Key { char c; };
-using on_key = jaal::router<Key, "on_key">;
 
 struct Typist {
     struct Model { std::string typed; };
     using Msg = std::variant<Key>;
     using Cmd = jaal::Cmd<Msg>;
-    using Sub = jaal::Sub<Msg, on_key>;
     static Cmd update(Model& m, Key k) {
         m.typed += k.c;
         if (m.typed == "quit") return Cmd::quit(9);
         return {};                                    // no effects
     }
-    static Sub subscribe(const Model&) {
-        return Sub::on(on_key{}, [](const Key& k) { return Msg{k}; });
-    }
+    static Msg on(const Model&, const Key& k) { return k; }   // the event IS the message
 };
 static_assert(jaal::Program<Typist>);
 static_assert(std::is_same_v<jaal::fx_of<Typist>, jaal::core_fx>);

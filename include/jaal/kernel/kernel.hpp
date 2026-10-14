@@ -6,7 +6,7 @@
 // terminal or a socket is. Hosts do.
 //
 //   auto k = kernel<P, Clock>::start(host, clock);     // runs init + init Cmd
-//   k.route(host_event, host);                          // input → Msgs → fold
+//   k.route(host_event, host);                          // P::on(model, ev) → fold
 //   auto t = k.step(host);                              // bg msgs, timers, reconcile
 //   k.next_deadline();                                  // when to wake next
 //   std::move(k).finish();                              // ordered shutdown
@@ -14,8 +14,9 @@
 // What it carries over from maya's run<P>, each one a test in
 // tests/kernel/kernel_test.cpp:
 //   1. quit stops the rest of the batch: later Msgs' effects never run
-//   2. events are routed ONE AT A TIME, re-subscribing between them (the
-//      "^T m o" bug: m and o routed by the pre-^T subscription)
+//   2. events are handled ONE AT A TIME, each by P::on(model, event) on
+//      the model as the previous one left it (the "^T m o" bug: m and o
+//      routed by a filter captured before ^T)
 //   3. subscribe() only runs when the model changed
 //   4. a kept timer keeps its phase; two same-interval timers both fire
 //   5. after() can't overflow
@@ -139,25 +140,6 @@ consteval void require_host_for() {
     }
 }
 
-namespace detail::host_ev {  // in jaal::, not jaal::kernel::
-// Can a router over RE see events from a host whose event type is HE?
-//   HE == RE                       yes: every event is one
-//   HE == variant<..., RE, ...>    yes: when the variant holds an RE
-template <class HE, class RE> inline constexpr bool in_variant_v = false;
-template <class... Ts, class RE>
-inline constexpr bool in_variant_v<std::variant<Ts...>, RE> = (std::same_as<Ts, RE> || ...);
-
-template <class HE, class RE>
-inline constexpr bool routable_v = std::same_as<HE, RE> || in_variant_v<HE, RE>;
-
-/// The event as an RE, or null when this event is some other kind.
-template <class RE, class HE>
-const RE* as(const HE& ev) noexcept {
-    if constexpr (std::same_as<HE, RE>) return &ev;
-    else                                return std::get_if<RE>(&ev);
-}
-}  // namespace detail::host_ev
-
 namespace detail::rnd {
 /// A seed for a REAL run, when the caller didn't fix one. Mixes the OS
 /// entropy source with the clock, so two kernels started in the same
@@ -259,6 +241,16 @@ static_assert(!detail::prog::steady_program_clock<std::chrono::system_clock>,
 
 template <Program P, class Event = no_events, platform::Clock C = platform::steady_clock>
 class kernel {
+    // A program that declares on() must handle something this host can send.
+    // Otherwise every event would be dropped, silently: an on(const Key&)
+    // written for a host whose keys are KeyEvent.
+    static_assert(!detail::prog::declares_on<P> || std::same_as<Event, no_events>
+                      || detail::prog::handles_any<P, Event>,
+                  "jaal: P::on is declared, but no overload takes an event this host "
+                  "sends. Expected: static std::optional<Msg> on(const Model&, const E&) "
+                  "for E the host's event type or one of its variant alternatives "
+                  "(signals: jaal::sig).");
+
 public:
     using program    = P;
     using event_type = Event;
@@ -336,11 +328,17 @@ public:
         // timer it arms must count from NOW, not from the last step's time.
         // step() resets this too; route() is the other way into the fold.
         now_cached_ = false;
-        const auto before = pending_.size();
-        for (auto& r : routers_) r(ev, routed_);
-        for (auto& m : routed_) pending_.push_back({0, std::move(m)});
-        routed_.clear();
-        const auto produced = pending_.size() - before;
+        // The program reads the model as it is NOW. Nothing was captured
+        // earlier, so nothing can be stale: the ^T m o rule holds by
+        // construction, not by re-subscribing in time.
+        std::optional<msg_type> m;
+        try {
+            m = prog::on<P>(model_, ev);
+        } catch (...) {
+            fault_raised(fault_site::input, std::current_exception(), true);
+        }
+        const std::size_t produced = m ? 1 : 0;
+        if (m) pending_.push_back({0, std::move(*m)});
         // The fold happens HERE, not in the next step() — so step() will find
         // nothing pending and report model_changed = false, and a drawing
         // host would never redraw for this event. Found by driving maya's
@@ -984,10 +982,7 @@ private:
             return;
         }
 
-        routers_.clear();
-        const auto& plan = sources_.reconcile(*widened, [&]<class R>(const R& r) {
-            add_router(r);
-        });
+        const auto& plan = sources_.reconcile(*widened);
         try {
             for (auto& s : plan.stop)  stop_source(s.k, host);
             for (auto& s : plan.keep)  keep_source(s.k, s.p);
@@ -1026,34 +1021,6 @@ private:
         return false;
     }
 #endif
-
-    template <class R>
-    void add_router(const R& r) {
-        // Find the router descriptor whose payload is R, and bind it.
-        add_router_impl(r, typename sub_row::effects{});
-    }
-    template <class R, class... Ds>
-    void add_router_impl(const R& r, meta::list<Ds...>) {
-        ([&] {
-            if constexpr (RouterDescriptor<Ds> && std::same_as<R, payload_t<Ds, msg_type>>) {
-                // A router sees events of ONE type (key, mouse, signal...).
-                // It fits this host when that type is the host's event type,
-                // or one alternative of it when the host produces a variant
-                // (a terminal: keys, mouse, resize; a GUI: clicks, keys,
-                // window events). Anything else is a program/host mismatch,
-                // rejected at compile time rather than silently never firing.
-                using RE = typename Ds::event_type;
-                static_assert(::jaal::detail::host_ev::routable_v<event_type, RE>,
-                              "jaal: a subscription routes events this host doesn't "
-                              "produce (its event_type is neither the host's event "
-                              "type nor one of the host's variant alternatives)");
-                routers_.push_back([r](const event_type& ev, std::vector<msg_type>& out) {
-                    if (const RE* e = ::jaal::detail::host_ev::as<RE>(ev))
-                        if (auto m = Ds::route(r, *e)) out.push_back(std::move(*m));
-                });
-            }
-        }(), ...);
-    }
 
     using src_key     = typename running_sources<msg_type, sub_row>::key;
     using src_payload = typename running_sources<msg_type, sub_row>::payload;
@@ -1234,7 +1201,7 @@ private:
 
     // ── shutdown ────────────────────────────────────────────────────────
     // Fixed order (docs/design.md 4.7):
-    //   1. stop timers and routers       (nothing new becomes due)
+    //   1. stop timers                   (nothing new becomes due)
     //   2. stop workers: request stop on every task, join pool workers
     //      (isolated threads are asked to stop, not joined)
     //   3. close the mailbox: every Sink now returns false
@@ -1242,7 +1209,6 @@ private:
         if (down_) return;
         down_ = true;
         timers_.clear();
-        routers_.clear();
         timer_of_.clear();
         // Streams: retire and stop each, so nothing they send is folded.
         for (auto& [k, run] : streams_) {
@@ -1270,8 +1236,6 @@ private:
             }
         }
     }
-
-    using router_fn = std::function<void(const event_type&, std::vector<msg_type>&)>;
 
     std::function<void(const msg_type&)> record_;   // first: set before the ctor body folds
     C                   clock_;
@@ -1336,8 +1300,6 @@ private:
     std::unordered_map<src_key, running_timer, detail::rec::key_hash> timer_of_;
     std::unordered_map<src_key, stream_run, detail::rec::key_hash> streams_;
     std::unordered_map<std::string, keyed_run> tasks_;
-    std::vector<router_fn> routers_;
-    std::vector<msg_type>  routed_;              // scratch for route()
     std::vector<queued> pending_;
     std::vector<queued> batch_;                  // scratch for fold_pending, reused
     std::vector<typename inbox<msg_type>::entry> scratch_;

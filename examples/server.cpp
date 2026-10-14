@@ -42,14 +42,10 @@
 
 using namespace std::chrono_literals;
 
-// ── what the host reports, as subscription kinds ──────────────────────────
+// ── what the host reports: plain event types ─────────────────────────────
 struct Accepted { int fd; };
 struct Line     { int fd; std::string text; };
 struct Closed   { int fd; };
-
-using on_accept = jaal::router<Accepted, "on_accept">;
-using on_line   = jaal::router<Line, "on_line">;
-using on_close  = jaal::router<Closed, "on_close">;
 
 // ── what the program can ask the host to do ───────────────────────────────
 struct Reply { int fd; std::string text; };
@@ -71,7 +67,7 @@ struct Echo {
     using Msg = std::variant<Joined, Got, Left, Report, Stop>;
 
     using Cmd = jaal::Cmd<Msg, reply>;
-    using Sub = jaal::Sub<Msg, on_accept, on_line, on_close, jaal::fx::on_signal>;
+    using Sub = jaal::Sub<Msg>;
 
     static Cmd update(Model& m, Joined j) {
         m.conns[j.fd] = {};
@@ -101,15 +97,17 @@ struct Echo {
 
     static Cmd update(Model&, Stop) { return Cmd::quit(0); }
 
-    static Sub subscribe(const Model&) {
-        return Sub::batch(
-            Sub::on(on_accept{}, [](const Accepted& a) { return Msg{Joined{a.fd}}; }),
-            Sub::on(on_line{},   [](const Line& l) { return Msg{Got{l.fd, l.text}}; }),
-            Sub::on(on_close{},  [](const Closed& c) { return Msg{Left{c.fd}}; }),
-            Sub::every(30s, Report{}),
-            Sub::on_signal({jaal::sig::interrupt, jaal::sig::terminate},
-                           [](jaal::sig) { return Msg{Stop{}}; }));
+    // Input: one overload per event. Each sees the model as it is when the
+    // event arrives.
+    static Msg on(const Model&, const Accepted& a) { return Joined{a.fd}; }
+    static Msg on(const Model&, const Line& l)     { return Got{l.fd, l.text}; }
+    static Msg on(const Model&, const Closed& c)   { return Left{c.fd}; }
+    static std::optional<Msg> on(const Model&, jaal::sig s) {
+        if (s == jaal::sig::interrupt || s == jaal::sig::terminate) return Stop{};
+        return std::nullopt;
     }
+
+    static Sub subscribe(const Model&) { return Sub::every(30s, Report{}); }
 };
 
 // ── the host ──────────────────────────────────────────────────────────────

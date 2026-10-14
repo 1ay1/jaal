@@ -33,41 +33,6 @@ struct Key {
     char ch;
 };
 
-// ── the router: how a program subscribes to those events ─────────────────
-// A descriptor with an `event_type` is a router: the kernel offers it every
-// matching event and the program's callback turns it into a Msg, or not.
-struct on_key {
-    static constexpr std::string_view name = "on_key";
-    using event_type = Key;
-
-    template <class Msg> struct type {
-        std::function<std::optional<Msg>(Key)> f;
-    };
-
-    template <class F, class M>
-    static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
-        using B = std::invoke_result_t<F, M>;
-        return {[g = std::move(e.f), f = std::forward<F>(f)](Key k) -> std::optional<B> {
-            if (auto m = g(k)) return f(std::move(*m));
-            return std::nullopt;
-        }};
-    }
-
-    // On the loop thread, rebuilt every subscribe(): it may capture.
-    template <class M>
-    static std::optional<M> route(const type<M>& p, const Key& k) {
-        return p.f(k);
-    }
-
-    template <class Self, class Msg> struct ctors {
-        template <class F>
-            requires std::is_invocable_v<F&, Key>
-        [[nodiscard]] static Self on_key(F f) {
-            return Self(type<Msg>{std::move(f)});
-        }
-    };
-};
-
 // ── a host effect: something only this host can do ───────────────────────
 struct Bell {};
 using ring_bell = jaal::pure_fx<Bell, "ring_bell">;
@@ -83,10 +48,9 @@ struct Counter {
     struct Quit {};
     using Msg = std::variant<Typed, Ring, Quit>;
 
-    // Core effects and sources are always in; list only what this program
-    // adds. A host that can't do these won't compile.
+    // Core effects are always in; list only what this program adds. A host
+    // that can't do these won't compile.
     using Cmd = jaal::Cmd<Msg, ring_bell>;
-    using Sub = jaal::Sub<Msg, on_key, jaal::fx::on_signal>;
 
     static Cmd update(Model& m, Typed) {
         ++m.typed;
@@ -99,15 +63,16 @@ struct Counter {
     }
     static Cmd update(Model&, Quit) { return Cmd::quit(0); }
 
-    static Sub subscribe(const Model&) {
-        return Sub::batch(
-            Sub::on_key([](Key k) -> std::optional<Msg> {
-                if (k.ch == 'q') return Msg{Quit{}};
-                if (k.ch == 'b') return Msg{Ring{}};
-                if (k.ch == '\n') return std::nullopt;     // ignored
-                return Msg{Typed{}};
-            }),
-            Sub::on_signal({jaal::sig::interrupt}, [](jaal::sig) { return Msg{Quit{}}; }));
+    // Input: one on() per kind of event, reading the model as it is now.
+    static std::optional<Msg> on(const Model&, const Key& k) {
+        if (k.ch == 'q')  return Quit{};
+        if (k.ch == 'b')  return Ring{};
+        if (k.ch == '\n') return std::nullopt;             // ignored
+        return Typed{};
+    }
+    static std::optional<Msg> on(const Model&, jaal::sig s) {
+        if (s == jaal::sig::interrupt) return Quit{};
+        return std::nullopt;
     }
 };
 

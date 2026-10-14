@@ -254,6 +254,22 @@ public:
         if (subs.empty()) return sub_type::none();
         return sub_type::batch(std::move(subs));
     }
+
+    /// Forward an input event to ONE child (the focused tab, the hovered
+    /// row): its on() on its own model, wrapped with its id. Nullopt when
+    /// there's no such child or it doesn't want the event.
+    ///
+    ///   static std::optional<Msg> on(const Model& m, const Key& k) {
+    ///       return Tabs::on(m.tabs, m.focused, k);
+    ///   }
+    template <class E>
+    [[nodiscard]] static std::optional<typename Parent::Msg>
+    on(const map& ms, const id_type& id, const E& ev) {
+        auto it = ms.find(id);
+        if (it == ms.end()) return std::nullopt;
+        if (auto c = prog::on<Child>(it->second, ev)) return wrap<>(id, std::move(*c));
+        return std::nullopt;
+    }
 };
 
 }  // namespace jaal

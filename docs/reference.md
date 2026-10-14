@@ -43,12 +43,13 @@ struct Counter {
     using Msg = std::variant<Inc, Reset>;
 
     using Cmd = jaal::Cmd<Msg>;          // + your effects: Cmd<Msg, beep>
-    using Sub = jaal::Sub<Msg>;          // optional
+    using Sub = jaal::Sub<Msg>;          // optional: timers, streams
 
     static Cmd init(Model& m);           // optional
     static Cmd update(Model& m, Inc);    // one per Msg case
     static Cmd update(Model& m, Reset);
     static Sub subscribe(const Model& m);// optional
+    static std::optional<Msg> on(const Model& m, const Key& k);  // optional: input
 };
 ```
 
@@ -96,16 +97,43 @@ template <class M> static Cmd update(Model&, M);
 static Sub subscribe(const Model& m);
 ```
 
-What the program wants to hear about *right now*, as a function of state.
-The kernel diffs it against what's running and starts/stops to match. You
-never call "unsubscribe"; you stop returning it.
+What the program wants running *right now*, as a function of state: timers,
+streams, host sources. The kernel diffs it against what's running and
+starts/stops to match. You never call "unsubscribe"; you stop returning it.
+
+### `on`: input
+
+```cpp
+static std::optional<Msg> on(const Model& m, const Key& k);
+static std::optional<Msg> on(const Model& m, const Click& c);
+static std::optional<Msg> on(const Model&, jaal::sig s);    // signals are input too
+```
+
+How host input becomes a message. The same idea as `update`: one overload
+per event kind, picked by overload resolution.
+
+- It gets the model **as it is when the event arrives**. A burst like `^T m
+  o` (open a picker, then type into it) can't be judged against a stale
+  model, because nothing was captured earlier.
+- Return a `Msg`, a case of it, or `std::optional<Msg>` (nullopt: not for
+  this program right now).
+- An event kind with no overload is dropped. A host whose events match
+  *none* of your overloads is a compile error, so `on(const Key&)` written
+  against a host that sends `KeyEvent` can't silently do nothing.
+- If it throws, that's a fault at site `input`.
+- Unhandled `interrupt` / `terminate` / `hangup` still stop the program
+  (exit 130 and friends), so forgetting `on(sig)` never makes it unkillable.
+
+Input doesn't go through `subscribe`. There is nothing to keep in step and
+nothing for `subs_key` to cover. Routing one event costs ~14 ns.
 
 ### Optional hooks
 
 | Hook | Shape | Without it |
 |---|---|---|
 | `init` | `Cmd init(Model&)` | model is value-initialised |
-| `subscribe` | `Sub subscribe(const Model&)` | no events at all |
+| `subscribe` | `Sub subscribe(const Model&)` | no timers or streams |
+| `on` | `optional<Msg> on(const Model&, const E&)` | host input is dropped |
 | `subs_key` | `K subs_key(const Model&)`, `K` equality-comparable | `subscribe()` re-runs after **every** message |
 | `visual_hash` | `uint64_t visual_hash(const Model&)` | host redraws every wakeup |
 | `needs_warmup` | `bool needs_warmup(const Model&)` | no off-screen warm pass |
@@ -138,20 +166,10 @@ A **value**, not a hash: a hash can collide, and a collision keeps a stale
 subscription alive — a timer that should have stopped. Equality can't be
 wrong that way.
 
-**The rule that keeps it honest:** the key must cover everything
-`subscribe()` reads *and everything its routers capture*. That second half
-is the one that bites. A router may capture freely:
-
-```cpp
-Sub::on(on_key{}, [text = m.composer](const Key& k) { ... })
-```
-
-That holds a **copy** of `m.composer`. Skip the rebuild and the copy goes
-stale — the next key routes against old text. So a field a router captures
-belongs in the key even if `subscribe()` never mentions it.
-
-Debug builds check the source half for you (`subs_key` says unchanged,
-subscribe() disagrees → fault). **They cannot check captures.** Test those.
+The key must cover everything `subscribe()` reads. Debug builds check that
+for you: when `subs_key` says unchanged and `subscribe()` disagrees, that's
+a fault naming the problem. Input is `on()`, which reads the live model, so
+there is nothing else for the key to cover.
 
 ---
 
@@ -339,30 +357,19 @@ and reporting how it exited.
 
 ## Subscriptions: `Sub`
 
-What the program wants to hear about, as a function of state.
+What the program wants running, as a function of state.
 
 ```cpp
 static Sub subscribe(const Model& m) {
     if (!m.running) return Sub::none();
-    return Sub::batch(
-        Sub::every(std::chrono::milliseconds{16}, Tick{}),
-        Sub::on(on_key{}, [](const KeyEvent& k) -> std::optional<Msg> {
-            return k.ctrl && k.c == 'c' ? std::optional{Msg{Quit{}}}
-                                        : std::nullopt;
-        }));
+    return Sub::every(std::chrono::milliseconds{16}, Tick{});
 }
 ```
 
-Two kinds, with different lifetimes:
-
-**Routers** are stateless filters over host input: "on a key, maybe produce
-this Msg". Rebuilt every `subscribe()`, run on the loop thread. **They may
-capture freely** — nothing they capture outlives the call. (But see
-[`subs_key`](#subs_key-in-detail).)
-
-**Sources** have a lifetime — started, kept, stopped — and a **key**. The
-reconciler keeps a running source as long as a source with the same key keeps
-being returned, so a timer keeps its phase across unrelated model changes.
+Everything in a `Sub` has a lifetime (started, kept, stopped) and a
+**key**. The reconciler keeps a running source as long as a source with the
+same key keeps being returned, so a timer keeps its phase across unrelated
+model changes. (Input isn't a subscription: see [`on`](#on-input).)
 
 ### `Sub::every`
 
@@ -375,8 +382,8 @@ timers.
 
 ### `Sub::stream`
 
-Long-running work, as a subscription. **This is the answer to "how do I
-cancel a task".**
+Long-running work that should run exactly while the model says so: a
+download while `downloading`, a log tail while a pane is open.
 
 ```cpp
 static Sub subscribe(const Model& m) {
@@ -399,18 +406,6 @@ static Sub subscribe(const Model& m) {
   land in a model that moved on.
 
 Same body rules as `task`: captureless, `Sendable` arguments.
-
-### `Sub::on`
-
-```cpp
-using on_key = jaal::router<KeyEvent, "on_key">;
-Sub::on(on_key{}, [](const KeyEvent& k) -> std::optional<Msg> { ... });
-```
-
-`nullopt` means "not mine" — the event falls through.
-
-> **Refuses:** routing an event type the host doesn't produce. The error says
-> so, rather than a router that silently never fires.
 
 ---
 
@@ -446,12 +441,17 @@ using Ed = jaal::child<Editor, App, ToEditor>;
 
 struct Model { Editor::Model editor; };
 static Cmd update(Model& m, ToEditor t) { return Ed::update(m.editor, t); }
-static Sub subscribe(const Model& m)    { return Ed::subscribe(m.editor, "editor"); }
+static Sub subscribe(const Model& m)    { return Ed::subscribe(m.editor); }
+static std::optional<Msg> on(const Model& m, const Key& k) { return Ed::on(m.editor, k); }
 ```
 
-The child's Cmds and Subs are retargeted at the parent's Msg automatically.
-`subscribe` takes a **key prefix** — two children of the same type would
-otherwise collide on their stream keys.
+The child's Cmds, Subs and input are retargeted at the parent's Msg. Its
+stream and task keys live under the Wrap's name, so two children of the
+same type never collide. (`Ed::subscribe(m, "prefix")` names it yourself.)
+
+`Ed::on(m.editor, ev)` is the child's own `on`, on its own model, wrapped.
+The parent decides who gets input: forward to the focused child, try one
+then the other, or handle the key itself first.
 
 > **Refuses:** a `Wrap` that isn't a case of the parent's Msg, or a child
 > whose Cmd row has an effect the parent's doesn't list.
@@ -470,9 +470,14 @@ static Cmd update(Model& m, ToTab t)     { return Tabs::update(m.tabs, t); }
 static Cmd update(Model& m, NewTab)      { return Tabs::add(m.tabs).second; }
 static Cmd update(Model& m, CloseTab c)  { Tabs::remove(m.tabs, c.id); return {}; }
 static Sub subscribe(const Model& m)     { return Tabs::subscribe(m.tabs); }
+static std::optional<Msg> on(const Model& m, const Key& k) {
+    return Tabs::on(m.tabs, m.focused, k);  // input to the focused tab
+}
 ```
 
-Removing a child stops its subscriptions — that's what keying is for.
+Removing a child stops its subscriptions — that's what keying is for. Each
+child's stream and task keys live under its id, so two tabs both running
+`"search"` are two searches.
 
 > **Use it when children RUN.** A list of rows in a picker is not a list of
 > programs: if the entries have no Model of their own, no timers and no
@@ -778,10 +783,11 @@ CHECK(r.ok());
 Simulated time, seeded task-completion order, **every invariant re-checked
 after every message**. `sim_options` can inject crashed and lost tasks.
 
-For a program whose `subscribe()` routes input events, name the event type:
+Input goes in the same way, through your `on()`:
 
 ```cpp
-jaal::sim<App, maya::terminal_events> s{seed};
+jaal::sim<App, Key> s{seed};
+s.input(5ms, Key{'q'});         // at sim time 5ms, on(model, Key{'q'})
 ```
 
 **`explore`** runs the same scenario across many seeds — each reorders task
@@ -848,7 +854,7 @@ jaal's errors are written to be read. Most name the rule:
 | `a Sink's Msg must be Sendable` | your Msg holds a pointer or view |
 | `effect ... not in this Cmd's row` | add it to `Cmd<Msg, ...>` |
 | `host '...' cannot run effect '...'` | add `handle()` for it |
-| `a subscription routes events this host doesn't produce` | host's `event_type` doesn't cover it |
+| `P::on is declared, but no overload takes an event this host sends` | the parameter type doesn't match the host's event type |
 | `guarded::with/read returns something that points into` | return a copy |
 | `could not convert ... to 'jaal::below<...>'` | a lock taken out of rank order, or under one ranked at/above it: reorder, or give the outer lock a lower rank |
 | `... to 'const jaal::unlocked&'` from a `held<...>` | a blocking wait/join/shutdown inside a lock body: move it out |
@@ -872,7 +878,9 @@ struct App {
 
     static Cmd init(Model&);                    // optional
     static Cmd update(Model&, Leaf);            // one per leaf
-    static Sub subscribe(const Model&);         // optional
+    static Sub subscribe(const Model&);         // optional: timers, streams
+    static std::optional<Msg> on(const Model&, const Key&);  // optional: input
+    static std::optional<Msg> on(const Model&, jaal::sig);   // signals too
     static auto subs_key(const Model&);         // optional, big win
 };
 
@@ -885,10 +893,15 @@ Cmd::task([key,] body, args...)               // body sends through a Sink
 Cmd::cancel(key)                              // stop a keyed task
 // a key: the latest task with it wins, older ones stop and their messages drop
 
-// ── subscriptions ────────────────────────────────────────────────────
+// ── subscriptions ──────────────────────────────────────────────────────────────────
 Sub::none()  Sub::every(ms, msg)  Sub::batch(a, b)
-Sub::on(on_key{}, filter)                  // router: may capture
-Sub::stream(key, body, args...)            // source: STOPS when key goes
+Sub::stream(key, body, args...)            // runs while returned; STOPS when not
+
+// ── composition ───────────────────────────────────────────────────────────────────────
+using Ed   = jaal::child<Editor, App, ToEditor>;         // one slot
+using Tabs = jaal::children<Tab, App, ToTab>;            // keyed list
+Ed::update(m.editor, w)   Ed::subscribe(m.editor)   Ed::on(m.editor, ev)
+Tabs::add(m.tabs, id)     Tabs::remove(m.tabs, id)  Tabs::on(m.tabs, id, ev)
 
 // ── safety ───────────────────────────────────────────────────────────
 Sendable<T>  Frozen<T>  shared<T>  guarded<T, R>  loop_bound<T>  scope  handle
@@ -898,12 +911,11 @@ rank<N, "name">  leaf  unlocked  held<R>  below<R>  thread_root  JoinFree<T>
 jaal::headless<App>            // no host, records effects
 jaal::given<App>               // tasks run inline
 jaal::sim<App, Event>          // simulated time, seeded order, invariants
+                               //   s.at(t, msg)  s.input(t, event)
 jaal::explore<App, Event>(...) // the same, across seeds
 ```
 
-### Two things that cost real debugging time
+### The one thing that costs real debugging time
 
-1. **An unkeyed task can't be stopped.** Its stop_token only fires at
-   shutdown. If anything should stop it, give it a key.
-2. **`subs_key` must cover what routers CAPTURE**, not just what
-   `subscribe()` reads. The debug check can't see captures.
+**An unkeyed task can't be stopped.** Its stop_token only fires at
+shutdown. If anything should stop it, give it a key.

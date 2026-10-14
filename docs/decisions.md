@@ -153,6 +153,8 @@ position).
 
 ## D12. Routers vs sources
 
+*Superseded by [D43](#d43-input-is-onmodel-event-not-a-subscription).*
+
 **Decision.** Two kinds of subscription. Routers are stateless filters over
 host events, rebuilt every `subscribe()`, and may capture. Sources have a key
 and a lifetime.
@@ -162,6 +164,9 @@ runs on the loop thread inside dispatch, so capturing is safe. A source runs
 work that outlives a single call, so it follows the task rules.
 
 ## D13. Re-subscribe between events
+
+*Superseded by [D43](#d43-input-is-onmodel-event-not-a-subscription): the
+rule holds by construction now.*
 
 **Decision.** Host events are routed one at a time; the program is
 re-subscribed between them.
@@ -286,8 +291,8 @@ failure.
 **Decision.** An effect or source is built in only if it can't be written
 outside jaal, because it needs the kernel's clock, worker pool, fold or
 subscription lifecycle. The core is: `quit`, `send`, `after`, `task` (pool
-or isolated), `now`, `random`, `every`, `stream`, plus `on_signal` from
-`run()`.
+or isolated, optionally keyed), `cancel`, `now`, `random`, `every`,
+`stream`, plus input through `on(model, event)`.
 
 **Alternatives.** Ship common effects (HTTP, files, processes, logging) in
 the core.
@@ -1034,3 +1039,50 @@ program side, `_present` the member-template shape the address-of probe
 could not see, `_overloaded_view` the overload-set shape, and
 `_inherited_warmup` a hook drifted in a base. `host_drifted_attach` and
 `host_drifted_wait_hint` pin the host side.)
+
+## D43. Input is on(model, event), not a subscription
+
+**Decision.** A program turns host input into messages with overloads,
+`static std::optional<Msg> on(const Model&, const E&)`, one per event kind,
+signals included. The kernel calls the one for the event's type with the
+model as it is at that moment. Routers, `Sub::on`, `Sub::on_signal` and
+`router<>` are gone.
+
+**Alternatives.** Keep routers (D12) and live with their two traps; give
+routers the model as an extra parameter.
+
+**Why.** Routers captured state when `subscribe()` ran, so they could go
+stale. That is why D13 had to re-subscribe between events, and why
+`subs_key` had to cover what routers captured, a rule no check could
+enforce. Reading the live model removes both: there's nothing captured to
+go stale, `^T m o` is right by construction, and `subs_key` only covers
+what `subscribe()` reads, which debug builds do check. It's also the same
+shape as `update` (overload per type), one concept less to learn, and
+faster: an event costs ~14 ns end to end, against ~51 ns through a router
+rebuilt by `subscribe()`. Hosts get simpler too: an event is a plain struct,
+with no descriptor to write. A program whose `on` takes nothing the host
+sends is a compile error, so mismatched event types still can't fail
+silently. `child::on` / `children::on` forward input to a child, on its own
+model.
+
+**Cost.** Breaking: every program that used routers or `on_signal` moves
+its filters into `on` overloads. The filters themselves move over
+unchanged.
+
+## D44. Tasks can be keyed: latest wins, and cancel
+
+**Decision.** Every way to run work (`task`, `perform`, `attempt`) takes an
+optional key. Starting a key that's running stops the old task and drops
+everything it sends, even messages already queued. `Cmd::cancel(key)` does
+the same without starting one. `perform<Ok>` / `attempt<Ok, Fail>` deliver
+the body's return value (or its exception) as a message.
+
+**Alternatives.** Point people at `Sub::stream` for anything cancellable
+(what D21 said); a cancellation token in the model.
+
+**Why.** A one-shot task's stop_token fired only at shutdown, so "stop this
+when the user hits Esc" had no answer short of a stream, and search-as-you-
+type needed a debounce token checked by hand. A keyed task reuses the
+stream machinery (an origin the loop retires), so a replaced task's late
+result is dropped on the loop thread whatever the timing; `explore` checks
+it across seeds. Keys are per child, so two tabs' `"search"` don't collide.

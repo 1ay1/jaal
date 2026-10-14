@@ -137,12 +137,15 @@ struct WithFx {
 static_assert(jaal::Program<WithFx>);
 
 // ── "Composition: child" ─────────────────────────────────────────────────
+struct Key { char c; };
+
 struct Editor {
     struct Model { std::string text; };
     struct Typed { char c; };
     using Msg = std::variant<Typed>;
     using Cmd = jaal::Cmd<Msg>;
     static Cmd update(Model& m, Typed t) { m.text.push_back(t.c); return {}; }
+    static Msg on(const Model&, const Key& k) { return Typed{k.c}; }
 };
 
 struct WithChild {
@@ -155,11 +158,8 @@ struct WithChild {
     struct Model { Editor::Model editor; };
 
     static Cmd update(Model& m, ToEditor t) { return Ed::update(m.editor, t); }
-    // subscribe takes a key PREFIX: two children of the same type would
-    // otherwise collide on their stream keys.
-    static Sub subscribe(const Model& m) {
-        return Ed::subscribe(m.editor, "editor");
-    }
+    static Sub subscribe(const Model& m)    { return Ed::subscribe(m.editor); }
+    static std::optional<Msg> on(const Model& m, const Key& k) { return Ed::on(m.editor, k); }
 };
 static_assert(jaal::Program<WithChild>);
 
@@ -302,6 +302,14 @@ int main() {
         h.run_until_idle(std::chrono::seconds(3));
         if (h.model().error != "no url") return 10;
         if (h.model().results != std::vector<std::string>{"ki 1", "ki 2"}) return 11;
+    }
+
+    // ── child::on: input reaches the child through the parent ────────────────
+    {
+        jaal::headless<WithChild, Key> h;
+        h.event(Key{'h'});
+        h.event(Key{'i'});
+        if (h.model().editor.text != "hi") return 12;
     }
 
     return 0;

@@ -39,6 +39,7 @@
 // `Parent` is used only for its Msg, and only inside member functions, so
 // `using L = jaal::child<Counter, App, Left>;` may appear inside App itself.
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -221,7 +222,24 @@ private:
 
 public:
 
+    /// Forward an input event to the child: the child's on(), on its own
+    /// model, wrapped. Nullopt when the child doesn't want it.
+    ///
+    ///   static std::optional<Msg> on(const Model& m, const Key& k) {
+    ///       return Ed::on(m.editor, k);
+    ///   }
+    template <class E>
+    [[nodiscard]] static std::optional<typename Parent::Msg> on(const model_type& m, const E& ev) {
+        if (auto c = prog::on<Child>(m, ev)) return wrap<>(std::move(*c));
+        return std::nullopt;
+    }
+
     /// The child's subscriptions, mapped, with stream keys under `prefix/`.
+    /// The prefix defaults to the Wrap's name, so two child slots of the
+    /// same program never share a stream.
+    [[nodiscard]] static auto subscribe(const model_type& m) {
+        return subscribe(m, meta::type_name<Wrap>());
+    }
     [[nodiscard]] static auto subscribe(const model_type& m, std::string_view prefix) {
         auto s = prog::subscribe<Child>(m);
         if (!prefix.empty()) {
