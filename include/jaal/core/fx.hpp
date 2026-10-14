@@ -268,7 +268,43 @@ private:
 
 }  // namespace detail
 
-// ── descriptors ──────────────────────────────────────────────────────────
+// ── descriptors ──────────────────────────────────────────────────────────────────────────
+namespace fx {
+/// Where a task runs. A closed enum, so "which thread" is one of exactly
+/// two choices, spelled at the call site.
+enum class placement : std::uint8_t {
+    pool,       // the shared worker pool: short work, reused threads
+    isolated,   // its own detached thread: work that may hang (a stuck
+                // syscall leaks one thread instead of blocking the pool)
+};
+}  // namespace fx
+
+/// A name for work. A keyed task REPLACES the running task with the same
+/// key: the old one is asked to stop, and anything it sends from then on,
+/// even messages already queued, never reaches update(). A keyed `after`
+/// replaces the pending timer. Cmd::cancel(key) stops either.
+///
+///   return Cmd::task("search", body, m.query);             // latest wins
+///   return Cmd::after("save", 1s, Save{});                 // debounce
+///   return Cmd::task(jaal::key("scan", jaal::fx::isolated), body, dir);
+///
+/// Converts from a string, so a literal works wherever a key is taken.
+struct task_key {
+    std::string   name;
+    fx::placement where = fx::placement::pool;
+
+    task_key() = default;
+    task_key(const char* n) : name(n) {}                       // NOLINT: implicit on purpose
+    task_key(std::string n) : name(std::move(n)) {}            // NOLINT
+    task_key(std::string_view n) : name(n) {}                  // NOLINT
+    task_key(std::string n, fx::placement w) : name(std::move(n)), where(w) {}
+};
+
+/// A key with a placement: jaal::key("scan", jaal::fx::isolated).
+inline task_key key(std::string name, fx::placement where = fx::placement::pool) {
+    return task_key(std::move(name), where);
+}
+
 namespace fx {
 
 /// Stop the program after the current batch.
@@ -326,25 +362,37 @@ struct send {
 };
 
 /// Deliver msg after delay (one-shot timer).
+///
+/// With a key, a newer `after` with the same key REPLACES the pending one,
+/// so debouncing is one line:
+///
+///     return Cmd::after("search", 200ms, Fire{});   // restarts on every key
+///
+/// Cmd::cancel(key) drops a pending one. Keys are shared with tasks: an
+/// `after` and a task with the same key replace each other.
 struct after {
     static constexpr std::string_view name = "after";
     template <class Msg> struct type {
         std::chrono::milliseconds delay;
         Msg msg;
+        std::string key;          // empty: not keyed
     };
     template <class F, class M>
     static auto fmap(F&& f, type<M> e) -> type<std::invoke_result_t<F, M>> {
-        return {e.delay, std::invoke(std::forward<F>(f), std::move(e.msg))};
+        return {e.delay, std::invoke(std::forward<F>(f), std::move(e.msg)), std::move(e.key)};
     }
     template <class Id, class F, class M>
     static auto fmap_with(const Id& id, F&& f, type<M> e)
         -> type<std::invoke_result_t<F, const Id&, M>> {
-        return {e.delay, std::invoke(std::forward<F>(f), id, std::move(e.msg))};
+        return {e.delay, std::invoke(std::forward<F>(f), id, std::move(e.msg)), std::move(e.key)};
     }
 
     template <class Self, class Msg> struct ctors {
         [[nodiscard]] static Self after(std::chrono::milliseconds d, Msg m) {
-            return Self(type<Msg>{d, std::move(m)});
+            return Self(type<Msg>{d, std::move(m), {}});
+        }
+        [[nodiscard]] static Self after(task_key k, std::chrono::milliseconds d, Msg m) {
+            return Self(type<Msg>{d, std::move(m), std::move(k.name)});
         }
     };
 };
@@ -359,40 +407,7 @@ concept captureless_mapper =
     std::is_convertible_v<F, std::invoke_result_t<F, From> (*)(From)>;
 }  // namespace detail_task
 
-/// Where a task runs. A closed enum, so "which thread" is one of exactly
-/// two choices, spelled at the call site.
-enum class placement : std::uint8_t {
-    pool,       // the shared worker pool: short work, reused threads
-    isolated,   // its own detached thread: work that may hang (a stuck
-                // syscall leaks one thread instead of blocking the pool)
-};
-
 }  // namespace fx
-
-/// A task's name. A keyed task REPLACES the running task with the same key:
-/// the old one is asked to stop, and anything it sends from then on, even
-/// messages already queued, never reaches update(). Cmd::cancel(key) does
-/// the same without starting a new one.
-///
-///   return Cmd::task("search", body, m.query);             // latest wins
-///   return Cmd::task(jaal::key("scan", jaal::fx::isolated), body, dir);
-///
-/// Converts from a string, so a literal works wherever a key is taken.
-struct task_key {
-    std::string   name;
-    fx::placement where = fx::placement::pool;
-
-    task_key() = default;
-    task_key(const char* n) : name(n) {}                       // NOLINT: implicit on purpose
-    task_key(std::string n) : name(std::move(n)) {}            // NOLINT
-    task_key(std::string_view n) : name(n) {}                  // NOLINT
-    task_key(std::string n, fx::placement w) : name(std::move(n)), where(w) {}
-};
-
-/// A key with a placement: jaal::key("scan", jaal::fx::isolated).
-inline task_key key(std::string name, fx::placement where = fx::placement::pool) {
-    return task_key(std::move(name), where);
-}
 
 namespace detail_perform {
 

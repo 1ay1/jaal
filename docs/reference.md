@@ -204,6 +204,7 @@ row fails to compile with the effect **named**.
 | `Cmd::none()` | nothing (also `{}`) |
 | `Cmd::send(Msg)` | fold this message next, in the same step |
 | `Cmd::after(ms, Msg)` | fold it later |
+| `Cmd::after(key, ms, Msg)` | the same; a newer one with this key replaces it (debounce) |
 | `Cmd::quit(int = 0)` | end the program with this exit code |
 | `Cmd::now(f)` | `f(now)` → Msg; the clock as an effect, so tests control it |
 | `Cmd::random(f)` | `f(rng)` → Msg; seeded, so a test replays exactly |
@@ -278,6 +279,21 @@ Keys are per program: a `child` or `children` entry gets its own key space,
 so two tabs both running `"search"` are two tasks.
 
 A key can carry a placement: `jaal::key("scan", jaal::fx::isolated)`.
+
+**Keyed timers debounce.** `after` takes a key too. Each new one with the
+same key replaces the pending timer, so the message arrives once, after
+the input settles:
+
+```cpp
+static Cmd update(Model& m, Typed t) {
+    m.text += t.c;
+    return Cmd::after("settle", 200ms, Search{});    // restarts on every key
+}
+```
+
+If the old timer had already fired but its message wasn't folded yet,
+that message is dropped too. Tasks and timers share key space, so
+`Cmd::cancel("settle")` stops whichever is pending.
 
 #### `Cmd::task`
 
@@ -509,6 +525,11 @@ child's stream and task keys live under its id, so two tabs both running
 > streams, `children<>` buys you an id-wrapped Msg layer and nothing else.
 
 ### `debounce<T>`
+
+For most debouncing, a keyed `after` is enough and needs nothing in the
+model: `Cmd::after("settle", 200ms, Search{})`. Use `debounce<T>` when the
+*value* matters too, so that a result can be checked against the question
+it answered:
 
 A value whose in-flight work is invalidated by **token**, so a late answer
 to a superseded question is dropped without a hand-rolled staleness stamp.
@@ -916,7 +937,8 @@ Cmd::now(f)  Cmd::random(f)  Cmd::batch(a, b)     cmd.map(f)
 Cmd::perform<Ok>([key,] body, args...)        // result -> Ok{result}
 Cmd::attempt<Ok, Fail>([key,] body, args...)  // ... and a throw -> Fail{what}
 Cmd::task([key,] body, args...)               // body sends through a Sink
-Cmd::cancel(key)                              // stop a keyed task
+Cmd::after([key,] ms, msg)                    // keyed: debounce
+Cmd::cancel(key)                              // stop a keyed task or timer
 // a key: the latest task with it wins, older ones stop and their messages drop
 
 // ── subscriptions ──────────────────────────────────────────────────────────────────

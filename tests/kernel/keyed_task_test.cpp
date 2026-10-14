@@ -249,6 +249,54 @@ void sim_latest_wins() {
     if (!rep.ok()) std::puts(rep.failure->describe().c_str());
 }
 
+// ── 9: a keyed after is a debounce ─────────────────────────────────────────
+struct Debounced {
+    struct Model { std::string text; int fired = 0; std::string fired_for; };
+    struct Typed { char c; };
+    struct Fire {};
+    struct Esc {};
+    using Msg = std::variant<Typed, Fire, Esc>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Typed t) {
+        m.text += t.c;
+        return Cmd::after("settle", 100ms, Fire{});     // restarts on every key
+    }
+    static Cmd update(Model& m, Fire) { ++m.fired; m.fired_for = m.text; return {}; }
+    static Cmd update(Model&, Esc) { return Cmd::cancel("settle"); }
+};
+
+void keyed_after() {
+    std::printf("--- keyed after: debounce and cancel ---\n");
+    jaal::headless<Debounced> h;                       // sim clock: we move time
+    for (char c : std::string("jaal")) { h.send(Debounced::Typed{c}); h.advance(40ms); }
+    check(h.model().fired == 0, "each key restarts the timer: nothing fires while typing");
+    h.advance(100ms);
+    check(h.model().fired == 1 && h.model().fired_for == "jaal",
+          "it fires once, 100ms after the last key");
+
+    h.send(Debounced::Typed{'!'});
+    h.advance(50ms);
+    h.send(Debounced::Esc{});
+    h.advance(500ms);
+    check(h.model().fired == 1, "cancel drops a pending keyed timer");
+    check(!h.kernel().has_task("settle"), "and frees the key");
+
+    // The timer fires, and in the SAME step a key arrives before its Fire
+    // is folded. The new key replaces it, so that queued Fire must not run.
+    jaal::headless<Debounced> g;
+    g.send(Debounced::Typed{'a'});
+    auto& k = g.kernel();
+    g.advance(99ms);
+    k.clock().advance(1ms);                          // due now, not yet stepped
+    k.dispatch(Debounced::Typed{'b'});               // queued AHEAD of the fire
+    (void)k.step(g.record());                        // [Typed b, Fire(a)] in one step
+    g.advance(50ms);
+    check(g.model().fired == 0, "a fired timer replaced before its fold is dropped");
+    g.advance(60ms);
+    check(g.model().fired == 1 && g.model().fired_for == "ab",
+          "and the replacement fires on its own schedule");
+}
+
 // ── 8: given settles perform inline ──────────────────────────────────────
 void given_inline() {
     std::printf("--- given: perform/attempt settle inline ---\n");
@@ -273,6 +321,7 @@ int main() {
     perform_attempt();
     sim_latest_wins();
     given_inline();
+    keyed_after();
     std::printf(failures ? "FAILED (%d)\n" : "all ok\n", failures);
     return failures ? 1 : 0;
 }

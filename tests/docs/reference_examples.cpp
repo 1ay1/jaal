@@ -117,6 +117,21 @@ struct Perform {
     static Cmd update(Model&, Esc) { return Cmd::cancel("search"); }
 };
 static_assert(jaal::Program<Perform>);
+
+// ── "Keyed timers debounce" ──────────────────────────────────────────────────────────
+struct Settle {
+    struct Model { std::string text; int searches = 0; };
+    struct Typed { char c; };
+    struct Search {};
+    using Msg = std::variant<Typed, Search>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Typed t) {
+        m.text += t.c;
+        return Cmd::after("settle", 200ms, Search{});    // restarts on every key
+    }
+    static Cmd update(Model& m, Search) { ++m.searches; return {}; }
+};
+static_assert(jaal::Program<Settle>);
 // a key with a placement
 inline const jaal::task_key scan_key = jaal::key("scan", jaal::fx::isolated);
 
@@ -310,6 +325,14 @@ int main() {
         h.event(Key{'h'});
         h.event(Key{'i'});
         if (h.model().editor.text != "hi") return 12;
+    }
+
+    // ── keyed after: one search, after typing settles ─────────────────────
+    {
+        jaal::headless<Settle> h;
+        for (char c : std::string("jaal")) { h.send(Settle::Typed{c}); h.advance(50ms); }
+        h.advance(300ms);
+        if (h.model().searches != 1) return 13;
     }
 
     return 0;

@@ -853,7 +853,20 @@ private:
                 // the order the effects were returned. No timer involved.
                 pending_.push_back({0, std::move(x.msg)});
             } else if constexpr (std::same_as<U, payload_t<fx::after, msg_type>>) {
-                timers_.after(step_now(), x.delay, queued{0, std::move(x.msg)});
+                if (x.key.empty()) {
+                    timers_.after(step_now(), x.delay, queued{0, std::move(x.msg)});
+                } else {
+                    // Keyed: the newest replaces the pending one. It gets an
+                    // origin, so if the old one already fired and its message
+                    // is still waiting to be folded, that's dropped too.
+                    stop_keyed_task(x.key);
+                    const origin_id origin = inbox_.open_origin();
+                    live_origins_.insert(origin);
+                    const auto id = timers_.after(step_now(), x.delay,
+                                                  queued{origin, std::move(x.msg)});
+                    tasks_.insert_or_assign(std::move(x.key),
+                                            keyed_run{origin, std::stop_source{}, nullptr, id});
+                }
             } else if constexpr (std::same_as<U, payload_t<fx::task, msg_type>>) {
                 if (x.key.empty()) {
                     auto job = [t = std::make_shared<detail::task_thunk<msg_type>>(std::move(x.thunk)),
@@ -1151,6 +1164,7 @@ private:
         origin_id                                        origin;
         std::stop_source                                 stop;
         std::shared_ptr<detail::mailbox_iface<msg_type>> tagger;
+        std::optional<timer_id>                          timer;   // a keyed `after`
     };
 
     void start_keyed_task(payload_t<fx::task, msg_type>&& x) {
@@ -1179,6 +1193,7 @@ private:
         if (it == tasks_.end()) return;
         live_origins_.erase(it->second.origin);   // queued or batched: dropped at fold
         inbox_.retire(it->second.origin);         // still in the mailbox: dropped at drain
+        if (it->second.timer) (void)timers_.cancel(*it->second.timer);   // not fired yet
         it->second.stop.request_stop();
         tasks_.erase(it);
     }

@@ -87,6 +87,9 @@ void prefix_task_keys(C& c, std::string_view prefix) {
         } else if constexpr (in_row<fx::task, typename C::row_type>
                              && std::same_as<U, payload_t<fx::task, M>>) {
             if (!x.key.empty()) x.key.insert(0, prefix.data(), prefix.size());
+        } else if constexpr (in_row<fx::after, typename C::row_type>
+                             && std::same_as<U, payload_t<fx::after, M>>) {
+            if (!x.key.empty()) x.key.insert(0, prefix.data(), prefix.size());
         } else if constexpr (in_row<fx::cancel, typename C::row_type>
                              && std::same_as<U, payload_t<fx::cancel, M>>) {
             x.key.insert(0, prefix.data(), prefix.size());

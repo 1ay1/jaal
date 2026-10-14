@@ -3,11 +3,11 @@
 A typed Elm runtime for C++, plus the platform layer it runs on.
 
 You write `update`. jaal runs the loop, the timers, the background tasks and
-the OS waiting, on Linux, macOS and Windows. It doesn't draw anything:
-renderers like [maya](https://github.com/1ay1/maya) plug in as hosts.
+the OS waiting, on Linux, macOS and Windows. It doesn't draw anything: a
+renderer (a terminal UI, a GUI, a web socket) plugs in as a host.
 
-Status: core, kernel and platform layers are built and tested. maya doesn't
-run on it yet.
+Status: core, kernel and platform layers are built and tested on all three
+platforms (Windows under wine).
 
 **Docs** live in [docs/](docs/):
 
@@ -72,8 +72,9 @@ That's the whole shape, and there's only one way to write it:
   `'Counter' has no update for message 'Counter::Reset'; add: static Cmd update(Model&, Counter::Reset)`.
 - The `Cmd` type says which effects `update` can ask for. Returning one it
   doesn't list, or running on a host that can't do one, won't compile.
-- Signals arrive as messages on the loop thread. A program that doesn't
-  subscribe to Ctrl+C still stops on it (exit code 130), like any process.
+- Signals arrive as input, through `on(const Model&, jaal::sig)`. A program
+  that doesn't handle Ctrl+C still stops on it (exit code 130), like any
+  process.
 - The same program runs on the real platform (`jaal::run`), or on a
   simulated one with a fake clock for tests (`jaal::headless`).
 
@@ -84,6 +85,54 @@ shell starts with SIGINT ignored. In that case Ctrl+C won't reach it, the
 same as for any other program.
 
 Full example: [examples/ticker.cpp](examples/ticker.cpp).
+
+## Background work, Elm style
+
+Most background work computes one thing and hands it back. `perform` runs
+the body off the loop and delivers its return value as a message. No Sink,
+no send, no threads in your code:
+
+```cpp
+static Cmd update(Model& m, Open) {
+    return Cmd::attempt<Loaded, LoadFailed>([](const std::string& url) {
+        return fetch(url);                      // may throw: arrives as LoadFailed
+    }, m.url);
+}
+```
+
+Give it a key and the newest one wins. Search-as-you-type is one line, with
+no token to check by hand:
+
+```cpp
+static Cmd update(Model& m, Typed t) {
+    m.query = t.text;
+    return Cmd::perform<Results>("search", &search, m.query);   // replaces the last one
+}
+static Cmd update(Model&, Esc) { return Cmd::cancel("search"); }
+```
+
+A replaced task's stop_token fires, and nothing it sends reaches `update`,
+even a result it had already queued. That's decided on the loop thread, so
+no thread timing can let a stale result through. The body can't capture
+anything and its arguments must be safe to move to another thread; both
+are compile errors with a plain message, not a template dump.
+
+## Input reads the live model
+
+Keys, clicks and signals become messages through `on` overloads, one per
+kind of input, the same shape as `update`:
+
+```cpp
+static std::optional<Msg> on(const Model& m, const Key& k) {
+    if (m.picker_open) return PickerKey{k.c};    // the model as it is NOW
+    if (k.c == '\x14') return OpenPicker{};      // ^T
+    return Typed{k.c};
+}
+```
+
+A fast terminal can deliver `^T m o` in one read. Each key is judged
+against the model the previous one left, so `m` and `o` go to the picker
+that `^T` just opened. Routing a key costs about 14 ns.
 
 ## Finding races with a seed
 
@@ -174,9 +223,9 @@ drive the other. `children<>` prefixes each child's keys with its id, so they
 stay separate and stop independently. For a single child in a fixed slot,
 `jaal::child<>` is the simpler one.
 
-**Debouncing, without the stale-result bug.** A user types 8 characters; you
-want one search, for the last text, and no late answer overwriting a newer
-one.
+**Waiting for typing to settle.** Keyed tasks already throw away stale
+results. When you also want to wait until the user stops typing before
+starting at all, `debounce` holds the newest value and a token:
 
 ```cpp
 struct Model { jaal::debounce<std::string> query; };
@@ -184,9 +233,9 @@ struct Model { jaal::debounce<std::string> query; };
 static Cmd update(Model& m, Typed t) {           // each keystroke: newest wins
     return Cmd::after(200ms, Fire{m.query.set(t.text)});
 }
-static Cmd update(Model& m, Fire f) {            // a timer (or a result) arrives
+static Cmd update(Model& m, Fire f) {            // the timer arrives
     if (!m.query.ready(f.token)) return {};      // superseded: drop it
-    return search(m.query.value());
+    return Cmd::perform<Results>("search", &search, m.query.value());
 }
 ```
 
