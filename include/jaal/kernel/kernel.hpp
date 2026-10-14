@@ -312,12 +312,11 @@ public:
     }
 
     // ── input ───────────────────────────────────────────────────────────
-    /// Route ONE host event through the current subscriptions, then fold
-    /// the result and re-subscribe before the next event is routed. That
-    /// ordering is the fix for maya's "^T m o" bug.
+    /// Hand ONE host event to P::on(model, event), then fold the result
+    /// before the next event is routed (the ^T m o rule).
     ///
     /// Returns how many messages the event produced, so a driver can tell
-    /// "nobody subscribed to this" from "handled" (an unhandled Ctrl+C
+    /// "nobody handled this" from "handled" (an unhandled Ctrl+C
     /// should still stop the program).
     template <class H>
     std::size_t route(const event_type& ev, H& host) {

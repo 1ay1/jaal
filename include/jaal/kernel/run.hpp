@@ -254,9 +254,11 @@ public:
         return r_.watch(h, what, token + detail::run::kFirstHostToken);
     }
 
-    /// Hand one event to the program: routed now, then re-subscribed
-    /// before the next emit (the ^T m o rule).
-    void emit(const event& ev) { emit_(ev); }
+    /// Hand one event to the program: on(model, event) runs now and its Msg
+    /// is folded. Returns how many Msgs it produced (0 or 1), so a host can
+    /// tell "handled" from "nobody wanted this": a terminal host stops on an
+    /// unhandled Ctrl+C, which raw mode delivers as a key, not a SIGINT.
+    std::size_t emit(const event& ev) { return emit_(ev); }
 
     /// End the program with an exit code (the terminal went away, ...).
     void stop(int code) { stop_(code); }
@@ -265,11 +267,11 @@ public:
 
 private:
     template <Program P2, class H2> friend int run(H2&, run_options, durable<P2>);
-    basic_host_context(reactor& r, std::function<void(const event&)> e, std::function<void(int)> s)
+    basic_host_context(reactor& r, std::function<std::size_t(const event&)> e, std::function<void(int)> s)
         : r_(r), emit_(std::move(e)), stop_(std::move(s)) {}
-    reactor&                           r_;
-    std::function<void(const event&)>  emit_;
-    std::function<void(int)>           stop_;
+    reactor&                                  r_;
+    std::function<std::size_t(const event&)>  emit_;
+    std::function<void(int)>                  stop_;
 };
 
 /// The context type spelled the way host code writes it: `host_context<H>`.
@@ -422,9 +424,11 @@ int run(H& host, run_options opt, durable<P> d) {
     // Host events arriving from on_ready() route immediately, one at a time.
     host_context<H> cx(
         *reactor,
-        [&](const host_event_t<H>& ev) {
+        [&](const host_event_t<H>& ev) -> std::size_t {
             if constexpr (!std::same_as<host_event_t<H>, kernel::no_events>)
-                k.route(detail::run::to_kernel_event<KE>(ev), fwd);
+                return k.route(detail::run::to_kernel_event<KE>(ev), fwd);
+            else
+                return 0;
         },
         [&](int code) { k.stop(code); });
 
