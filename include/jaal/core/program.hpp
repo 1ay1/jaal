@@ -664,7 +664,11 @@ template <Program P, class E>
     using Msg = typename P::Msg;
     if constexpr (detail::prog::reacts_to<P, E>) {
         return std::optional<Msg>(P::on(m, ev));
-    } else if constexpr (detail::prog::is_variant_v<E>) {
+    } else if constexpr (detail::prog::handles_any<P, E>) {
+        // Guarded on handles_any, not just is_variant: a program with no on()
+        // at all must never reach the lambda, because clang looks up P::on
+        // when it substitutes P into the lambda, before the inner if
+        // constexpr can discard the call.
         return std::visit([&]<class A>(const A& a) -> std::optional<Msg> {
             if constexpr (detail::prog::reacts_to<P, A>) return std::optional<Msg>(P::on(m, a));
             else                                         return std::nullopt;
