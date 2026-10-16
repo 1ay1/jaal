@@ -25,6 +25,11 @@
 //   13. the same-process trap is REAL: two acquires in one process both
 //       succeed under fcntl. Pinned so a host relies on the documented
 //       behaviour instead of discovering it in production.
+//   14. acquire_within gives up on a lock another process keeps, on time
+//   15. acquire_within picks the lock up soon after the holder lets go
+//
+// acquire_within, every backend: free -> ours, busy -> nullopt at the
+// deadline, fault -> an error (the sim stages the last two).
 
 #include <jaal/platform/file_lock.hpp>
 #include <jaal/platform/sim/file_lock.hpp>
@@ -33,12 +38,15 @@
 #  include <jaal/platform/posix/file_lock.hpp>
 #endif
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 #if !defined(_WIN32)
 #  include <cerrno>
+#  include <csignal>
 #  include <sys/wait.h>
 #  include <unistd.h>
 #endif
@@ -217,6 +225,57 @@ void check_kernel(const std::string& target) {
         ok(second.has_value() && second->has_value(), b,
            "13. same-process acquire does NOT block (pair with jaal::guarded)");
     }
+
+    // 14 + 15. the bounded wait, against a real second process. The child
+    //     takes the lock, says so through a pipe, holds it `hold_ms`, exits.
+    using namespace std::chrono_literals;
+    using clk = std::chrono::steady_clock;
+    auto holder = [&](int hold_ms) {
+        int fds[2];
+        if (::pipe(fds) != 0) return pid_t{-1};
+        const pid_t pid = ::fork();
+        if (pid == 0) {
+            ::close(fds[0]);
+            auto l = pf::posix_file_lock::acquire(target);
+            const char c = l ? 'y' : 'n';
+            (void)!::write(fds[1], &c, 1);
+            std::this_thread::sleep_for(std::chrono::milliseconds{hold_ms});
+            ::_exit(0);
+        }
+        ::close(fds[1]);
+        char c = 0;
+        while (::read(fds[0], &c, 1) < 0 && errno == EINTR) {}
+        ::close(fds[0]);
+        return c == 'y' ? pid : pid_t{-1};
+    };
+    auto reap = [](pid_t pid) {
+        int st = 0;
+        while (pid > 0 && ::waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    };
+    {
+        const pid_t pid = holder(1500);
+        ok(pid > 0, b, "14. a child took the lock");
+        const auto t0  = clk::now();
+        auto got       = pf::acquire_within<pf::posix_file_lock>(target, 100ms);
+        const auto took = clk::now() - t0;
+        ok(got.has_value() && !got->has_value(), b,
+           "14. acquire_within reports busy (nullopt) when a process keeps it");
+        ok(took >= 100ms && took < 600ms, b,
+           "14. acquire_within gives up at its deadline, not later");
+        ::kill(pid, SIGKILL);
+        reap(pid);
+    }
+    {
+        const pid_t pid = holder(60);
+        ok(pid > 0, b, "15. a child took the lock");
+        const auto t0   = clk::now();
+        auto got        = pf::acquire_within<pf::posix_file_lock>(target, 5000ms);
+        const auto took = clk::now() - t0;
+        ok(got.has_value() && got->has_value() && (*got)->held(), b,
+           "15. acquire_within takes the lock once the holder lets go");
+        ok(took < 1000ms, b, "15. and promptly, not at its deadline");
+        reap(pid);
+    }
 }
 #endif
 
@@ -246,6 +305,20 @@ void check_degrade() {
     ok(contended.has_value(), b, "7. a busy lock is not an error");
     ok(contended.has_value() && !contended->has_value(), b,
        "7. a busy lock is nullopt, so 'busy' and 'broken' never merge");
+
+    // acquire_within keeps the same three outcomes apart.
+    using namespace std::chrono_literals;
+    auto timed_out = pf::acquire_within<pf::sim_file_lock>(busy, 20ms);
+    ok(timed_out.has_value() && !timed_out->has_value(), b,
+       "acquire_within: still busy at the deadline is nullopt");
+    pf::sim_file_lock::script().reset();
+    auto free_now = pf::acquire_within<pf::sim_file_lock>(busy, 20ms);
+    ok(free_now.has_value() && free_now->has_value(), b,
+       "acquire_within: a free lock is taken at once");
+    free_now = {};
+    pf::sim_file_lock::script().fail(t, EROFS);
+    auto broken = pf::acquire_within<pf::sim_file_lock>(t, 20ms);
+    ok(!broken.has_value(), b, "acquire_within: a fault is an error, not busy");
     pf::sim_file_lock::script().reset();
 }
 

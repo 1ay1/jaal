@@ -56,9 +56,12 @@
 // point is that another process can change them. So this hands you a scope,
 // and reading/writing inside it stays the caller's.
 
+#include <algorithm>
+#include <chrono>
 #include <concepts>
 #include <optional>
 #include <string>
+#include <thread>
 #include <type_traits>
 
 #include "../core/error.hpp"
@@ -118,6 +121,33 @@ concept FileLock =
 /// lock the same file through different sidecars and never contend.
 [[nodiscard]] inline std::string lock_sidecar_for(const std::string& target) {
     return target + ".lock";
+}
+
+/// Take the lock, waiting at most `limit`. nullopt means another process
+/// still held it at the deadline; an error means this filesystem can't lock.
+///
+/// acquire() waits forever, so one stopped holder (^Z, a debugger, a hung
+/// NFS mount) would stall every other process behind it. This bounds that.
+///
+/// The wait polls try_acquire with backoff, 1 ms doubling to 8 ms, so a
+/// released lock is picked up within a few ms. It sleeps directly rather
+/// than through delay_for: it waits for another PROCESS, which can't need
+/// any lock this thread holds, so it's legal inside a lock body.
+template <FileLock L>
+[[nodiscard]] result<std::optional<L>> acquire_within(const std::string& target,
+                                                      std::chrono::milliseconds limit,
+                                                      lock_mode m = lock_mode::exclusive) {
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + limit;
+    auto step = std::chrono::milliseconds{1};
+    for (;;) {
+        auto got = L::try_acquire(target, m);
+        if (!got || got->has_value()) return got;   // an error, or ours
+        const auto now = clock::now();
+        if (now >= deadline) return std::optional<L>{};
+        std::this_thread::sleep_for(std::min<clock::duration>(step, deadline - now));
+        step = std::min(step * 2, std::chrono::milliseconds{8});
+    }
 }
 
 }  // namespace jaal::platform
