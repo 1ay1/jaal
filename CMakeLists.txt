@@ -73,7 +73,7 @@ elseif(UNIX)
          src/platform/posix/file_lock.cpp
          src/platform/sim/process.cpp
          src/platform/sim/file_lock.cpp)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")
         list(APPEND JAAL_PLATFORM_SOURCES src/platform/linux/epoll_reactor.cpp)
     elseif(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD")
         list(APPEND JAAL_PLATFORM_SOURCES src/platform/darwin/kqueue_reactor.cpp)
