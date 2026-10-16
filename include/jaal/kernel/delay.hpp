@@ -44,17 +44,10 @@
 
 namespace jaal::kernel {
 
-/// Block for `d`, or until `st` is stopped, whichever comes first.
-///
-/// Returns true if the stop won (so the caller should bail), false if the
-/// duration elapsed normally. A default-constructed / never-stopped token
-/// makes this a plain sleep.
-///
-///     if (jaal::kernel::delay_for(st, 20s)) return;   // asked to stop
-///     do_the_work();
+namespace delay_detail {
+// The wait itself, shared by delay_for and backoff_for. True if stopped.
 template <class Rep, class Period>
-[[nodiscard]] inline bool delay_for(std::stop_token st,
-                                    std::chrono::duration<Rep, Period> d) {
+[[nodiscard]] inline bool timed_wait(std::stop_token st, std::chrono::duration<Rep, Period> d) {
     // Fast paths first: an already-stopped token and a non-positive duration
     // must not pay for a mutex, a condition variable and a stop_callback
     // registration. The second case is the common one in a retry loop whose
@@ -68,13 +61,47 @@ template <class Rep, class Period>
     // there is shared state to protect — the shared state IS the token.
     std::mutex                   m;
     std::condition_variable_any  cv;
-    // A sleep under a lock stalls every thread that needs it.
-    jaal::detail::cap::require_unlocked("delay_for");
     std::unique_lock             lk(m);
     // wait_for returns the PREDICATE's value, so making the predicate "were
     // we stopped" is what makes the result mean "stopped" rather than the
     // easily-inverted "did not time out".
     return cv.wait_for(lk, st, d, [&st] { return st.stop_requested(); });
+}
+}  // namespace delay_detail
+
+/// Block for `d`, or until `st` is stopped, whichever comes first.
+///
+/// Returns true if the stop won (so the caller should bail), false if the
+/// duration elapsed normally. A default-constructed / never-stopped token
+/// makes this a plain sleep.
+///
+///     if (jaal::kernel::delay_for(st, 20s)) return;   // asked to stop
+///     do_the_work();
+template <class Rep, class Period>
+[[nodiscard]] inline bool delay_for(std::stop_token st,
+                                    std::chrono::duration<Rep, Period> d) {
+    // A sleep under a lock stalls every thread that needs it.
+    jaal::detail::cap::require_unlocked("delay_for");
+    return delay_detail::timed_wait(std::move(st), d);
+}
+
+/// Longest pause backoff_for will take.
+inline constexpr std::chrono::milliseconds kMaxBackoff{2000};
+
+/// A short pause INSIDE an operation that may run under a lock: the retry
+/// backoff in an HTTP client whose caller holds a single-flight lane across
+/// the request (a token refresh). Such a lane already holds across the
+/// network wait, and this pause is part of that wait: it waits for time, not
+/// for another thread, so it can't deadlock. delay_for refuses it only
+/// because a long sleep under a lock stalls the lock's other users, so this
+/// one is capped at kMaxBackoff. Wakes on stop like delay_for; same result.
+///
+/// Use delay_for for everything else.
+template <class Rep, class Period>
+[[nodiscard]] inline bool backoff_for(std::stop_token st,
+                                      std::chrono::duration<Rep, Period> d) {
+    const auto ms = std::chrono::ceil<std::chrono::milliseconds>(d);
+    return delay_detail::timed_wait(std::move(st), ms > kMaxBackoff ? kMaxBackoff : ms);
 }
 
 }  // namespace jaal::kernel

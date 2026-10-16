@@ -88,6 +88,26 @@ void lies() {
         });
     }), "delay_for under a lock");
 
+    // backoff_for is the pause INSIDE an operation a lock is held across
+    // (an HTTP retry under a refresh lane): legal under a lock, and capped.
+    {
+        using clk = std::chrono::steady_clock;
+        const auto t0 = clk::now();
+        const bool stopped = jaal::thread_root([](const jaal::unlocked& u) {
+            return g_lo.with(u, [](int&) {
+                return jaal::kernel::backoff_for(std::stop_token{}, 20ms);
+            });
+        });
+        check(!stopped && clk::now() - t0 >= 20ms, "backoff_for under a lock waits, no abort");
+        std::stop_source src;
+        src.request_stop();
+        check(jaal::kernel::backoff_for(src.get_token(), 10s), "backoff_for wakes on stop");
+        const auto t1 = clk::now();
+        (void)jaal::kernel::backoff_for(std::stop_token{}, 0ms);
+        check(clk::now() - t1 < 50ms, "a zero backoff returns at once");
+        static_assert(jaal::kernel::kMaxBackoff == std::chrono::milliseconds{2000});
+    }
+
     // and the honest shape still works: hi taken under lo
     const int got = jaal::thread_root([](const jaal::unlocked& u) {
         return g_lo.with(u, [](const jaal::held<lo>& h, int&) {
