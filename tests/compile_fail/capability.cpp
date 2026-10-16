@@ -2,13 +2,17 @@
 // every way to smuggle a capability, fails to build. Each case is one bug
 // that a runtime checker could only catch if a test happened to run it.
 
+#include <jaal/kernel/delay.hpp>
 #include <jaal/kernel/guarded.hpp>
 #include <jaal/kernel/pool.hpp>
 #include <jaal/kernel/scope.hpp>
+#include <jaal/kernel/stop_group.hpp>
 #include <jaal/kernel/worker_group.hpp>
 
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <utility>
 
@@ -97,6 +101,27 @@ jaal::guarded<std::unique_ptr<jaal::kernel::worker_group>> slot;
 // a rank outside 1..65534
 using bad_rank = jaal::rank<0, "zero">;
 jaal::guarded<int, bad_rank> g;
+#elif JAAL_CASE == 16
+// a sleep under a lock: it stalls every thread that needs the lock
+void f(const jaal::unlocked& cap) {
+    outer.with(cap, [](const jaal::held<outer_rank>& h, int&) {
+        (void)jaal::kernel::delay_for(h, std::stop_token{}, std::chrono::milliseconds{1});
+    });
+}
+#elif JAAL_CASE == 17
+// waiting for a stop_group's members under a lock they may need
+jaal::kernel::stop_group g;
+void f(const jaal::unlocked& cap) {
+    outer.with(cap, [](const jaal::held<outer_rank>& h, int&) {
+        (void)g.stop_and_wait(h, std::nullopt);
+    });
+}
+#elif JAAL_CASE == 18
+// the same, through stop_group::wait
+jaal::kernel::stop_group g;
+void f(const jaal::unlocked& cap) {
+    outer.with(cap, [](const jaal::held<outer_rank>& h, int&) { g.wait(h); });
+}
 #else
 #  error "unknown JAAL_CASE"
 #endif

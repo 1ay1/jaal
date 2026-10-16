@@ -74,8 +74,10 @@ void lies() {
     check(aborts([] {
         jaal::thread_root([](const jaal::unlocked& u) {
             g_lo.with(u, [](int&) {
+                // A capability that lies (minted inside a lock body): the
+                // types can't see it, the run-time check must.
                 jaal::kernel::stop_group sg;
-                (void)sg.stop_and_wait(0ms);
+                (void)sg.stop_and_wait(jaal::cap_access::fresh_thread(), 0ms);
             });
         });
     }), "stop_group::stop_and_wait under a lock");
@@ -83,7 +85,8 @@ void lies() {
     check(aborts([] {
         jaal::thread_root([](const jaal::unlocked& u) {
             g_lo.with(u, [](int&) {
-                (void)jaal::kernel::delay_for(std::stop_token{}, 1ms);
+                (void)jaal::kernel::delay_for(jaal::cap_access::fresh_thread(),
+                                              std::stop_token{}, 1ms);
             });
         });
     }), "delay_for under a lock");

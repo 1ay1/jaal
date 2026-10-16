@@ -54,8 +54,8 @@ static int run(const jaal::unlocked& cap) {
     {
         auto f = flags_t::make();
         jaal::kernel::worker_group g;
-        g.post([](std::stop_token st, flags_t f) {
-            if (jaal::kernel::delay_for(st, 30s)) f->finished = true;
+        g.post([](const jaal::unlocked& job_cap, std::stop_token st, flags_t f) {
+            if (jaal::kernel::delay_for(job_cap, st, 30s)) f->finished = true;
         }, f);
         const auto t0 = std::chrono::steady_clock::now();
         g.stop(cap);

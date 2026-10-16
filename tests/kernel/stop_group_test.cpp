@@ -34,7 +34,7 @@ long long ms_since(clk::time_point t0) {
 }
 }  // namespace
 
-int main() {
+static int run(const jaal::unlocked& cap) {
     // 1. stop reaches a member, and the wait is event-driven.
     {
         jaal::kernel::stop_group g;
@@ -48,7 +48,7 @@ int main() {
         });
         while (!in) std::this_thread::yield();
         const auto t0    = clk::now();
-        const auto stuck = g.stop_and_wait(10s);
+        const auto stuck = g.stop_and_wait(cap, 10s);
         const auto took  = ms_since(t0);
         worker.join();
         ok(stuck == 0, "1. every member left");
@@ -59,7 +59,7 @@ int main() {
     // 2. admission closes with stop.
     {
         jaal::kernel::stop_group g;
-        (void)g.stop_and_wait(std::chrono::milliseconds{0});
+        (void)g.stop_and_wait(cap, std::chrono::milliseconds{0});
         ok(!g.join().has_value(), "2. join() after stop is refused");
     }
 
@@ -77,7 +77,7 @@ int main() {
                 // m leaves HERE, after `g` was destroyed below.
             });
             while (!in) std::this_thread::yield();
-            ok(g.stop_and_wait(30ms) == 1, "3. a short grace reports the straggler");
+            ok(g.stop_and_wait(cap, 30ms) == 1, "3. a short grace reports the straggler");
         }   // group destroyed while the member is still in
         release = true;
         straggler.join();
@@ -91,7 +91,11 @@ int main() {
         auto m = g.join();
         {
             std::stop_callback cb(m->token(), [&] { fired = true; });
-            std::thread stopper([&] { (void)g.stop_and_wait(std::chrono::milliseconds{0}); });
+            std::thread stopper([&] {
+                jaal::thread_root([&](const jaal::unlocked& c) {
+                    (void)g.stop_and_wait(c, std::chrono::milliseconds{0});
+                });
+            });
             stopper.join();
         }
         ok(fired.load(), "5. a stop_callback registered on the token fires");
@@ -101,4 +105,8 @@ int main() {
 
     if (failures == 0) std::puts("stop_group: all checks OK");
     return failures == 0 ? 0 : 1;
+}
+
+int main() {
+    return jaal::thread_root([](const jaal::unlocked& cap) { return run(cap); });
 }

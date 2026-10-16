@@ -61,7 +61,7 @@ static int run(const jaal::unlocked& cap) {
     {
         std::stop_source src;
         const auto       t0      = clk::now();
-        const bool       stopped = jaal::kernel::delay_for(src.get_token(), 60ms);
+        const bool       stopped = jaal::kernel::delay_for(cap, src.get_token(), 60ms);
         const auto       waited  = ms_since(t0);
         ok(!stopped, "1. an elapsed delay returns false");
         ok(waited >= 50, "1. and it really waited for the duration");
@@ -76,7 +76,7 @@ static int run(const jaal::unlocked& cap) {
             src.request_stop();
         });
         const auto t0      = clk::now();
-        const bool stopped = jaal::kernel::delay_for(src.get_token(), 10s);
+        const bool stopped = jaal::kernel::delay_for(cap, src.get_token(), 10s);
         const auto waited  = ms_since(t0);
         ok(stopped, "2. a stop during the wait returns true");
         ok(waited < 5000,
@@ -89,7 +89,7 @@ static int run(const jaal::unlocked& cap) {
         std::stop_source src;
         src.request_stop();
         const auto t0      = clk::now();
-        const bool stopped = jaal::kernel::delay_for(src.get_token(), 10s);
+        const bool stopped = jaal::kernel::delay_for(cap, src.get_token(), 10s);
         ok(stopped, "3. an already-stopped token returns true");
         ok(ms_since(t0) < 1000, "3. and does not wait at all");
     }
@@ -97,7 +97,7 @@ static int run(const jaal::unlocked& cap) {
     // A non-positive duration is not a stop: it elapsed, instantly.
     {
         std::stop_source src;
-        ok(!jaal::kernel::delay_for(src.get_token(), 0ms),
+        ok(!jaal::kernel::delay_for(cap, src.get_token(), 0ms),
            "a zero duration elapses rather than reporting a stop");
     }
 

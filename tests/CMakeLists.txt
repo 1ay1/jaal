@@ -328,6 +328,12 @@ jaal_compile_fail(NAME cap_joiner_in_lock    SOURCE compile_fail/capability.cpp 
                   MATCH "can't own a pool, worker_group")
 jaal_compile_fail(NAME cap_bad_rank          SOURCE compile_fail/capability.cpp CASE 15
                   MATCH "jaal::rank: values are 1..65534")
+jaal_compile_fail(NAME cap_delay_under_lock  SOURCE compile_fail/capability.cpp CASE 16
+                  MATCH "held<jaal::detail::cap::nothing>|unlocked")
+jaal_compile_fail(NAME cap_stop_group_under_lock SOURCE compile_fail/capability.cpp CASE 17
+                  MATCH "held<jaal::detail::cap::nothing>|unlocked")
+jaal_compile_fail(NAME cap_stop_group_wait_under_lock SOURCE compile_fail/capability.cpp CASE 18
+                  MATCH "held<jaal::detail::cap::nothing>|unlocked")
 
 # kernel / hosts
 jaal_compile_fail(NAME on_event_not_sent SOURCE compile_fail/kernel.cpp CASE 1

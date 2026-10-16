@@ -148,7 +148,8 @@ class stop_group {
     /// Wait for every member to leave on its own, WITHOUT requesting stop.
     /// For an owner that wants a job's natural end (a reader reaching EOF)
     /// rather than cancelling it. Admission stays open.
-    void wait() {
+    void wait(const unlocked&) {
+        jaal::detail::cap::require_unlocked("stop_group::wait");
         std::unique_lock lk(c_->m);
         c_->cv.wait(lk, [&] { return c_->live == 0; });
     }
@@ -158,8 +159,11 @@ class stop_group {
     /// after the grace with the count still running (0 = all out).
     ///
     /// Idempotent: a second call closes nothing new and just waits again.
-    std::size_t stop_and_wait(std::optional<std::chrono::milliseconds> grace) {
-        // A member may need any lock this thread holds to finish.
+    /// Takes `unlocked`: a member may need any lock this thread holds to
+    /// finish, so waiting for it under one doesn't compile.
+    std::size_t stop_and_wait(const unlocked&,
+                              std::optional<std::chrono::milliseconds> grace) {
+        // Still checked at run time, for a capability minted where it lied.
         jaal::detail::cap::require_unlocked("stop_group::stop_and_wait");
         {
             std::lock_guard lk(c_->m);

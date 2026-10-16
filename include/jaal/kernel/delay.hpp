@@ -75,12 +75,16 @@ template <class Rep, class Period>
 /// duration elapsed normally. A default-constructed / never-stopped token
 /// makes this a plain sleep.
 ///
-///     if (jaal::kernel::delay_for(st, 20s)) return;   // asked to stop
+/// Takes `unlocked`: a sleep under a lock stalls every thread that needs
+/// it, so one doesn't compile. Inside a lock, use backoff_for.
+///
+///     if (jaal::kernel::delay_for(cap, st, 20s)) return;   // asked to stop
 ///     do_the_work();
 template <class Rep, class Period>
-[[nodiscard]] inline bool delay_for(std::stop_token st,
+[[nodiscard]] inline bool delay_for(const unlocked&, std::stop_token st,
                                     std::chrono::duration<Rep, Period> d) {
-    // A sleep under a lock stalls every thread that needs it.
+    // Still checked at run time: a capability minted where it was a lie
+    // (thread_root inside a lock body) would otherwise slip through.
     jaal::detail::cap::require_unlocked("delay_for");
     return delay_detail::timed_wait(std::move(st), d);
 }
