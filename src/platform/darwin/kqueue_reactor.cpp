@@ -43,7 +43,9 @@ bool to_timespec(std::optional<std::chrono::milliseconds> t, timespec& ts) noexc
 struct kqueue_reactor::state {
     int kq = -1;
     struct slot {
-        int           fd = -1;
+        // The kevent ident: the fd, converted once in watch() after its
+        // fd >= 0 check, so every EV_SET is handed the type kqueue keys on.
+        std::uintptr_t ident = 0;
         interest      what{};
         std::uint64_t token = 0;
         bool          live  = false;
@@ -99,16 +101,16 @@ result<void> kqueue_reactor::registration::modify(interest what) {
     int n = 0;
     void* udata = reinterpret_cast<void*>(static_cast<std::uintptr_t>(slot_) + 1);
     if (wants_read(sl.what)  && !wants_read(what))
-        EV_SET(&evs[n++], sl.fd, EVFILT_READ,  EV_DELETE, 0, 0, nullptr);
+        EV_SET(&evs[n++], sl.ident, EVFILT_READ,  EV_DELETE, 0, 0, nullptr);
     if (wants_write(sl.what) && !wants_write(what))
-        EV_SET(&evs[n++], sl.fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+        EV_SET(&evs[n++], sl.ident, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
     if (n > 0) ::kevent(s->kq, evs, n, nullptr, 0, nullptr);   // fd may be gone: fine
 
     n = 0;
     if (!wants_read(sl.what)  && wants_read(what))
-        EV_SET(&evs[n++], sl.fd, EVFILT_READ,  EV_ADD, 0, 0, udata);
+        EV_SET(&evs[n++], sl.ident, EVFILT_READ,  EV_ADD, 0, 0, udata);
     if (!wants_write(sl.what) && wants_write(what))
-        EV_SET(&evs[n++], sl.fd, EVFILT_WRITE, EV_ADD, 0, 0, udata);
+        EV_SET(&evs[n++], sl.ident, EVFILT_WRITE, EV_ADD, 0, 0, udata);
     if (n > 0 && ::kevent(s->kq, evs, n, nullptr, 0, nullptr) != 0)
         return std::unexpected(error::from_errno(errno, "kevent modify"));
 
@@ -141,9 +143,10 @@ kqueue_reactor::waker_ref kqueue_reactor::waker() const noexcept {
 result<kqueue_reactor::registration>
 kqueue_reactor::watch(handle fd, interest what, std::uint64_t token) {
     if (fd < 0) return std::unexpected(error::make(std::errc::bad_file_descriptor, "watch: bad fd"));
+    const auto ident = static_cast<std::uintptr_t>(fd);   // fd >= 0, checked above
     auto& s = *s_;
     for (auto& sl : s.slots)
-        if (sl.live && sl.fd == fd)
+        if (sl.live && sl.ident == ident)
             return std::unexpected(error::make(std::errc::file_exists,
                                                "watch: fd already watched by this reactor"));
     std::uint32_t idx;
@@ -159,14 +162,14 @@ kqueue_reactor::watch(handle fd, interest what, std::uint64_t token) {
     struct kevent evs[2];
     int n = 0;
     void* udata = reinterpret_cast<void*>(static_cast<std::uintptr_t>(idx) + 1);
-    if (wants_read(what))  EV_SET(&evs[n++], fd, EVFILT_READ,  EV_ADD, 0, 0, udata);
-    if (wants_write(what)) EV_SET(&evs[n++], fd, EVFILT_WRITE, EV_ADD, 0, 0, udata);
+    if (wants_read(what))  EV_SET(&evs[n++], ident, EVFILT_READ,  EV_ADD, 0, 0, udata);
+    if (wants_write(what)) EV_SET(&evs[n++], ident, EVFILT_WRITE, EV_ADD, 0, 0, udata);
     if (::kevent(s.kq, evs, n, nullptr, 0, nullptr) != 0) {
         const int e = errno;
         s.free.push_back(idx);
         return std::unexpected(error::from_errno(e, "kevent add"));
     }
-    s.slots[idx] = {fd, what, token, true};
+    s.slots[idx] = {ident, what, token, true};
     return registration(std::weak_ptr<state>(s_), idx);
 }
 
@@ -175,8 +178,8 @@ void kqueue_reactor::unwatch(state& s, std::uint32_t slot) noexcept {
     auto& sl = s.slots[slot];
     struct kevent evs[2];
     int n = 0;
-    if (wants_read(sl.what))  EV_SET(&evs[n++], sl.fd, EVFILT_READ,  EV_DELETE, 0, 0, nullptr);
-    if (wants_write(sl.what)) EV_SET(&evs[n++], sl.fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+    if (wants_read(sl.what))  EV_SET(&evs[n++], sl.ident, EVFILT_READ,  EV_DELETE, 0, 0, nullptr);
+    if (wants_write(sl.what)) EV_SET(&evs[n++], sl.ident, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
     ::kevent(s.kq, evs, n, nullptr, 0, nullptr);      // fd may be closed already: fine
     sl.live = false;
     s.free.push_back(slot);
